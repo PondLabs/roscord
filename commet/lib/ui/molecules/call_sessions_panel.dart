@@ -5,6 +5,7 @@ import 'package:commet/client/room.dart';
 import 'package:commet/main.dart';
 import 'package:commet/ui/atoms/anchored_popover.dart';
 import 'package:commet/ui/atoms/speaking_indicator.dart';
+import 'package:commet/ui/molecules/call_session_live_panel.dart';
 import 'package:commet/ui/organisms/call_view/call_view.dart';
 import 'package:commet/ui/organisms/soundboard/soundboard_button.dart';
 import 'package:commet/ui/organisms/soundboard/soundboard_call_controller.dart';
@@ -102,15 +103,30 @@ class _CallSessionPanelState extends State<CallSessionPanel>
     super.dispose();
   }
 
+  void openRoom() {
+    EventBus.doOpenRoom(widget.session.roomId,
+        clientId: widget.session.client.identifier);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Material(
       color: Colors.transparent,
-      child: InkWell(
-        onTap: () {
-          EventBus.doOpenRoom(widget.session.roomId,
-              clientId: widget.session.client.identifier);
-        },
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          buildControlsRow(context),
+          // Grows the panel below the button row while sharing screen /
+          // camera; renders nothing otherwise.
+          CallSessionLivePanel(session: widget.session, onOpenRoom: openRoom),
+        ],
+      ),
+    );
+  }
+
+  Widget buildControlsRow(BuildContext context) {
+    return InkWell(
+        onTap: openRoom,
         child: SizedBox(
           height: widget.height,
           child: Row(
@@ -226,9 +242,7 @@ class _CallSessionPanelState extends State<CallSessionPanel>
               ),
             ],
           ),
-        ),
-      ),
-    );
+        ));
   }
 
   Widget pickAnimation({required VoipSession entry, required Widget child}) {

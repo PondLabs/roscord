@@ -7,6 +7,7 @@ import 'dart:async';
 import 'package:commet/client/components/soundboard/soundboard_catalog.dart';
 import 'package:commet/client/components/soundboard/soundboard_sound.dart';
 import 'package:commet/ui/atoms/anchored_popover.dart';
+import 'package:commet/ui/molecules/soundboard_emoji_picker.dart';
 import 'package:commet/ui/organisms/soundboard/soundboard_favorites.dart';
 import 'package:flutter/material.dart';
 import 'package:tiamat/tiamat.dart' as tiamat;
@@ -35,6 +36,9 @@ class SoundboardPopover extends StatefulWidget {
   final double volume01;
   final ValueChanged<double> onVolumeChanged;
 
+  /// Resolves custom Space emoji images; without it their fallback shows.
+  final SoundboardEmojiImageResolver? imageFor;
+
   const SoundboardPopover({
     super.key,
     required this.sources,
@@ -42,6 +46,7 @@ class SoundboardPopover extends StatefulWidget {
     required this.onPlay,
     required this.volume01,
     required this.onVolumeChanged,
+    this.imageFor,
   });
 
   static const double width = 540;
@@ -352,6 +357,7 @@ class _SoundboardPopoverState extends State<SoundboardPopover> {
       favorite: widget.favorites.contains(sound.soundId),
       onPlay: () => widget.onPlay(sound.soundId),
       onToggleFavorite: () => widget.favorites.toggle(sound.soundId),
+      imageFor: widget.imageFor,
     );
   }
 }
@@ -440,12 +446,14 @@ class _SoundTile extends StatefulWidget {
   final bool favorite;
   final VoidCallback onPlay;
   final VoidCallback onToggleFavorite;
+  final SoundboardEmojiImageResolver? imageFor;
 
   const _SoundTile({
     required this.sound,
     required this.favorite,
     required this.onPlay,
     required this.onToggleFavorite,
+    this.imageFor,
   });
 
   @override
@@ -485,7 +493,8 @@ class _SoundTileState extends State<_SoundTile> {
               child: Row(
                 children: [
                   const SizedBox(width: 8),
-                  Text(sound.emoji, style: const TextStyle(fontSize: 18)),
+                  SoundboardEmojiView(sound.emoji,
+                      image: widget.imageFor?.call(sound.emoji), size: 18),
                   const SizedBox(width: 6),
                   Expanded(
                     child: tiamat.Text.label(

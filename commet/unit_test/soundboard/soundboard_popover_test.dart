@@ -1,4 +1,5 @@
 import 'package:commet/client/components/soundboard/soundboard_catalog.dart';
+import 'package:commet/client/components/soundboard/soundboard_emoji.dart';
 import 'package:commet/client/components/soundboard/soundboard_sound.dart';
 import 'package:commet/ui/organisms/soundboard/soundboard_favorites.dart';
 import 'package:commet/ui/organisms/soundboard/soundboard_popover.dart';
@@ -10,7 +11,7 @@ SoundboardSound _sound(String id, String name, [String emoji = '📢']) =>
     SoundboardSound(
       soundId: id,
       name: name,
-      emoji: emoji,
+      emoji: SoundboardEmoji.unicode(emoji),
       mediaUri: 'mxc://x/$id',
       mimeType: 'audio/mpeg',
       durationMs: 2000,

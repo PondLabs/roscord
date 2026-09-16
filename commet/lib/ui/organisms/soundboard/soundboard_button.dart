@@ -1,5 +1,6 @@
 // Opens the soundboard popover above a call control. Disabled while the
 // user is deafened, like Discord.
+import 'package:commet/client/matrix/components/soundboard/matrix_soundboard_emoji_image.dart';
 import 'package:commet/ui/atoms/anchored_popover.dart';
 import 'package:commet/ui/organisms/soundboard/soundboard_call_controller.dart';
 import 'package:commet/ui/organisms/soundboard/soundboard_popover.dart';
@@ -60,6 +61,7 @@ class _SoundboardButtonState extends State<SoundboardButton> {
           onPlay: (id) => ctrl.soundboard?.trigger(id),
           volume01: ctrl.volume01,
           onVolumeChanged: ctrl.setVolume01,
+          imageFor: (emoji) => soundboardEmojiImage(emoji, ctrl.session.client),
         ),
       ),
     );
