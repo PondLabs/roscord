@@ -17,6 +17,7 @@ import 'package:commet/client/components/soundboard/soundboard_transport.dart';
 import 'package:commet/client/components/voip/voip_session.dart';
 import 'package:commet/client/components/voip_room/voip_room_component.dart';
 import 'package:commet/client/matrix/components/soundboard/livekit_soundboard_transport.dart';
+import 'package:commet/client/matrix/components/soundboard/matrix_soundboard_emoji_image.dart';
 import 'package:commet/client/matrix/components/soundboard/matrix_todevice_soundboard_transport.dart';
 import 'package:commet/client/matrix/components/soundboard/mediakit_soundboard_player.dart';
 import 'package:commet/client/matrix/matrix_client.dart';
@@ -37,6 +38,9 @@ class SoundboardCallController extends ChangeNotifier {
   bool _disposed = false;
   StreamSubscription? _engineSub;
 
+  /// Activations whose overlay has already been shown.
+  final Set<String> _shownEventIds = {};
+
   SoundboardCallController(this.session);
 
   Future<void> init() async {
@@ -44,12 +48,13 @@ class SoundboardCallController extends ChangeNotifier {
     // Decide before preloading: the user may leave the room while the catalog
     // downloads, and a late entrance sound would be wrong.
     final entranceSoundId = _claimEntranceSound();
-    final engine = SoundboardEngine(
-      player: MediaKitSoundboardPlayer(
-        resolveSound: (id) => catalog.getById(id),
-        resolvePlayableUri: _resolvePlayableUri,
-      ),
+    final player = MediaKitSoundboardPlayer(
+      resolveSound: (id) => catalog.getById(id),
+      resolvePlayableUri: _resolvePlayableUri,
     );
+    final engine = SoundboardEngine(player: player);
+    // Audio completion, not the overlay timer, ends an activation.
+    player.onInstanceFinished = engine.onAudioCompleted;
     // Bridge engine activations -> avatar overlays (sender-specific).
     engine.addListener(_syncOverlays);
     _engineSub = null; // engine uses sync listeners, not streams.
@@ -65,8 +70,7 @@ class SoundboardCallController extends ChangeNotifier {
       onError: (e, s, ctx) => Log.onError(e, s, content: 'Soundboard: $ctx'),
     );
     soundboard = sb;
-    final v = preferences.soundboardVolume.value / 100.0;
-    engine.setVolume(v.clamp(0.0, 1.5));
+    engine.setVolume(userVolume);
     // init() subscribes synchronously, then preloads the whole catalog; the
     // entrance sound doesn't wait for that (the player fetches it on demand).
     final initialized = sb.init();
@@ -143,11 +147,11 @@ class SoundboardCallController extends ChangeNotifier {
   Future<String> _resolvePlayableUri(SoundboardSound sound) =>
       resolvePlayableUri(session.client, sound);
 
+  /// Resolves mxc:// to a local cached file (fast replay, no per-click
+  /// download). MxcFileProvider handles cache + authenticated fetch.
+  /// media_kit cannot open mxc:// itself, so there is nothing to fall back to.
   static Future<String> resolvePlayableUri(
       Client client, SoundboardSound sound) async {
-    // Resolve mxc:// to a local cached file (fast replay, no per-click
-    // download). MxcFileProvider handles cache + authenticated fetch.
-    // media_kit cannot open mxc:// itself, so there is nothing to fall back to.
     final uri = Uri.parse(sound.mediaUri);
     if (client is! MatrixClient || uri.scheme != 'mxc') {
       throw StateError('Cannot play ${sound.mediaUri}');
@@ -173,19 +177,22 @@ class SoundboardCallController extends ChangeNotifier {
     if (_disposed) return;
     final engine = soundboard?.engine;
     if (engine == null) return;
+    _shownEventIds.retainAll(engine.active.keys);
     for (final entry in engine.active.values) {
+      if (!_shownEventIds.add(entry.eventId)) continue;
       final sound = catalog.getById(entry.soundId);
       if (sound == null) continue;
-      SoundboardOverlayRegistry.instance.show(
+      final shown = SoundboardOverlayRegistry.instance.show(
         userId: entry.senderId,
         soundId: entry.soundId,
         emoji: sound.emoji,
+        image: soundboardEmojiImage(sound.emoji, session.client),
         overlayMs: entry.overlayMs,
       );
-      // Auto-clear after overlay window so tiles don't stick.
+      // Auto-clear after overlay window so tiles don't stick. A newer
+      // trigger by the same sender keeps its own overlay.
       Future.delayed(Duration(milliseconds: entry.overlayMs + 250), () {
-        SoundboardOverlayRegistry.instance.clearUser(entry.senderId);
-        engine.markFinished(entry.soundId);
+        SoundboardOverlayRegistry.instance.clearEntry(entry.senderId, shown);
       });
     }
     notifyListeners();
@@ -196,6 +203,10 @@ class SoundboardCallController extends ChangeNotifier {
     soundboard?.engine.setVolume(v.clamp(0.0, 1.5));
     notifyListeners();
   }
+
+  /// Listener's soundboard volume as the engine takes it (0..1.5).
+  static double get userVolume =>
+      (preferences.soundboardVolume.value / 100.0).clamp(0.0, 1.5);
 
   double get volume01 =>
       (preferences.soundboardVolume.value / 100.0).clamp(0.0, 1.0);
