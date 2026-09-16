@@ -124,16 +124,12 @@ class SoundboardCallController extends ChangeNotifier {
     if (!EntranceSoundGate.instance.claim(session, roomId: session.roomId)) {
       return null;
     }
-    final choice = EntranceSoundChoice(
-      soundId: preferences.soundboardEntranceSoundId.value,
-      spaceId: preferences.soundboardEntranceSpaceId.value,
-    );
     return pickEntranceSound(
-      choice: choice,
-      // The room may belong to several Spaces; a sound limited to one of
-      // them counts as this room's Space.
-      roomSpaceId:
-          sources.any((s) => s.id == choice.spaceId) ? choice.spaceId : null,
+      choice: EntranceSoundChoice(
+        soundId: preferences.soundboardEntranceSoundId.value,
+        spaceId: preferences.soundboardEntranceSpaceId.value,
+      ),
+      roomSpaceIds: sources.map((s) => s.id),
       catalog: catalog,
       // Deafening before joining only sets fakeDeafenToggle.
       deafened: session.isDeafened ||
