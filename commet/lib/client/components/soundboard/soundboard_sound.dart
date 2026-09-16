@@ -4,6 +4,8 @@
 // implementation (Matrix state events, MXC upload, MyInstants import) stays
 // behind the seam. See docs/adr decisions inline.
 
+import 'soundboard_emoji.dart';
+
 /// Stable identifier for a sound effect. Never the display name.
 typedef SoundId = String;
 
@@ -15,8 +17,8 @@ class SoundboardSound {
   /// Display name, sanitized, 1..64 chars.
   final String name;
 
-  /// Single grapheme-cluster-ish emoji (may be ZWJ sequence / flag).
-  final String emoji;
+  /// Unicode emoji (may be ZWJ sequence / flag) or custom Space emoticon.
+  final SoundboardEmoji emoji;
 
   /// Original MyInstants page URL used at import time (for provenance).
   final String? sourceUrl;
@@ -54,7 +56,7 @@ class SoundboardSound {
   Map<String, dynamic> toJson() => {
         'sound_id': soundId,
         'name': name,
-        'emoji': emoji,
+        ...emoji.toJson(),
         if (sourceUrl != null) 'source_url': sourceUrl,
         'media_uri': mediaUri,
         'mimetype': mimeType,
@@ -69,7 +71,7 @@ class SoundboardSound {
     return SoundboardSound(
       soundId: json['sound_id'] as String,
       name: json['name'] as String,
-      emoji: json['emoji'] as String,
+      emoji: SoundboardEmoji.fromJson(json),
       sourceUrl: json['source_url'] as String?,
       mediaUri: json['media_uri'] as String,
       mimeType: (json['mimetype'] as String?) ?? 'audio/mpeg',
@@ -89,7 +91,7 @@ class SoundboardSound {
 
   SoundboardSound copyWith({
     String? name,
-    String? emoji,
+    SoundboardEmoji? emoji,
     String? mediaUri,
     String? mimeType,
     int? durationMs,

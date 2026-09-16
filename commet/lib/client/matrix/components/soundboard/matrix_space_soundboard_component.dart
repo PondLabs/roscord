@@ -10,6 +10,7 @@
 import 'dart:async';
 
 import 'package:commet/client/components/soundboard/soundboard_component.dart';
+import 'package:commet/client/components/soundboard/soundboard_emoji.dart';
 import 'package:commet/client/components/soundboard/soundboard_sound.dart';
 import 'package:commet/client/components/soundboard/soundboard_validation.dart';
 import 'package:commet/client/matrix/matrix_client.dart';
@@ -87,7 +88,7 @@ class MatrixSpaceSoundboardComponent extends SpaceSoundboardComponent<
   @override
   Future<SoundboardSound> addSound({
     required String name,
-    required String emoji,
+    required SoundboardEmoji emoji,
     required String mediaUri,
     required String mimeType,
     required int durationMs,
@@ -96,7 +97,7 @@ class MatrixSpaceSoundboardComponent extends SpaceSoundboardComponent<
   }) async {
     if (!canManage) throw StateError('Missing permission to manage soundboard');
     final cleanName = SoundboardValidator.sanitizeName(name);
-    final cleanEmoji = SoundboardValidator.sanitizeEmoji(emoji);
+    final cleanEmoji = SoundboardValidator.sanitizeSoundEmoji(emoji);
     if (!mediaUri.startsWith('mxc://')) {
       throw ArgumentError('mediaUri must be mxc://');
     }
@@ -124,14 +125,15 @@ class MatrixSpaceSoundboardComponent extends SpaceSoundboardComponent<
   Future<SoundboardSound> updateSound(
     String soundId, {
     String? name,
-    String? emoji,
+    SoundboardEmoji? emoji,
   }) async {
     if (!canManage) throw StateError('Missing permission to manage soundboard');
     final existing = getById(soundId);
     if (existing == null) throw StateError('Sound not found');
     final updated = existing.copyWith(
       name: name != null ? SoundboardValidator.sanitizeName(name) : null,
-      emoji: emoji != null ? SoundboardValidator.sanitizeEmoji(emoji) : null,
+      emoji:
+          emoji != null ? SoundboardValidator.sanitizeSoundEmoji(emoji) : null,
     );
     await matrixClient.getMatrixClient().setRoomStateWithKey(
           matrixSpace.matrixRoom.id,

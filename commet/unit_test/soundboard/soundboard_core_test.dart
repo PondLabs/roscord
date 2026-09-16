@@ -1,6 +1,7 @@
 import 'package:commet/client/components/soundboard/soundboard_cache.dart';
 import 'package:commet/client/components/soundboard/soundboard_catalog.dart';
 import 'package:commet/client/components/soundboard/soundboard_dedup.dart';
+import 'package:commet/client/components/soundboard/soundboard_emoji.dart';
 import 'package:commet/client/components/soundboard/soundboard_event.dart';
 import 'package:commet/client/components/soundboard/soundboard_sound.dart';
 import 'package:commet/client/components/soundboard/soundboard_validation.dart';
@@ -10,7 +11,7 @@ SoundboardSound _sound(String id, [String name = 'Airhorn']) =>
     SoundboardSound(
       soundId: id,
       name: name,
-      emoji: '📢',
+      emoji: const SoundboardEmoji.unicode('📢'),
       mediaUri: 'mxc://x/$id',
       mimeType: 'audio/mpeg',
       durationMs: 2000,
@@ -90,6 +91,43 @@ void main() {
         ..['normalized_gain'] = 0.5;
       expect(SoundboardSound.fromJson(json).normalizedGain, 0.5);
     });
+
+    test('round-trips a custom space emoji', () {
+      final sound = _sound('s1').copyWith(
+          emoji: const SoundboardEmoji.custom(
+              mxc: 'mxc://example.org/abc', shortcode: ':velho:'));
+      final json = sound.toJson();
+      expect(json['emoji_mxc'], 'mxc://example.org/abc');
+      expect(json['emoji_shortcode'], ':velho:');
+      // Earlier builds require a unicode `emoji` and skip the sound without it.
+      expect(json['emoji'], '🔊');
+      expect(SoundboardSound.fromJson(json).emoji, sound.emoji);
+    });
+
+    test('writes no custom fields for a unicode emoji', () {
+      final json = _sound('s1').toJson();
+      expect(json['emoji'], '📢');
+      expect(json.containsKey('emoji_mxc'), isFalse);
+      expect(json.containsKey('emoji_shortcode'), isFalse);
+    });
+
+    test('tolerates a missing or malformed emoji', () {
+      final noEmoji = _sound('s1').toJson()..remove('emoji');
+      expect(SoundboardSound.fromJson(noEmoji).emoji,
+          const SoundboardEmoji.unicode('🔊'));
+
+      final onlyMxc = _sound('s1').toJson()
+        ..remove('emoji')
+        ..['emoji_mxc'] = 'mxc://example.org/abc';
+      expect(
+          SoundboardSound.fromJson(onlyMxc).emoji,
+          const SoundboardEmoji.custom(
+              mxc: 'mxc://example.org/abc', shortcode: ''));
+
+      final badMxc = _sound('s1').toJson()..['emoji_mxc'] = 42;
+      expect(SoundboardSound.fromJson(badMxc).emoji,
+          const SoundboardEmoji.unicode('📢'));
+    });
   });
 
   group('SoundboardDedup', () {
@@ -159,6 +197,48 @@ void main() {
       expect(
           () => SoundboardValidator.sanitizeEmoji('abc'),
           throwsA(isA<SoundboardValidationError>()));
+    });
+
+    test('accepts a unicode or custom sound emoji', () {
+      expect(
+          SoundboardValidator.sanitizeSoundEmoji(
+              const SoundboardEmoji.unicode(' 📢 ')),
+          const SoundboardEmoji.unicode('📢'));
+      expect(
+          SoundboardValidator.sanitizeSoundEmoji(const SoundboardEmoji.custom(
+              mxc: 'mxc://matrix.example.org:8448/AbC-123_x',
+              shortcode: 'velho')),
+          const SoundboardEmoji.custom(
+              mxc: 'mxc://matrix.example.org:8448/AbC-123_x',
+              shortcode: ':velho:'));
+      expect(
+          SoundboardValidator.sanitizeSoundEmoji(const SoundboardEmoji.custom(
+                  mxc: 'mxc://x.org/id', shortcode: ':velho:'))
+              .shortcode,
+          ':velho:');
+      expect(
+          () => SoundboardValidator.sanitizeSoundEmoji(
+              const SoundboardEmoji.unicode('😂😂')),
+          throwsA(isA<SoundboardValidationError>()));
+    });
+
+    test('rejects malformed custom sound emoji', () {
+      for (final bad in [
+        const SoundboardEmoji.custom(mxc: 'mxc://x.org/', shortcode: ':a:'),
+        const SoundboardEmoji.custom(mxc: 'mxc://x.org/a/b', shortcode: ':a:'),
+        const SoundboardEmoji.custom(
+            mxc: 'mxc://x.org/a"><img', shortcode: ':a:'),
+        const SoundboardEmoji.custom(mxc: 'mxc://x.org/id', shortcode: ''),
+        const SoundboardEmoji.custom(
+            mxc: 'mxc://x.org/id', shortcode: ':two words:'),
+        const SoundboardEmoji.custom(mxc: 'mxc://x.org/id', shortcode: ':<b>:'),
+        SoundboardEmoji.custom(
+            mxc: 'mxc://x.org/id', shortcode: ':${'a' * 101}:'),
+      ]) {
+        expect(() => SoundboardValidator.sanitizeSoundEmoji(bad),
+            throwsA(isA<SoundboardValidationError>()),
+            reason: '$bad');
+      }
     });
   });
 
