@@ -6,8 +6,7 @@ import 'package:commet/client/components/soundboard/soundboard_sound.dart';
 import 'package:commet/client/components/soundboard/soundboard_validation.dart';
 import 'package:test/test.dart';
 
-SoundboardSound _sound(String id, [String name = 'Airhorn']) =>
-    SoundboardSound(
+SoundboardSound _sound(String id, [String name = 'Airhorn']) => SoundboardSound(
       soundId: id,
       name: name,
       emoji: '📢',
@@ -107,8 +106,7 @@ void main() {
   group('SoundboardSessionCache LRU', () {
     test('evicts oldest beyond capacity', () {
       final evicted = <String>[];
-      final c = SoundboardSessionCache(
-          maxEntries: 2, onEvict: evicted.add);
+      final c = SoundboardSessionCache(maxEntries: 2, onEvict: evicted.add);
       c.markLoaded('a', 1);
       c.markLoaded('b', 2);
       c.markLoaded('c', 3);
@@ -136,15 +134,12 @@ void main() {
   group('SoundboardValidator name/emoji', () {
     test('sanitizes names, rejects markup/empty/toolong', () {
       expect(SoundboardValidator.sanitizeName('  Airhorn  '), 'Airhorn');
-      expect(
-          () => SoundboardValidator.sanitizeName('   '),
+      expect(() => SoundboardValidator.sanitizeName('   '),
+          throwsA(isA<SoundboardValidationError>()));
+      expect(() => SoundboardValidator.sanitizeName('<b>x</b>'),
           throwsA(isA<SoundboardValidationError>()));
       expect(
-          () => SoundboardValidator.sanitizeName('<b>x</b>'),
-          throwsA(isA<SoundboardValidationError>()));
-      expect(
-          () => SoundboardValidator.sanitizeName(
-              List.filled(65, 'a').join()),
+          () => SoundboardValidator.sanitizeName(List.filled(65, 'a').join()),
           throwsA(isA<SoundboardValidationError>()));
     });
 
@@ -153,11 +148,9 @@ void main() {
       expect(SoundboardValidator.sanitizeEmoji('👨‍👩‍👧‍👦'), '👨‍👩‍👧‍👦');
       expect(SoundboardValidator.sanitizeEmoji('👍🏽'), '👍🏽');
       expect(SoundboardValidator.sanitizeEmoji('🇧🇷'), '🇧🇷');
-      expect(
-          () => SoundboardValidator.sanitizeEmoji('😂😂'),
+      expect(() => SoundboardValidator.sanitizeEmoji('😂😂'),
           throwsA(isA<SoundboardValidationError>()));
-      expect(
-          () => SoundboardValidator.sanitizeEmoji('abc'),
+      expect(() => SoundboardValidator.sanitizeEmoji('abc'),
           throwsA(isA<SoundboardValidationError>()));
     });
   });
