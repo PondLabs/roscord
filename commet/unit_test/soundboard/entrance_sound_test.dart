@@ -1,12 +1,13 @@
 import 'package:commet/client/components/soundboard/entrance_sound.dart';
 import 'package:commet/client/components/soundboard/soundboard_catalog.dart';
+import 'package:commet/client/components/soundboard/soundboard_emoji.dart';
 import 'package:commet/client/components/soundboard/soundboard_sound.dart';
 import 'package:test/test.dart';
 
 SoundboardSound _s(String id) => SoundboardSound(
       soundId: id,
       name: 'S $id',
-      emoji: '🐴',
+      emoji: const SoundboardEmoji.unicode('🐴'),
       mediaUri: 'mxc://h/$id',
       mimeType: 'audio/mpeg',
       durationMs: 1500,

@@ -26,6 +26,7 @@ class _SoundboardSettingsPageState extends State<SoundboardSettingsPage> {
 
   final List<StreamSubscription> _subs = [];
   MediaKitSoundboardPlayer? _previewPlayer;
+  static const _previewInstanceId = 'entrance-sound-preview';
 
   String get headerSoundboardVolume => Intl.message("Sound Effects",
       name: "headerSoundboardVolume",
@@ -225,7 +226,9 @@ class _SoundboardSettingsPageState extends State<SoundboardSettingsPage> {
           SoundboardCallController.resolvePlayableUri(space.client, s),
     );
     _previewPlayer = preview;
-    await preview.setGlobalVolume(preferences.soundboardVolume.value / 100.0);
-    await preview.start(sound.soundId);
+    // setVolumeFor also stores the listener volume for instances started later.
+    await preview.setVolumeFor(
+        _previewInstanceId, SoundboardCallController.userVolume);
+    await preview.start(_previewInstanceId, sound.soundId);
   }
 }
