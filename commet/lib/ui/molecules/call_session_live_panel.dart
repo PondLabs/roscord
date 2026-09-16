@@ -129,6 +129,7 @@ class _CallSessionLivePanelState extends State<CallSessionLivePanel> {
   _StopControl _stopControlFor(VoipStream stream) {
     switch (stream.type) {
       case VoipStreamType.screenshare:
+      case VoipStreamType.screenshareAudio:
         return _StopControl(
           key: const ValueKey("live-stop-screenshare"),
           tooltip: tooltipStopScreenshare,
