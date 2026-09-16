@@ -89,6 +89,33 @@ void main() {
         ..['normalized_gain'] = 0.5;
       expect(SoundboardSound.fromJson(json).normalizedGain, 0.5);
     });
+
+    test('stores the admin volume as integer thousandths', () {
+      final json = _sound('s1').copyWith(volume: 0.5).toJson();
+      expect(leaves(json).whereType<double>(), isEmpty);
+      expect(json['volume_milli'], 500);
+      expect(SoundboardSound.fromJson(json).volume, 0.5);
+    });
+
+    test('a sound without admin volume plays at 100 %', () {
+      final json = _sound('s1').toJson()..remove('volume_milli');
+      expect(SoundboardSound.fromJson(json).volume, 1.0);
+      expect(_sound('s1').volume, 1.0);
+    });
+
+    test('tolerates bad admin volume values', () {
+      Map<String, dynamic> withVolume(Object? v) =>
+          _sound('s1').toJson()..['volume_milli'] = v;
+      expect(SoundboardSound.fromJson(withVolume('loud')).volume, 1.0);
+      expect(SoundboardSound.fromJson(withVolume(-5)).volume, 0.0);
+      expect(SoundboardSound.fromJson(withVolume(99999)).volume, 2.0);
+    });
+
+    test('gain combines normalization and admin volume', () {
+      final sound = _sound('s1').copyWith(normalizedGain: 0.8, volume: 0.5);
+      expect(sound.gain, closeTo(0.4, 1e-9));
+      expect(sound.copyWith(name: 'x').volume, 0.5);
+    });
   });
 
   group('SoundboardDedup', () {

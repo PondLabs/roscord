@@ -7,8 +7,10 @@
 // [MediaKitSoundboardPlayer.onInstanceFinished] reports it so the engine can
 // drop it. An instance that never reports an end (stalled stream) is
 // released after [MediaKitSoundboardPlayer.maxInstanceLifetime]. Volume per
-// instance = normalizedGain * userVolume. All errors are swallowed after
-// logging: a soundboard failure must never take down the call.
+// instance = SoundboardSound.gain (normalization * admin volume) * userVolume,
+// resolved on every start so admin changes apply to the next trigger. All
+// errors are swallowed after logging: a soundboard failure must never take
+// down the call.
 import 'dart:async';
 
 import 'package:commet/client/components/soundboard/soundboard_constraints.dart';
@@ -33,11 +35,13 @@ abstract class SoundboardAudioInstance {
 
 class _LiveInstance {
   final SoundboardAudioInstance audio;
-  final double normalizedGain;
+
+  /// [SoundboardSound.gain] (normalization * admin volume) when started.
+  final double soundGain;
   late final StreamSubscription<void> finishedSub;
   late final Timer lifetime;
 
-  _LiveInstance(this.audio, this.normalizedGain);
+  _LiveInstance(this.audio, this.soundGain);
 }
 
 class MediaKitSoundboardPlayer implements SoundboardPlayer {
@@ -66,8 +70,9 @@ class MediaKitSoundboardPlayer implements SoundboardPlayer {
 
   /// media_kit takes mpv's `volume`, where 100 plays the file unchanged (and
   /// mpv applies it cubically, so 0..1 is silence). Never boosts past 100.
-  static double mpvVolume(double userVolume, double normalizedGain) =>
-      (userVolume * normalizedGain).clamp(0.0, 1.0) * 100;
+  /// [soundGain] is [SoundboardSound.gain].
+  static double mpvVolume(double userVolume, double soundGain) =>
+      (userVolume * soundGain).clamp(0.0, 1.0) * 100;
 
   @override
   Future<void> start(String instanceId, String soundId) async {
@@ -77,7 +82,7 @@ class MediaKitSoundboardPlayer implements SoundboardPlayer {
       onInstanceFinished?.call(instanceId);
       return;
     }
-    final live = _LiveInstance(createInstance(), sound.normalizedGain);
+    final live = _LiveInstance(createInstance(), sound.gain);
     live.finishedSub =
         live.audio.finished.listen((_) => _finish(instanceId, live));
     live.lifetime = Timer(maxInstanceLifetime, () => _finish(instanceId, live));
@@ -136,7 +141,7 @@ class MediaKitSoundboardPlayer implements SoundboardPlayer {
   }
 
   Future<void> _applyVolume(_LiveInstance live) =>
-      live.audio.setVolume(mpvVolume(_userVolume, live.normalizedGain));
+      live.audio.setVolume(mpvVolume(_userVolume, live.soundGain));
 
   @override
   bool isPlaying(String instanceId) => _instances.containsKey(instanceId);

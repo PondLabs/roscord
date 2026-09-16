@@ -6,6 +6,7 @@
 // panel shows the empty state.
 import 'dart:async';
 
+import 'package:commet/client/client.dart';
 import 'package:commet/client/components/soundboard/soundboard_catalog.dart';
 import 'package:commet/client/components/soundboard/soundboard_component.dart';
 import 'package:commet/client/components/soundboard/soundboard_engine.dart';
@@ -63,8 +64,7 @@ class SoundboardCallController extends ChangeNotifier {
     );
     soundboard = sb;
     await sb.init();
-    final v = preferences.soundboardVolume.value / 100.0;
-    engine.setVolume(v.clamp(0.0, 1.5));
+    engine.setVolume(userVolume);
     notifyListeners();
   }
 
@@ -110,11 +110,14 @@ class SoundboardCallController extends ChangeNotifier {
     return null;
   }
 
-  Future<String> _resolvePlayableUri(SoundboardSound sound) async {
-    // Resolve mxc:// to a local cached file (fast replay, no per-click
-    // download). MxcFileProvider handles cache + authenticated fetch.
-    // media_kit cannot open mxc:// itself, so there is nothing to fall back to.
-    final client = session.client;
+  Future<String> _resolvePlayableUri(SoundboardSound sound) =>
+      resolvePlayableUri(session.client, sound);
+
+  /// Resolves mxc:// to a local cached file (fast replay, no per-click
+  /// download). MxcFileProvider handles cache + authenticated fetch.
+  /// media_kit cannot open mxc:// itself, so there is nothing to fall back to.
+  static Future<String> resolvePlayableUri(
+      Client client, SoundboardSound sound) async {
     final uri = Uri.parse(sound.mediaUri);
     if (client is! MatrixClient || uri.scheme != 'mxc') {
       throw StateError('Cannot play ${sound.mediaUri}');
@@ -165,6 +168,10 @@ class SoundboardCallController extends ChangeNotifier {
     soundboard?.engine.setVolume(v.clamp(0.0, 1.5));
     notifyListeners();
   }
+
+  /// Listener's soundboard volume as the engine takes it (0..1.5).
+  static double get userVolume =>
+      (preferences.soundboardVolume.value / 100.0).clamp(0.0, 1.5);
 
   double get volume01 =>
       (preferences.soundboardVolume.value / 100.0).clamp(0.0, 1.0);
