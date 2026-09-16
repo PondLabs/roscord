@@ -494,6 +494,10 @@ class Preferences {
   DoublePreference soundboardVolume =
       DoublePreference("soundboard_volume", defaultValue: 80.0);
 
+  /// Favorite soundboard sound ids, oldest first. Local-only.
+  StringListPreference soundboardFavorites =
+      StringListPreference("soundboard_favorites", defaultValue: []);
+
   DoublePreference streamBitrate =
       DoublePreference("screenshare_bitrate_mbps", defaultValue: 8);
 
