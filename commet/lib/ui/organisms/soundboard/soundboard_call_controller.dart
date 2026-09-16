@@ -15,7 +15,7 @@ import 'package:commet/client/components/soundboard/soundboard_transport.dart';
 import 'package:commet/client/components/voip/voip_session.dart';
 import 'package:commet/client/matrix/components/soundboard/livekit_soundboard_transport.dart';
 import 'package:commet/client/matrix/components/soundboard/matrix_todevice_soundboard_transport.dart';
-import 'package:commet/client/matrix/components/soundboard/mediakit_soundboard_player.dart';
+import 'package:commet/client/matrix/components/soundboard/soundboard_player_factory.dart';
 import 'package:commet/client/matrix/matrix_client.dart';
 import 'package:commet/client/matrix/matrix_mxc_file_provider.dart';
 import 'package:commet/debug/log.dart';
@@ -30,6 +30,7 @@ class SoundboardCallController extends ChangeNotifier {
   SoundboardCatalog catalog = InMemorySoundboardCatalog();
   SpaceSoundboardComponent? spaceComponent;
 
+  SoundboardPlayer? _player;
   bool _disposed = false;
   StreamSubscription? _engineSub;
 
@@ -37,12 +38,12 @@ class SoundboardCallController extends ChangeNotifier {
 
   Future<void> init() async {
     _resolveCatalog();
-    final engine = SoundboardEngine(
-      player: MediaKitSoundboardPlayer(
-        resolveSound: (id) => catalog.getById(id),
-        resolvePlayableUri: _resolvePlayableUri,
-      ),
+    final player = _player = createSoundboardPlayer(
+      resolveSound: (id) => catalog.getById(id),
+      resolvePlayableUri: _resolvePlayableUri,
+      loadBytes: _loadBytes,
     );
+    final engine = SoundboardEngine(player: player);
     // Bridge engine activations -> avatar overlays (sender-specific).
     engine.addListener(_syncOverlays);
     _engineSub = null; // engine uses sync listeners, not streams.
@@ -123,10 +124,31 @@ class SoundboardCallController extends ChangeNotifier {
     return resolved.toString();
   }
 
+  /// Web: the browser has no file cache, so the player keeps the bytes.
+  Future<Uint8List> _loadBytes(SoundboardSound sound) async {
+    final client = session.client;
+    final uri = Uri.parse(sound.mediaUri);
+    if (client is! MatrixClient || uri.scheme != 'mxc') {
+      throw StateError('Cannot play ${sound.mediaUri}');
+    }
+    final bytes =
+        await MxcFileProvider(client.getMatrixClient(), uri).getFileData();
+    if (bytes == null) {
+      throw StateError('Could not download ${sound.mediaUri}');
+    }
+    return bytes;
+  }
+
   Future<void> _preload(String soundId) async {
-    // Fill the file cache so click->play has no download. Failures reach
+    // Fill the file cache (web: the player's decoded buffers) so
+    // click->play has no download. Failures reach
     // SoundboardSession.preloadAll, which logs them and leaves the sound
     // unmarked so the next preload tries again.
+    final player = _player;
+    if (player is PreloadingSoundboardPlayer) {
+      await player.preload(soundId);
+      return;
+    }
     final sound = catalog.getById(soundId);
     if (sound == null) return;
     await _resolvePlayableUri(sound);
@@ -180,8 +202,7 @@ class _CatalogAdapter implements SoundboardCatalog {
   _CatalogAdapter(this._inner);
 
   @override
-  List<SoundboardSound> get sounds =>
-      List<SoundboardSound>.from(_inner.sounds);
+  List<SoundboardSound> get sounds => List<SoundboardSound>.from(_inner.sounds);
 
   @override
   SoundboardSound? getById(String soundId) => _inner.getById(soundId);

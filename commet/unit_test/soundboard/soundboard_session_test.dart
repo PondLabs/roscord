@@ -1,10 +1,13 @@
 import 'dart:io';
+import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:commet/client/components/soundboard/myinstants_resolver.dart';
 import 'package:commet/client/components/soundboard/soundboard_catalog.dart';
 import 'package:commet/client/components/soundboard/soundboard_constraints.dart';
 import 'package:commet/client/components/soundboard/soundboard_engine.dart';
 import 'package:commet/client/components/soundboard/soundboard_import_service.dart';
+import 'package:commet/client/components/soundboard/soundboard_normalizer.dart';
 import 'package:commet/client/components/soundboard/soundboard_session.dart';
 import 'package:commet/client/components/soundboard/soundboard_sound.dart';
 import 'package:commet/client/components/soundboard/soundboard_transport.dart';
@@ -68,13 +71,12 @@ void main() {
     test('resolves play() hook and validates audio bytes', () async {
       final svc = SoundboardImportService(fetcher: (uri) async {
         if (uri.path.contains('instant')) {
-          return _html(
-              '<a onclick="play(\'/media/sounds/ok.mp3\')">x</a>');
+          return _html('<a onclick="play(\'/media/sounds/ok.mp3\')">x</a>');
         }
         return _audio(List.filled(5000, 1), 'audio/mpeg');
       });
-      final out = await svc.importFromPageUrl(
-          'https://www.myinstants.com/en/instant/ok-1/');
+      final out = await svc
+          .importFromPageUrl('https://www.myinstants.com/en/instant/ok-1/');
       expect(out.mimeType, 'audio/mpeg');
       expect(out.bytes.length, 5000);
     });
@@ -96,8 +98,7 @@ void main() {
         return _audio([1, 2, 3], 'text/html');
       });
       await expectLater(
-          svc.importFromPageUrl(
-              'https://www.myinstants.com/en/instant/x-1/'),
+          svc.importFromPageUrl('https://www.myinstants.com/en/instant/x-1/'),
           throwsA(anything));
     });
 
@@ -109,8 +110,7 @@ void main() {
         return _audio(List.filled(2 * 1024 * 1024, 1), 'audio/mpeg');
       });
       await expectLater(
-          svc.importFromPageUrl(
-              'https://www.myinstants.com/en/instant/big-1/'),
+          svc.importFromPageUrl('https://www.myinstants.com/en/instant/big-1/'),
           throwsA(anything));
     });
 
@@ -119,27 +119,24 @@ void main() {
         throw Exception('offline');
       });
       await expectLater(
-          svc.importFromPageUrl(
-              'https://www.myinstants.com/en/instant/x-1/'),
+          svc.importFromPageUrl('https://www.myinstants.com/en/instant/x-1/'),
           throwsA(anything));
     });
 
     test('DNS failure surfaces an actionable message', () async {
       final svc = SoundboardImportService(fetcher: (_) async {
-        throw SocketException(
-            'Failed host lookup: www.myinstants.com',
+        throw SocketException('Failed host lookup: www.myinstants.com',
             address: InternetAddress('93.184.216.34'));
       });
       await expectLater(
-          svc.importFromPageUrl(
-              'https://www.myinstants.com/en/instant/x-1/'),
-          throwsA(predicate(
-              (e) => e.toString().contains('internet connection'))));
+          svc.importFromPageUrl('https://www.myinstants.com/en/instant/x-1/'),
+          throwsA(
+              predicate((e) => e.toString().contains('internet connection'))));
     });
 
     test('bot-protection (403) surfaces a specific error', () async {
-      final svc = SoundboardImportService(
-          fetcher: (_) async => _html('blocked', 403));
+      final svc =
+          SoundboardImportService(fetcher: (_) async => _html('blocked', 403));
       await expectLater(
           svc.importFromPageUrl(
               'https://www.myinstants.com/pt/instant/faaah-63455/'),
@@ -204,6 +201,77 @@ void main() {
             'GET https://www.myinstants.com/media/sounds/ok.mp3',
             'duration: ${framesToMs(40)} ms (audio/mpeg)',
           ]));
+    });
+
+    group('loudness', () {
+      // The -30 LUFS fixture stands in for what the platform decoder
+      // returns for an MP3.
+      final quiet = SoundboardNormalizer.decodeWav(
+          File('unit_test/soundboard/fixtures/noise_-30lufs.wav')
+              .readAsBytesSync())!;
+
+      test('an MP3 is measured through the platform decoder', () async {
+        final lines = <String>[];
+        String? decodedMime;
+        final svc = SoundboardImportService(
+          log: lines.add,
+          fetcher: (_) async => _audio(mpeg1Frames(40), 'audio/mpeg'),
+          decoder: (bytes, mime) async {
+            decodedMime = mime;
+            return quiet;
+          },
+        );
+        final out = await svc
+            .importFromPageUrl('https://www.myinstants.com/media/sounds/q.mp3');
+        expect(decodedMime, 'audio/mpeg');
+        expect(out.loudnessMeasured, isTrue);
+        // -30 LUFS needs +14 dB to reach -16.
+        expect(20 * math.log(out.normalizedGain) / math.ln10, closeTo(14, 1));
+        expect(lines, contains(startsWith('loudness: measured=true lufs=-30')));
+      });
+
+      test('an undecodable file is kept at unity gain and logged', () async {
+        final lines = <String>[];
+        final svc = SoundboardImportService(
+          log: lines.add,
+          fetcher: (_) async => _audio(mpeg1Frames(40), 'audio/mpeg'),
+          decoder: (bytes, mime) async => null,
+        );
+        final out = await svc
+            .importFromPageUrl('https://www.myinstants.com/media/sounds/q.mp3');
+        expect(out.loudnessMeasured, isFalse);
+        expect(out.normalizedGain, 1.0);
+        expect(lines, contains(startsWith('loudness: measured=false')));
+      });
+
+      test('a WAV is measured without the platform decoder', () async {
+        final wav = File('unit_test/soundboard/fixtures/noise_-6lufs.wav')
+            .readAsBytesSync();
+        final svc = SoundboardImportService(
+          fetcher: (_) async => _audio(wav, 'audio/wav'),
+          decoder: (bytes, mime) => fail('WAV must not need a decoder'),
+        );
+        final out = await svc
+            .importFromPageUrl('https://www.myinstants.com/media/sounds/l.wav');
+        expect(out.loudnessMeasured, isTrue);
+        expect(out.durationMs, 1500);
+        expect(20 * math.log(out.normalizedGain) / math.ln10, closeTo(-10, 1));
+      });
+
+      test('duration of formats without a frame parser comes from PCM',
+          () async {
+        final svc = SoundboardImportService(
+          fetcher: (_) async => _audio([1, 2, 3, 4], 'audio/ogg'),
+          decoder: (bytes, mime) async => PcmAudio(
+              sampleRate: 1000,
+              channels: [Float32List(16000)..fillRange(0, 16000, 0.1)]),
+        );
+        await expectLater(
+            svc.importFromPageUrl(
+                'https://www.myinstants.com/media/sounds/long.ogg'),
+            throwsA(isA<MyInstantsValidationError>().having((e) => e.message,
+                'message', 'Audio too long (16 s, max 15 s)')));
+      });
     });
 
     test('direct .mp3 URL skips page parsing', () async {
@@ -286,10 +354,8 @@ void main() {
     test('two users firing rapidly: both sounds land on both engines',
         () async {
       InMemorySoundboardTransport.resetAll();
-      final catalogA =
-          InMemorySoundboardCatalog([_s('airhorn'), _s('risada')]);
-      final catalogB =
-          InMemorySoundboardCatalog([_s('airhorn'), _s('risada')]);
+      final catalogA = InMemorySoundboardCatalog([_s('airhorn'), _s('risada')]);
+      final catalogB = InMemorySoundboardCatalog([_s('airhorn'), _s('risada')]);
       final ea = SoundboardEngine(player: FakePlayer(), nowMs: () => 1000);
       final eb = SoundboardEngine(player: FakePlayer(), nowMs: () => 1010);
       final ta = InMemorySoundboardTransport('@a:x');

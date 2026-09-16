@@ -5,13 +5,12 @@
 // global <audio> bottleneck). Volume per Player = normalizedGain *
 // userVolume, recomputed on setVolumeFor. All errors are swallowed after
 // logging: a soundboard failure must never take down the call.
+import 'dart:math' as math;
+
 import 'package:commet/client/components/soundboard/soundboard_engine.dart';
-import 'package:commet/client/components/soundboard/soundboard_sound.dart';
+import 'package:commet/client/matrix/components/soundboard/soundboard_player_factory.dart';
 import 'package:commet/debug/log.dart';
 import 'package:media_kit/media_kit.dart';
-
-typedef SoundResolver = SoundboardSound? Function(String soundId);
-typedef UriResolver = Future<String> Function(SoundboardSound sound);
 
 class MediaKitSoundboardPlayer implements SoundboardPlayer {
   final SoundResolver resolveSound;
@@ -33,10 +32,18 @@ class MediaKitSoundboardPlayer implements SoundboardPlayer {
   double _effectiveVolume(String soundId) =>
       mpvVolume(_userVolume, _normalizedGain[soundId] ?? 1.0);
 
-  /// media_kit takes mpv's `volume`, where 100 plays the file unchanged (and
-  /// mpv applies it cubically, so 0..1 is silence). Never boosts past 100.
-  static double mpvVolume(double userVolume, double normalizedGain) =>
-      (userVolume * normalizedGain).clamp(0.0, 1.0) * 100;
+  /// mpv's `volume-max` (default 130) must cover the loudest setting:
+  /// user 1.5 * gain +18 dB is about 229.
+  static const double mpvVolumeMax = 400;
+
+  /// media_kit takes mpv's `volume`, where 100 plays the file unchanged and
+  /// mpv scales samples by (volume / 100)^3. The cube root makes the result
+  /// the linear product userVolume * normalizedGain, boosts included.
+  static double mpvVolume(double userVolume, double normalizedGain) {
+    final amplitude = math.max(0.0, userVolume * normalizedGain);
+    return (100 * math.pow(amplitude, 1 / 3).toDouble())
+        .clamp(0.0, mpvVolumeMax);
+  }
 
   @override
   Future<void> start(String soundId) async {
@@ -56,6 +63,10 @@ class MediaKitSoundboardPlayer implements SoundboardPlayer {
       player.stream.error.listen(
           (error) => Log.w('Soundboard player error ($soundId): $error'));
       _players[soundId] = player;
+      final native = player.platform;
+      if (native is NativePlayer) {
+        await native.setProperty('volume-max', mpvVolumeMax.toString());
+      }
       await player.setVolume(_effectiveVolume(soundId));
       String uri;
       if (sound != null) {
