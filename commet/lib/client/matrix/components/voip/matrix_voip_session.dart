@@ -275,11 +275,15 @@ class MatrixVoipSession implements VoipSession {
     }
 
     await session.setLocalVideoMuted(false);
+    // The SDK only notifies the wrapped stream, which nobody listens to, so
+    // the voice panel's live preview needs an explicit state change.
+    _onStateChanged.add(null);
   }
 
   @override
   Future<void> stopCamera() async {
     await session.setLocalVideoMuted(true);
+    _onStateChanged.add(null);
   }
 
   void initStreams() {

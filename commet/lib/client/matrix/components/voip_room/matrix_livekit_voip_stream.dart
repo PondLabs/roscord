@@ -64,9 +64,8 @@ class MatrixLivekitVoipStream implements VoipStream {
     // so it would light up for audio that never leaves the client. When the
     // DSP is running, its gate is what decides.
     final dsp = AudioProcessingManager.instance;
-    final last = _isLocalMic && dsp.isProcessing
-        ? dsp.lastGateOpenAt
-        : _lastAudioAt;
+    final last =
+        _isLocalMic && dsp.isProcessing ? dsp.lastGateOpenAt : _lastAudioAt;
     if (last != null && DateTime.now().difference(last) < _speakingHold) {
       return 1;
     }
@@ -105,13 +104,62 @@ class MatrixLivekitVoipStream implements VoipStream {
         publication.dimensions!.height.toDouble();
   }
 
+  // One RTCVideoRenderer per stream, shared by every widget that shows it.
+  // Each VideoTrackRenderer would otherwise create its own renderer, and on
+  // native every renderer converts every frame (YUV to ARGB, full size) on
+  // the raster thread, so a second view of the same local track (the sidebar
+  // live preview, issue #8) would double that work.
+  RTCVideoRenderer? _renderer;
+  Future<RTCVideoRenderer>? _rendererReady;
+
+  Future<RTCVideoRenderer> _ensureRenderer() {
+    return _rendererReady ??= () async {
+      final renderer = RTCVideoRenderer();
+      await renderer.initialize();
+      _renderer = renderer;
+      return renderer;
+    }();
+  }
+
   @override
   Widget? buildVideoRenderer(BoxFit fit, Key key) {
-    if (publication.track is VideoTrack) {
-      return VideoTrackRenderer(publication.track as VideoTrack);
+    final track = publication.track;
+    if (track is! VideoTrack) {
+      return null;
     }
 
-    return null;
+    return FutureBuilder<RTCVideoRenderer>(
+      future: _ensureRenderer(),
+      builder: (context, snapshot) {
+        final renderer = snapshot.data;
+        if (renderer == null) {
+          return const SizedBox.shrink();
+        }
+        return VideoTrackRenderer(
+          track,
+          cachedRenderer: renderer,
+          autoDisposeRenderer: false,
+        );
+      },
+    );
+  }
+
+  /// Releases the shared renderer and the audio visualizer. Called by the
+  /// session once the stream leaves [MatrixLivekitVoipSession.streams].
+  void dispose() {
+    visualizer?.stop();
+    visualizer = null;
+    final renderer = _renderer;
+    _renderer = null;
+    _rendererReady = null;
+    if (renderer != null) {
+      // Detach now so no more frames are copied; free the texture after the
+      // next frame, once the widgets still showing it have been rebuilt.
+      renderer.srcObject = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        unawaited(renderer.dispose());
+      });
+    }
   }
 
   @override

@@ -151,9 +151,7 @@ class MatrixLivekitVoipSession implements VoipSession {
   void onTrackMutedEvent(lk.TrackMutedEvent event) {
     if (event.publication.track?.mediaType ==
         RTCRtpMediaType.RTCRtpMediaTypeVideo) {
-      streams.removeWhere((e) =>
-          (e as MatrixLivekitVoipStream).publication.sid ==
-          event.publication.sid);
+      _removeStreamsWithSid(event.publication.sid);
     }
 
     for (var track in streams) {
@@ -276,17 +274,24 @@ class MatrixLivekitVoipSession implements VoipSession {
   }
 
   void onLocalTrackUnpublished(lk.LocalTrackUnpublishedEvent event) {
-    streams.removeWhere((e) =>
-        (e as MatrixLivekitVoipStream).publication.sid ==
-        event.publication.sid);
+    _removeStreamsWithSid(event.publication.sid);
 
     _stateChanged.add(());
   }
 
+  void _removeStreamsWithSid(String sid) {
+    final removed = streams
+        .where((e) => (e as MatrixLivekitVoipStream).publication.sid == sid)
+        .cast<MatrixLivekitVoipStream>()
+        .toList();
+    streams.removeWhere((e) => removed.contains(e));
+    for (final stream in removed) {
+      stream.dispose();
+    }
+  }
+
   void onTrackUnpublished(lk.TrackUnpublishedEvent event) {
-    streams.removeWhere((e) =>
-        (e as MatrixLivekitVoipStream).publication.sid ==
-        event.publication.sid);
+    _removeStreamsWithSid(event.publication.sid);
 
     _stateChanged.add(());
   }
@@ -315,6 +320,11 @@ class MatrixLivekitVoipSession implements VoipSession {
       disconnectCall(),
       stopHeartbeat(),
     ]);
+
+    for (final stream in streams) {
+      (stream as MatrixLivekitVoipStream).dispose();
+    }
+    streams.clear();
 
     state = VoipState.ended;
     _stateChanged.add(());
@@ -449,7 +459,8 @@ class MatrixLivekitVoipSession implements VoipSession {
     );
 
     final tracks = source.captureAudio
-        ? await lk.LocalVideoTrack.createScreenShareTracksWithAudio(captureOptions)
+        ? await lk.LocalVideoTrack.createScreenShareTracksWithAudio(
+            captureOptions)
         : [await lk.LocalVideoTrack.createScreenShareTrack(captureOptions)];
 
     for (final track in tracks) {
@@ -463,7 +474,8 @@ class MatrixLivekitVoipSession implements VoipSession {
                   maxFramerate: framerate.toInt(), maxBitrate: bitrate),
               videoCodec: preferences.streamCodec.value,
             ));
-        track.setDegradationPreference(lk.DegradationPreference.maintainFramerate);
+        track.setDegradationPreference(
+            lk.DegradationPreference.maintainFramerate);
       } else if (track is lk.LocalAudioTrack) {
         await livekitRoom.localParticipant?.publishAudioTrack(track);
       }
