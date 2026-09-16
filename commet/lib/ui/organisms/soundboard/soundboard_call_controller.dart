@@ -116,24 +116,18 @@ class SoundboardCallController extends ChangeNotifier {
   }
 
   SoundId? _claimEntranceSound() {
-    // Voice channels only, not 1:1 calls. The LiveKit room is already
-    // connected: the backend awaits connect() before returning the session.
     final room = session.client.getRoom(session.roomId);
-    if (room?.getComponent<VoipRoomComponent>() == null) return null;
-    if (session.state != VoipState.connected) return null;
-    if (!EntranceSoundGate.instance.claim(session, roomId: session.roomId)) {
-      return null;
-    }
-    return pickEntranceSound(
+    return claimEntranceSound(
+      session: session,
+      // The LiveKit room is already connected here: the backend awaits
+      // connect() before returning the session.
+      isVoiceChannel: room?.getComponent<VoipRoomComponent>() != null,
       choice: EntranceSoundChoice(
         soundId: preferences.soundboardEntranceSoundId.value,
         spaceId: preferences.soundboardEntranceSpaceId.value,
       ),
       roomSpaceIds: sources.map((s) => s.id),
       catalog: catalog,
-      // Deafening before joining only sets fakeDeafenToggle.
-      deafened: session.isDeafened ||
-          clientManager?.callManager.fakeDeafenToggle == true,
     );
   }
 
