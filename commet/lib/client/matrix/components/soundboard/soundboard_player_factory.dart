@@ -21,14 +21,18 @@ abstract interface class PreloadingSoundboardPlayer
 }
 
 /// [resolvePlayableUri] feeds the native player (a cached file path);
-/// [loadBytes] feeds the web one.
+/// [loadBytes] feeds the web one. [onInstanceFinished] is called when an
+/// instance ends on its own (completion, error, unknown sound), not for
+/// stop/stopAll.
 SoundboardPlayer createSoundboardPlayer({
   required SoundResolver resolveSound,
   required UriResolver resolvePlayableUri,
   required BytesLoader loadBytes,
+  void Function(String instanceId)? onInstanceFinished,
 }) =>
     impl.createSoundboardPlayer(
       resolveSound: resolveSound,
       resolvePlayableUri: resolvePlayableUri,
       loadBytes: loadBytes,
+      onInstanceFinished: onInstanceFinished,
     );

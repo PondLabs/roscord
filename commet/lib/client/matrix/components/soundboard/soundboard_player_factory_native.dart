@@ -6,8 +6,10 @@ SoundboardPlayer createSoundboardPlayer({
   required SoundResolver resolveSound,
   required UriResolver resolvePlayableUri,
   required BytesLoader loadBytes,
+  void Function(String instanceId)? onInstanceFinished,
 }) =>
     MediaKitSoundboardPlayer(
       resolveSound: resolveSound,
       resolvePlayableUri: resolvePlayableUri,
+      onInstanceFinished: onInstanceFinished,
     );

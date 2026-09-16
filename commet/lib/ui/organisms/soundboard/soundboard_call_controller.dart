@@ -1,11 +1,17 @@
 // Wires catalog + engine + transport for one joined call.
 //
-// Resolution: the VoIP room may belong to one or more Spaces; we use the
-// first parent Space containing the room (catalog belongs to the Space).
-// If no parent Space has a soundboard, the button still renders but the
-// panel shows the empty state.
+// Resolution: the VoIP room may belong to several Spaces; every parent
+// Space with a soundboard contributes its sounds (one popover section and
+// rail entry each). If none has one, the button still renders but the
+// popover shows the empty state.
+//
+// One controller lives per call session, shared by the call view and the
+// sidebar "voice connected" panel through [acquire]/[release], so remote
+// sounds keep playing while the user looks at another room.
 import 'dart:async';
 
+import 'package:commet/client/client.dart';
+import 'package:commet/client/components/soundboard/entrance_sound.dart';
 import 'package:commet/client/components/soundboard/soundboard_catalog.dart';
 import 'package:commet/client/components/soundboard/soundboard_component.dart';
 import 'package:commet/client/components/soundboard/soundboard_engine.dart';
@@ -13,37 +19,77 @@ import 'package:commet/client/components/soundboard/soundboard_session.dart';
 import 'package:commet/client/components/soundboard/soundboard_sound.dart';
 import 'package:commet/client/components/soundboard/soundboard_transport.dart';
 import 'package:commet/client/components/voip/voip_session.dart';
+import 'package:commet/client/components/voip_room/voip_room_component.dart';
 import 'package:commet/client/matrix/components/soundboard/livekit_soundboard_transport.dart';
+import 'package:commet/client/matrix/components/soundboard/matrix_soundboard_emoji_image.dart';
 import 'package:commet/client/matrix/components/soundboard/matrix_todevice_soundboard_transport.dart';
 import 'package:commet/client/matrix/components/soundboard/soundboard_player_factory.dart';
 import 'package:commet/client/matrix/matrix_client.dart';
 import 'package:commet/client/matrix/matrix_mxc_file_provider.dart';
 import 'package:commet/debug/log.dart';
 import 'package:commet/main.dart';
+import 'package:commet/ui/organisms/soundboard/soundboard_favorites.dart';
 import 'package:commet/ui/organisms/soundboard/soundboard_overlay_registry.dart';
+import 'package:commet/ui/organisms/soundboard/soundboard_popover.dart';
 import 'package:flutter/foundation.dart';
 import 'package:livekit_client/livekit_client.dart' as lk;
 
 class SoundboardCallController extends ChangeNotifier {
+  static final Map<VoipSession, SoundboardCallController> _bySession = {};
+
+  /// Returns the controller for [session], creating and initializing it on
+  /// first use. Every call must be paired with [release].
+  static SoundboardCallController acquire(VoipSession session) {
+    final ctrl = _bySession.putIfAbsent(session, () {
+      final created = SoundboardCallController(session);
+      created.init().catchError((Object e, StackTrace s) =>
+          Log.onError(e, s, content: 'Soundboard init failed'));
+      return created;
+    });
+    ctrl._refs++;
+    return ctrl;
+  }
+
+  void release() {
+    if (--_refs > 0) return;
+    _bySession.remove(session);
+    dispose();
+  }
+
   final VoipSession session;
   SoundboardSession? soundboard;
   SoundboardCatalog catalog = InMemorySoundboardCatalog();
-  SpaceSoundboardComponent? spaceComponent;
+  List<SoundboardSource> sources = const [];
 
   SoundboardPlayer? _player;
+
+  /// Shared by every call so all open popovers see the same favorites.
+  static final SoundboardFavorites favorites =
+      SoundboardFavorites.preference(preferences.soundboardFavorites);
+
+  int _refs = 0;
   bool _disposed = false;
   StreamSubscription? _engineSub;
+
+  /// Activations whose overlay has already been shown.
+  final Set<String> _shownEventIds = {};
 
   SoundboardCallController(this.session);
 
   Future<void> init() async {
     _resolveCatalog();
+    // Decide before preloading: the user may leave the room while the catalog
+    // downloads, and a late entrance sound would be wrong.
+    final entranceSoundId = _claimEntranceSound();
+    late final SoundboardEngine engine;
     final player = _player = createSoundboardPlayer(
       resolveSound: (id) => catalog.getById(id),
       resolvePlayableUri: _resolvePlayableUri,
       loadBytes: _loadBytes,
+      // Audio completion, not the overlay timer, ends an activation.
+      onInstanceFinished: (id) => engine.onAudioCompleted(id),
     );
-    final engine = SoundboardEngine(player: player);
+    engine = SoundboardEngine(player: player);
     // Bridge engine activations -> avatar overlays (sender-specific).
     engine.addListener(_syncOverlays);
     _engineSub = null; // engine uses sync listeners, not streams.
@@ -59,26 +105,61 @@ class SoundboardCallController extends ChangeNotifier {
       onError: (e, s, ctx) => Log.onError(e, s, content: 'Soundboard: $ctx'),
     );
     soundboard = sb;
-    await sb.init();
-    final v = preferences.soundboardVolume.value / 100.0;
-    engine.setVolume(v.clamp(0.0, 1.5));
+    engine.setVolume(userVolume);
+    // init() subscribes synchronously, then preloads the whole catalog; the
+    // entrance sound doesn't wait for that (the player fetches it on demand).
+    final initialized = sb.init();
+    if (entranceSoundId != null) sb.trigger(entranceSoundId);
+    await initialized;
+    if (_disposed) return;
     notifyListeners();
+  }
+
+  SoundId? _claimEntranceSound() {
+    // Voice channels only, not 1:1 calls. The LiveKit room is already
+    // connected: the backend awaits connect() before returning the session.
+    final room = session.client.getRoom(session.roomId);
+    if (room?.getComponent<VoipRoomComponent>() == null) return null;
+    if (session.state != VoipState.connected) return null;
+    if (!EntranceSoundGate.instance.claim(session, roomId: session.roomId)) {
+      return null;
+    }
+    final choice = EntranceSoundChoice(
+      soundId: preferences.soundboardEntranceSoundId.value,
+      spaceId: preferences.soundboardEntranceSpaceId.value,
+    );
+    return pickEntranceSound(
+      choice: choice,
+      // The room may belong to several Spaces; a sound limited to one of
+      // them counts as this room's Space.
+      roomSpaceId:
+          sources.any((s) => s.id == choice.spaceId) ? choice.spaceId : null,
+      catalog: catalog,
+      // Deafening before joining only sets fakeDeafenToggle.
+      deafened: session.isDeafened ||
+          clientManager?.callManager.fakeDeafenToggle == true,
+    );
   }
 
   void _resolveCatalog() {
     try {
-      final client = session.client;
       final roomId = session.roomId;
-      for (final space in client.spaces) {
-        if (!space.containsRoom(roomId)) continue;
-        final comp = space.getComponent<SpaceSoundboardComponent>();
-        if (comp != null) {
-          spaceComponent = comp;
-          catalog = _CatalogAdapter(comp);
-          return;
-        }
-      }
-    } catch (_) {}
+      sources = [
+        for (final space in session.client.spaces)
+          if (space.containsRoom(roomId))
+            if (space.getComponent<SpaceSoundboardComponent>() case final comp?)
+              SoundboardSource(
+                id: space.identifier,
+                name: space.displayName,
+                avatar: space.avatar,
+                color: space.color,
+                catalog: _CatalogAdapter(comp),
+              ),
+      ];
+      catalog = _CompositeCatalog([for (final s in sources) s.catalog]);
+    } catch (e, s) {
+      Log.onError(e, s, content: 'Soundboard: could not resolve catalogs');
+    }
   }
 
   SoundboardTransport _createTransport() {
@@ -107,11 +188,14 @@ class SoundboardCallController extends ChangeNotifier {
     return null;
   }
 
-  Future<String> _resolvePlayableUri(SoundboardSound sound) async {
-    // Resolve mxc:// to a local cached file (fast replay, no per-click
-    // download). MxcFileProvider handles cache + authenticated fetch.
-    // media_kit cannot open mxc:// itself, so there is nothing to fall back to.
-    final client = session.client;
+  Future<String> _resolvePlayableUri(SoundboardSound sound) =>
+      resolvePlayableUri(session.client, sound);
+
+  /// Resolves mxc:// to a local cached file (fast replay, no per-click
+  /// download). MxcFileProvider handles cache + authenticated fetch.
+  /// media_kit cannot open mxc:// itself, so there is nothing to fall back to.
+  static Future<String> resolvePlayableUri(
+      Client client, SoundboardSound sound) async {
     final uri = Uri.parse(sound.mediaUri);
     if (client is! MatrixClient || uri.scheme != 'mxc') {
       throw StateError('Cannot play ${sound.mediaUri}');
@@ -158,19 +242,22 @@ class SoundboardCallController extends ChangeNotifier {
     if (_disposed) return;
     final engine = soundboard?.engine;
     if (engine == null) return;
+    _shownEventIds.retainAll(engine.active.keys);
     for (final entry in engine.active.values) {
+      if (!_shownEventIds.add(entry.eventId)) continue;
       final sound = catalog.getById(entry.soundId);
       if (sound == null) continue;
-      SoundboardOverlayRegistry.instance.show(
+      final shown = SoundboardOverlayRegistry.instance.show(
         userId: entry.senderId,
         soundId: entry.soundId,
         emoji: sound.emoji,
+        image: soundboardEmojiImage(sound.emoji, session.client),
         overlayMs: entry.overlayMs,
       );
-      // Auto-clear after overlay window so tiles don't stick.
+      // Auto-clear after overlay window so tiles don't stick. A newer
+      // trigger by the same sender keeps its own overlay.
       Future.delayed(Duration(milliseconds: entry.overlayMs + 250), () {
-        SoundboardOverlayRegistry.instance.clearUser(entry.senderId);
-        engine.markFinished(entry.soundId);
+        SoundboardOverlayRegistry.instance.clearEntry(entry.senderId, shown);
       });
     }
     notifyListeners();
@@ -182,6 +269,10 @@ class SoundboardCallController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Listener's soundboard volume as the engine takes it (0..1.5).
+  static double get userVolume =>
+      (preferences.soundboardVolume.value / 100.0).clamp(0.0, 1.5);
+
   double get volume01 =>
       (preferences.soundboardVolume.value / 100.0).clamp(0.0, 1.0);
 
@@ -190,6 +281,8 @@ class SoundboardCallController extends ChangeNotifier {
     _disposed = true;
     _engineSub?.cancel();
     soundboard?.dispose();
+    final catalog = this.catalog;
+    if (catalog is _CompositeCatalog) catalog.dispose();
     soundboard = null;
     SoundboardOverlayRegistry.instance.clearAll();
     super.dispose();
@@ -209,6 +302,47 @@ class _CatalogAdapter implements SoundboardCatalog {
 
   @override
   Stream<void> get onChanged => _inner.onChanged;
+}
+
+/// All Spaces' catalogs seen as one, so remote events resolve a sound from
+/// any Space the room belongs to. Sound ids are uuids, unique across Spaces.
+class _CompositeCatalog implements SoundboardCatalog {
+  final List<SoundboardCatalog> _parts;
+  final StreamController<void> _changes = StreamController<void>.broadcast();
+  late final List<StreamSubscription> _subs;
+
+  _CompositeCatalog(this._parts) {
+    _subs = [for (final part in _parts) part.onChanged.listen(_changes.add)];
+  }
+
+  @override
+  List<SoundboardSound> get sounds {
+    final seen = <String>{};
+    return [
+      for (final part in _parts)
+        for (final sound in part.sounds)
+          if (seen.add(sound.soundId)) sound,
+    ];
+  }
+
+  @override
+  SoundboardSound? getById(String soundId) {
+    for (final part in _parts) {
+      final sound = part.getById(soundId);
+      if (sound != null) return sound;
+    }
+    return null;
+  }
+
+  @override
+  Stream<void> get onChanged => _changes.stream;
+
+  void dispose() {
+    for (final sub in _subs) {
+      sub.cancel();
+    }
+    _changes.close();
+  }
 }
 
 /// Thin shim so the controller compiles without importing the full

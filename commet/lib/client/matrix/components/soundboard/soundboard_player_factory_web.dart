@@ -6,5 +6,10 @@ SoundboardPlayer createSoundboardPlayer({
   required SoundResolver resolveSound,
   required UriResolver resolvePlayableUri,
   required BytesLoader loadBytes,
+  void Function(String instanceId)? onInstanceFinished,
 }) =>
-    WebAudioSoundboardPlayer(resolveSound: resolveSound, loadBytes: loadBytes);
+    WebAudioSoundboardPlayer(
+      resolveSound: resolveSound,
+      loadBytes: loadBytes,
+      onInstanceFinished: onInstanceFinished,
+    );

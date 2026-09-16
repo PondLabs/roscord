@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:commet/client/components/soundboard/myinstants_resolver.dart';
 import 'package:commet/client/components/soundboard/soundboard_catalog.dart';
 import 'package:commet/client/components/soundboard/soundboard_constraints.dart';
+import 'package:commet/client/components/soundboard/soundboard_emoji.dart';
 import 'package:commet/client/components/soundboard/soundboard_engine.dart';
 import 'package:commet/client/components/soundboard/soundboard_import_service.dart';
 import 'package:commet/client/components/soundboard/soundboard_normalizer.dart';
@@ -21,28 +22,28 @@ class FakePlayer implements SoundboardPlayer {
   final List<String> started = [];
   final Set<String> playing = {};
   @override
-  Future<void> start(String soundId) async {
+  Future<void> start(String instanceId, String soundId) async {
     started.add(soundId);
-    playing.add(soundId);
+    playing.add(instanceId);
   }
 
   @override
-  Future<void> stop(String soundId) async {
-    playing.remove(soundId);
+  Future<void> stop(String instanceId) async {
+    playing.remove(instanceId);
   }
 
   @override
   Future<void> stopAll() async => playing.clear();
   @override
-  Future<void> setVolumeFor(String soundId, double volume) async {}
+  Future<void> setVolumeFor(String instanceId, double volume) async {}
   @override
-  bool isPlaying(String soundId) => playing.contains(soundId);
+  bool isPlaying(String instanceId) => playing.contains(instanceId);
 }
 
 SoundboardSound _s(String id) => SoundboardSound(
       soundId: id,
       name: 'S $id',
-      emoji: '🔊',
+      emoji: const SoundboardEmoji.unicode('🔊'),
       mediaUri: 'mxc://h/$id',
       mimeType: 'audio/mpeg',
       durationMs: 1500,
@@ -382,11 +383,12 @@ void main() {
       await Future.delayed(const Duration(milliseconds: 50));
 
       // Polyphony: each engine holds BOTH sounds (different ids coexist).
-      expect(ea.active.keys.toSet(), {'airhorn', 'risada'});
-      expect(eb.active.keys.toSet(), {'airhorn', 'risada'});
-      // Attribution: latest author per sound is whoever sent it.
-      expect(ea.active['airhorn']!.senderId, '@a:x');
-      expect(ea.active['risada']!.senderId, '@b:x');
+      Map<String, String> senderBySound(SoundboardEngine e) => {
+            for (final a in e.active.values) a.soundId: a.senderId,
+          };
+      // Attribution: each activation belongs to whoever sent it.
+      expect(senderBySound(ea), {'airhorn': '@a:x', 'risada': '@b:x'});
+      expect(senderBySound(eb), {'airhorn': '@a:x', 'risada': '@b:x'});
 
       await sa.dispose();
       await sb.dispose();
@@ -413,7 +415,8 @@ void main() {
           soundId: 'deleted-sound', senderId: '@ghost:x', eventId: 'g1');
       await peer.send(ghostEvent);
       await Future.delayed(const Duration(milliseconds: 20));
-      expect(engine.active.containsKey('deleted-sound'), isFalse);
+      expect(engine.active.values.map((a) => a.soundId),
+          isNot(contains('deleted-sound')));
       await s.dispose();
       await peer.dispose();
       InMemorySoundboardTransport.resetAll();
