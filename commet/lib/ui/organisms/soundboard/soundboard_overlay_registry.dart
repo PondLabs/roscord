@@ -41,22 +41,27 @@ class SoundboardOverlayRegistry extends ChangeNotifier {
     return e;
   }
 
-  void show({
+  SoundboardOverlayEntry show({
     required String userId,
     required String soundId,
     required SoundboardEmoji emoji,
     ImageProvider? image,
     required int overlayMs,
   }) {
-    _byUser[userId] = SoundboardOverlayEntry(
+    final entry = _byUser[userId] = SoundboardOverlayEntry(
       soundId: soundId,
       emoji: emoji,
       image: image,
       overlayMs: overlayMs,
-      expiresAtMs:
-          DateTime.now().millisecondsSinceEpoch + overlayMs + 200,
+      expiresAtMs: DateTime.now().millisecondsSinceEpoch + overlayMs + 200,
     );
     notifyListeners();
+    return entry;
+  }
+
+  /// Clears [userId]'s overlay only if it is still [entry].
+  void clearEntry(String userId, SoundboardOverlayEntry entry) {
+    if (identical(_byUser[userId], entry)) clearUser(userId);
   }
 
   void clearUser(String userId) {
