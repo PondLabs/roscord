@@ -6,6 +6,7 @@ Hard fork of Commet (a Flutter Matrix client) by PondLabs. Layout:
 - `rust/rust` the Rust library shipped as `librust_lib_commet` (flutter_rust_bridge, built by cargokit for Linux and Windows only; Android and web do not build it).
 - `rust/audio_decode` soundboard clip decoder (symphonia, C ABI linked into `librust_lib_commet`); loudness is measured in Dart (`soundboard_normalizer.dart`).
 - `rust/audio_dsp` voice DSP crate (noise suppression, input gate, ducking). See `docs/voice-audio-processing.md`.
+- `rust/dj_audio` DJ booth music player (symphonia decode, 48 kHz stereo, C ABI linked into `librust_lib_commet`). See `docs/dj-booth.md`.
 - `third_party/` vendored packages we modify in place. See `third_party/README.md`.
 
 ## Rules
@@ -18,7 +19,7 @@ Hard fork of Commet (a Flutter Matrix client) by PondLabs. Layout:
 
 - `flake.nix` provides Flutter, Dart and the Android SDK via `nix develop`.
 - Rust: `cargo test -p audio_dsp`. Without a local toolchain use Docker: `docker run --rm -v "$PWD":/w -w /w rust:1 cargo test -p audio_dsp`.
-- Full CI-equivalent builds without a local Flutter: `docker run -d --name build -v "$PWD":/w -w /w/commet ghcr.io/cirruslabs/flutter:3.41.9 sleep infinity`, then inside it `apt-get install -y ninja-build libgtk-3-dev libmpv-dev mpv ffmpeg libmimalloc-dev libwebkit2gtk-4.1-dev libkeybinder-3.0-dev libpulse-dev clang lld cmake pkg-config curl` (`libpulse-dev` is what lets the vendored flutter-webrtc capture system audio for screen share on Linux; without it the build still passes but `getDisplayMedia({audio: true})` yields no audio track), install rustup (cargokit needs cargo), `flutter pub get`, `dart run scripts/codegen.dart`, then `flutter build linux --debug --dart-define PLATFORM=linux` or `flutter build web --release --dart-define PLATFORM=web`. Chown the build output back afterwards.
+- Full CI-equivalent builds without a local Flutter: `docker run -d --name build -v "$PWD":/w -w /w/commet ghcr.io/cirruslabs/flutter:3.41.9 sleep infinity`, then inside it `apt-get install -y ninja-build libgtk-3-dev libmpv-dev mpv ffmpeg libmimalloc-dev libwebkit2gtk-4.1-dev libkeybinder-3.0-dev libayatana-appindicator3-dev libpulse-dev clang lld cmake pkg-config curl` (`libpulse-dev` is what lets the vendored flutter-webrtc capture system audio for screen share on Linux; without it the build still passes but `getDisplayMedia({audio: true})` yields no audio track), install rustup (cargokit needs cargo), `flutter pub get`, `dart run scripts/codegen.dart`, then `flutter build linux --debug --dart-define PLATFORM=linux` or `flutter build web --release --dart-define PLATFORM=web`. Chown the build output back afterwards.
 - Web assets that are built, not written (`e2ee.worker.dart.js`, `audio_dsp.wasm`) come from `commet/scripts/prepare-web.sh` and are gitignored.
 
 ## Voice rooms
