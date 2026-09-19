@@ -3,9 +3,9 @@
 //! 2112) and record them as the edit's media time; without this every
 //! position in an .m4a would be off by that much.
 
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+
+use symphonia::core::io::MediaSource;
 
 /// moov boxes bigger than this are not worth parsing for one number.
 const MAX_MOOV: u64 = 64 << 20;
@@ -106,13 +106,13 @@ fn parse_moov(moov: &[u8]) -> Option<Edit> {
     None
 }
 
-/// The first sound track's edit, if `path` is an MP4 that has one.
-pub(crate) fn edit(path: &Path) -> Option<Edit> {
-    let mut f = File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
+/// The first sound track's edit, if `f` is an MP4 that has one.
+pub(crate) fn edit(mut f: Box<dyn MediaSource>) -> Option<Edit> {
+    // Unknown while still downloading: reads past the end fail instead.
+    let len = f.byte_len().unwrap_or(u64::MAX);
     let mut pos = 0u64;
     let mut first = true;
-    while pos + 8 <= len {
+    while pos.saturating_add(8) <= len {
         let mut h = [0u8; 16];
         f.seek(SeekFrom::Start(pos)).ok()?;
         f.read_exact(&mut h[..8]).ok()?;
@@ -122,6 +122,8 @@ pub(crate) fn edit(path: &Path) -> Option<Edit> {
         }
         first = false;
         let (header, size) = match be_u32(&h, 0)? {
+            // "To the end of the file", which isn't known yet.
+            0 if len == u64::MAX => return None,
             0 => (8, len - pos),
             1 => {
                 f.read_exact(&mut h[8..16]).ok()?;
@@ -140,7 +142,7 @@ pub(crate) fn edit(path: &Path) -> Option<Edit> {
             f.read_exact(&mut moov).ok()?;
             return parse_moov(&moov);
         }
-        pos += size;
+        pos = pos.checked_add(size)?;
     }
     None
 }

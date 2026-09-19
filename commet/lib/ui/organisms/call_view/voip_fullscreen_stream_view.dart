@@ -17,8 +17,7 @@ import 'package:window_manager/window_manager.dart';
 import 'package:tiamat/tiamat.dart' as tiamat;
 
 /// A call stream covering the whole screen: the app window goes fullscreen
-/// (the browser tab on web) and the stream fills most of it, inset from the
-/// edges.
+/// (the browser tab on web) and the stream fills it edge to edge.
 class VoipFullscreenStreamView extends StatefulWidget {
   const VoipFullscreenStreamView(
       {required this.stream, required this.session, super.key});
@@ -66,11 +65,11 @@ class _VoipFullscreenStreamViewState extends State<VoipFullscreenStreamView> {
 
   static const _controlsTimeout = Duration(milliseconds: 2500);
 
-  /// Share of the screen the stream takes, leaving a black margin round it.
-  static const double _streamScale = 0.95;
-
   /// Up from tiamat's default 15.
   static const double _buttonRadius = 20;
+
+  /// Exit fullscreen, the one button most people come for, is bigger still.
+  static const double _exitButtonRadius = 26;
 
   RTCScreenShareAnnotationSession? annotationSession;
   RTCScreenShareAnnotationComponent? component;
@@ -157,39 +156,32 @@ class _VoipFullscreenStreamViewState extends State<VoipFullscreenStreamView> {
         child: Stack(
           alignment: Alignment.bottomCenter,
           children: [
-            // Inset from the screen edges rather than filling them.
             Positioned.fill(
-              child: Center(
-                child: FractionallySizedBox(
-                  widthFactor: _streamScale,
-                  heightFactor: _streamScale,
-                  child: LayoutBuilder(
-                    builder: (context, constraints) {
-                      return MouseRegion(
-                        child: VoipStreamView(
-                          stream,
-                          widget.session,
-                          audioStream: audioStream,
-                          canFullscreen: false,
-                          fit: BoxFit.contain,
-                        ),
-                        onHover: (event) {
-                          final x =
-                              event.localPosition.dx / constraints.maxWidth;
-                          final y =
-                              event.localPosition.dy / constraints.maxHeight;
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  return MouseRegion(
+                    child: VoipStreamView(
+                      stream,
+                      widget.session,
+                      audioStream: audioStream,
+                      canFullscreen: false,
+                      // Exit fullscreen is the way out here.
+                      canStopWatching: false,
+                      fit: BoxFit.contain,
+                    ),
+                    onHover: (event) {
+                      final x = event.localPosition.dx / constraints.maxWidth;
+                      final y = event.localPosition.dy / constraints.maxHeight;
 
-                          annotationSession?.setCursorPosition(
-                              streamId: widget.stream.streamId, x: x, y: y);
-                        },
-                      );
+                      annotationSession?.setCursorPosition(
+                          streamId: widget.stream.streamId, x: x, y: y);
                     },
-                  ),
-                ),
+                  );
+                },
               ),
             ),
-            // A light grey wash rising from the bottom while the controls
-            // are up, so they read against a bright stream.
+            // A dark shade rising from the bottom while the controls are up,
+            // so they read against a bright stream.
             Positioned.fill(
               child: IgnorePointer(
                 child: AnimatedOpacity(
@@ -200,10 +192,10 @@ class _VoipFullscreenStreamViewState extends State<VoipFullscreenStreamView> {
                       gradient: LinearGradient(
                         begin: Alignment.bottomCenter,
                         end: Alignment.topCenter,
-                        stops: const [0, 0.35],
+                        stops: const [0, 0.4],
                         colors: [
-                          Colors.grey.withValues(alpha: 0.2),
-                          Colors.grey.withValues(alpha: 0),
+                          Colors.black.withValues(alpha: 0.7),
+                          Colors.black.withValues(alpha: 0),
                         ],
                       ),
                     ),
@@ -219,29 +211,33 @@ class _VoipFullscreenStreamViewState extends State<VoipFullscreenStreamView> {
                   duration: const Duration(milliseconds: 200),
                   child: Padding(
                     padding: const EdgeInsets.all(12),
-                    child: Wrap(spacing: 8, children: [
-                      if (component != null)
-                        tiamat.CircleButton(
-                          radius: _buttonRadius,
-                          icon: Icons.mouse,
-                          onPressed: () async {
-                            var session = await component
-                                ?.getOrCreateSession(widget.session);
-                            if (!mounted) return;
-                            setState(() {
-                              annotationSession = session;
-                            });
-                          },
-                        ),
-                      Tooltip(
-                        message: labelExitFullscreen,
-                        child: tiamat.CircleButton(
-                          radius: _buttonRadius,
-                          icon: Icons.fullscreen_exit,
-                          onPressed: close,
-                        ),
-                      ),
-                    ]),
+                    child: Wrap(
+                        spacing: 8,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          if (component != null)
+                            tiamat.CircleButton(
+                              radius: _buttonRadius,
+                              icon: Icons.mouse,
+                              onPressed: () async {
+                                var session = await component
+                                    ?.getOrCreateSession(widget.session);
+                                if (!mounted) return;
+                                setState(() {
+                                  annotationSession = session;
+                                });
+                              },
+                            ),
+                          Tooltip(
+                            message: labelExitFullscreen,
+                            child: tiamat.CircleButton(
+                              radius: _exitButtonRadius,
+                              iconSize: _exitButtonRadius * 1.2,
+                              icon: Icons.fullscreen_exit,
+                              onPressed: close,
+                            ),
+                          ),
+                        ]),
                   ),
                 ),
               ),

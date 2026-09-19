@@ -22,10 +22,10 @@ class GatedEngine extends FakeEngine {
   GatedEngine(super.name);
 
   @override
-  Future<DjTrackInfo> prepare(DjTrack track) async {
+  Future<DjTrackInfo> prepare(DjTrack track, {bool whole = false}) async {
     final gate = playGates[track.id];
     if (gate != null) await gate.future;
-    return super.prepare(track);
+    return super.prepare(track, whole: whole);
   }
 }
 

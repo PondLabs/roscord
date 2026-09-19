@@ -1,7 +1,8 @@
-//! DJ music source: plays a local file (yt-dlp output: AAC in MP4, plain or
-//! fragmented; MP3, including concatenated streams; also Ogg Vorbis, FLAC,
-//! WAV, MKV/WebM with those codecs) as 48 kHz stereo for the WebRTC music
-//! track. Pure Rust (symphonia) plus our own windowed-sinc resampler.
+//! DJ music source: plays a local file, whole or still downloading (yt-dlp
+//! output: AAC in MP4, plain or fragmented; MP3, including concatenated
+//! streams; also Ogg Vorbis, FLAC, WAV, MKV/WebM with those codecs) as
+//! 48 kHz stereo for the WebRTC music track. Pure Rust (symphonia) plus our
+//! own windowed-sinc resampler.
 //!
 //! Dart drives a [`Player`] through the C ABI in [`ffi`]; a C++ thread in the
 //! WebRTC plugin pulls 10 ms blocks from it. Decoding runs on a background
@@ -9,6 +10,7 @@
 //! applies gain and soft-clips.
 
 pub mod ffi;
+pub mod growing;
 mod mp4;
 mod player;
 mod resample;

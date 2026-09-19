@@ -1258,10 +1258,17 @@ class _EditTrackDialogState extends State<_EditTrackDialog> {
 
 /// Compact "now playing" line for the top of the call, opening the booth.
 class DjNowPlayingPill extends StatelessWidget {
-  const DjNowPlayingPill({required this.dj, required this.onTap, super.key});
+  const DjNowPlayingPill(
+      {required this.dj,
+      required this.onTap,
+      this.padding = EdgeInsets.zero,
+      super.key});
 
   final DjSession dj;
   final VoidCallback onTap;
+
+  /// Around the pill, only while it shows.
+  final EdgeInsets padding;
 
   @override
   Widget build(BuildContext context) {
@@ -1279,39 +1286,42 @@ class DjNowPlayingPill extends StatelessWidget {
             : track.artist == null
                 ? track.title
                 : '${track.title} · ${track.artist}';
-        return Material(
-          color: Colors.black.withValues(alpha: 0.55),
-          borderRadius: BorderRadius.circular(24),
-          child: InkWell(
+        return Padding(
+          padding: padding,
+          child: Material(
+            color: Colors.black.withValues(alpha: 0.55),
             borderRadius: BorderRadius.circular(24),
-            onTap: onTap,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(6, 6, 14, 6),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 360),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  spacing: 8,
-                  children: [
-                    VinylDisc(
-                        size: 22,
-                        spinning: dj.isPlaying && !dj.isBuffering,
-                        label: track?.thumbnail == null
-                            ? null
-                            : NetworkImage(track!.thumbnail!)),
-                    Flexible(
-                      child: Text(
-                        line,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style:
-                            const TextStyle(color: Colors.white, fontSize: 13),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(24),
+              onTap: onTap,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(6, 6, 14, 6),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 360),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    spacing: 8,
+                    children: [
+                      VinylDisc(
+                          size: 22,
+                          spinning: dj.isPlaying && !dj.isBuffering,
+                          label: track?.thumbnail == null
+                              ? null
+                              : NetworkImage(track!.thumbnail!)),
+                      Flexible(
+                        child: Text(
+                          line,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 13),
+                        ),
                       ),
-                    ),
-                    if (track != null && !dj.isPlaying)
-                      const Icon(Icons.pause_rounded,
-                          size: 16, color: Colors.white70),
-                  ],
+                      if (track != null && !dj.isPlaying)
+                        const Icon(Icons.pause_rounded,
+                            size: 16, color: Colors.white70),
+                    ],
+                  ),
                 ),
               ),
             ),

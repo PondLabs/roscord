@@ -55,6 +55,95 @@ class DjMemberBadges extends StatelessWidget {
   }
 }
 
+/// The booth as a row of its own under the people in a voice channel in the
+/// sidebar, like a music bot: the record, who DJs and what plays. Shows
+/// only while someone DJs.
+class DjSidebarRow extends StatelessWidget {
+  const DjSidebarRow(
+      {required this.dj,
+      required this.nameOf,
+      this.onTap,
+      this.height = 37,
+      super.key});
+
+  final DjSession dj;
+
+  /// Display name of a user id.
+  final String Function(String userId) nameOf;
+  final VoidCallback? onTap;
+  final double height;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: dj,
+      builder: (context, _) {
+        final djUserId = dj.djUserId;
+        if (dj.isDisposed || djUserId == null || dj.isVacant) {
+          return const SizedBox.shrink();
+        }
+        final track = dj.current;
+        final color = Theme.of(context).colorScheme.secondary;
+        final song = track == null
+            ? 'Nothing playing'
+            : track.artist == null
+                ? track.title
+                : '${track.title} · ${track.artist}';
+        return SizedBox(
+          height: height,
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(6),
+              onTap: onTap,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: Row(
+                  spacing: 8,
+                  children: [
+                    VinylDisc(
+                        size: 24,
+                        spinning: dj.isPlaying && !dj.isBuffering,
+                        label: track?.thumbnail == null
+                            ? null
+                            : NetworkImage(track!.thumbnail!)),
+                    Expanded(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('DJ · ${nameOf(djUserId)}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .labelMedium
+                                  ?.copyWith(color: color, height: 1.2)),
+                          Text(song,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .labelSmall
+                                  ?.copyWith(
+                                      color: color.withValues(alpha: 0.7),
+                                      height: 1.2)),
+                        ],
+                      ),
+                    ),
+                    if (track != null && !dj.isPlaying)
+                      Icon(Icons.pause_rounded, size: 14, color: color),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 /// Right-click actions on the call member [userId] ([displayName]).
 ///
 /// On the DJ, [musicVolume] (the listener's own music slider) comes first:

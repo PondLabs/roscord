@@ -6,17 +6,20 @@
 
 use std::fs::File;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use symphonia::core::codecs::audio::well_known::CODEC_ID_MP3;
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, Track, TrackType};
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::packet::Packet;
 use symphonia::core::units::{Time, TimeBase};
 
+use crate::growing::{self, GrowingFile, Growth};
 use crate::mp4;
 use crate::ring::Frame;
 use crate::{ERR_DECODER, ERR_OPEN, ERR_SEEK, ERR_UNSUPPORTED};
@@ -61,9 +64,23 @@ struct Selected {
     decoder: Box<dyn AudioDecoder>,
 }
 
-fn probe(path: &Path) -> Result<Box<dyn FormatReader>, i32> {
-    let file = File::open(path).map_err(|_| ERR_OPEN)?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+/// The file at `path`, or a reader that waits for the rest of it if it is
+/// still downloading (`growth`).
+fn input(
+    path: &Path,
+    growth: &Option<Arc<Growth>>,
+    stop: &Arc<AtomicBool>,
+) -> Result<Box<dyn MediaSource>, i32> {
+    Ok(match growth {
+        Some(g) => {
+            Box::new(GrowingFile::open(path, g.clone(), stop.clone()).map_err(|_| ERR_OPEN)?)
+        }
+        None => Box::new(File::open(path).map_err(|_| ERR_OPEN)?),
+    })
+}
+
+fn probe(path: &Path, input: Box<dyn MediaSource>) -> Result<Box<dyn FormatReader>, i32> {
+    let mss = MediaSourceStream::new(input, Default::default());
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
@@ -196,15 +213,20 @@ fn skip_to(format: &mut dyn FormatReader, sel: &Selected, ms: u64) -> Result<Opt
 }
 
 /// Opens `path` positioned at `start_ms`. `known_duration_ms` skips the
-/// duration work when re-opening the same file for a seek.
+/// duration work when re-opening the same file for a seek. A file still
+/// downloading (see [`growing`]) is read as it arrives; waiting for it ends
+/// when `stop` is set.
 pub(crate) fn open(
     path: &Path,
     start_ms: u64,
     known_duration_ms: Option<u64>,
+    stop: &Arc<AtomicBool>,
 ) -> Result<Opened, i32> {
-    let mut format = probe(path)?;
+    let growth = growing::lookup(path);
+    let open_input = || input(path, &growth, stop);
+    let mut format = probe(path, open_input()?)?;
     let mut sel = select(format.as_ref())?;
-    let edit = mp4::edit(path);
+    let edit = open_input().ok().and_then(mp4::edit);
     // Where our zero sits on the track's timeline.
     let priming_ms = edit.map_or(0, |e| e.media_time * 1000 / e.timescale as u64);
 
@@ -213,11 +235,18 @@ pub(crate) fn open(
         None if edit.is_some_and(|e| e.duration_ms.is_some()) => {
             edit.and_then(|e| e.duration_ms).unwrap_or(0)
         }
+        // Scanning would wait for the whole download: take the length the
+        // site gave, which also covers MP3 headers that undercount.
+        None if growth.is_some() && (sel.is_mp3 || sel.reported_ms.is_none()) => growth
+            .as_ref()
+            .and_then(|g| g.duration_ms())
+            .or(sel.reported_ms.map(|d| d.saturating_sub(priming_ms)))
+            .unwrap_or(0),
         None if sel.is_mp3 || sel.reported_ms.is_none() => {
             let file_len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
             let scanned = scan_duration_ms(format.as_mut(), &sel, file_len);
             // The scan consumed the reader; start over.
-            format = probe(path)?;
+            format = probe(path, open_input()?)?;
             sel = select(format.as_ref())?;
             match (sel.reported_ms, scanned) {
                 // The header is exact unless it only describes the first of
@@ -255,7 +284,7 @@ pub(crate) fn open(
             Err(_) => {
                 // Unseekable or out of the header's range (concatenated MP3):
                 // walk the packets from the top instead.
-                format = probe(path).map_err(|_| ERR_SEEK)?;
+                format = probe(path, open_input()?).map_err(|_| ERR_SEEK)?;
                 sel = select(format.as_ref()).map_err(|_| ERR_SEEK)?;
                 match skip_to(format.as_mut(), &sel, seek_ms + priming_ms)? {
                     Some(p) => pending = Some(p),

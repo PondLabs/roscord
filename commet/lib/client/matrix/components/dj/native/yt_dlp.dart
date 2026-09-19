@@ -1,5 +1,6 @@
 // yt-dlp, as the DJ booth uses it: list what a link holds, and download one
-// song's audio to the booth's cache.
+// song's audio to the booth's cache, telling us the file as soon as it
+// knows it so the song can play while it downloads.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -32,12 +33,24 @@ class YtDlpException implements Exception {
   String toString() => message;
 }
 
-/// A downloaded song and what yt-dlp said about it.
+/// A song's file and what yt-dlp said about it.
 class YtDlpDownload {
   final String path;
   final Map<String, Object?> info;
 
   const YtDlpDownload(this.path, this.info);
+}
+
+/// A download under way.
+class YtDlpFetch {
+  /// The file yt-dlp is about to write, with its size (`filesize`, when the
+  /// site gives it) and the song's details. The file may not exist yet.
+  final Future<YtDlpDownload> started;
+
+  /// The whole file is on disk.
+  final Future<YtDlpDownload> finished;
+
+  YtDlpFetch(this.started, this.finished);
 }
 
 class YtDlp {
@@ -88,42 +101,134 @@ class YtDlp {
       '/b[ext=mp4][protocol^=http][height<=480]'
       '/ba[protocol^=http]';
 
-  /// Downloads [source]'s audio as `<directory>/<name>.<ext>`.
+  static const _fields = 'title,uploader,channel,artist,creator,duration,'
+      'thumbnail,id,extractor_key';
+  static const _startMark = 'commet-start ';
+  static const _doneMark = 'commet-done ';
+
+  /// YouTube now and then refuses a download (HTTP 403) that works when
+  /// asked again.
+  static const _attempts = 2;
+
+  /// Downloads [source]'s audio as `<directory>/<name>.<ext>`, reporting
+  /// the file before its first byte so it can be read as it arrives.
   /// [knownSitesOnly] leaves out yt-dlp's generic extractor, which fetches
   /// any page it is given: for songs another client named.
-  Future<YtDlpDownload> download(String source,
+  YtDlpFetch fetch(String source,
       {required String directory,
       required String name,
-      bool knownSitesOnly = false}) async {
-    final result = await runQuietly(
-        tools.ytDlp,
-        [
-          ..._common,
-          if (knownSitesOnly) ...['--use-extractors', 'default,-generic'],
-          '--no-playlist',
-          '--no-progress',
-          '--no-mtime',
-          // Downloads land in a .part file first: one cut short is never
-          // mistaken for a finished song.
-          '-f',
-          formatSelector,
-          '-o',
-          // `%` is template syntax in yt-dlp's output name.
-          '${directory.replaceAll('%', '%%')}${Platform.pathSeparator}'
-              '$name.%(ext)s',
-          '--print',
-          'after_move:%(.{filepath,title,uploader,channel,artist,creator,duration,thumbnail,id,extractor_key})j',
-          '--',
-          source,
-        ],
-        timeout: const Duration(minutes: 10));
-    final info = _lastJsonObject(result.stdout);
-    final path = info?['filepath'];
-    if (info == null || path is! String || !await File(path).exists()) {
-      throw YtDlpException.fromOutput(
-          result.stderr, "Couldn't download the song");
+      bool knownSitesOnly = false,
+      Duration timeout = const Duration(minutes: 10)}) {
+    final started = Completer<YtDlpDownload>();
+    final finished = Completer<YtDlpDownload>();
+    // Whoever only waits for one of them must not see the other fail
+    // unhandled.
+    started.future.ignore();
+    finished.future.ignore();
+
+    void fail(Object error) {
+      if (!started.isCompleted) started.completeError(error);
+      if (!finished.isCompleted) finished.completeError(error);
     }
-    return YtDlpDownload(path, info);
+
+    /// One run of yt-dlp: its final report, or null and why not.
+    Future<(Map<String, Object?>?, String)> run() async {
+      final process = await startQuietly(tools.ytDlp, [
+        ..._common,
+        if (knownSitesOnly) ...['--use-extractors', 'default,-generic'],
+        '--no-playlist',
+        '--no-progress',
+        '--no-mtime',
+        // Written in place, so it can be played while it grows. A cut
+        // short one is never taken for a song: only a finished download
+        // gets a record in the cache.
+        '--no-part',
+        // Fixups rewrite the file once it is done, under whoever is
+        // reading it; the player reads fragmented MP4 as it is.
+        '--fixup',
+        'never',
+        // --print alone would only simulate.
+        '--no-simulate',
+        '-f',
+        formatSelector,
+        '-o',
+        // `%` is template syntax in yt-dlp's output name.
+        '${directory.replaceAll('%', '%%')}${Platform.pathSeparator}'
+            '$name.%(ext)s',
+        '--print',
+        'before_dl:$_startMark%(.{filename,filesize,$_fields})j',
+        '--print',
+        'after_move:$_doneMark%(.{filepath,$_fields})j',
+        '--',
+        source,
+      ]);
+      final err = StringBuffer();
+      Map<String, Object?>? done;
+      final errDone = process.stderr
+          .transform(const SystemEncoding().decoder)
+          .forEach(err.write);
+      final outDone = process.stdout
+          .transform(const SystemEncoding().decoder)
+          .transform(const LineSplitter())
+          .forEach((line) {
+        if (line.startsWith(_startMark)) {
+          final info = _jsonObject(line.substring(_startMark.length));
+          final path = info?['filename'];
+          if (info != null && path is String && !started.isCompleted) {
+            started.complete(YtDlpDownload(path, info));
+          }
+        } else if (line.startsWith(_doneMark)) {
+          done = _jsonObject(line.substring(_doneMark.length)) ?? done;
+        }
+      });
+      try {
+        await Future.wait([outDone, errDone]).timeout(timeout);
+      } on TimeoutException {
+        process.kill();
+        throw YtDlpException('The download took too long');
+      }
+      final path = done?['filepath'];
+      final ok = path is String && await File(path).exists();
+      return (ok ? done : null, err.toString());
+    }
+
+    () async {
+      try {
+        for (var attempt = 1;; attempt++) {
+          final (info, err) = await run();
+          if (info != null) {
+            final download = YtDlpDownload(info['filepath'] as String, info);
+            if (!started.isCompleted) started.complete(download);
+            finished.complete(download);
+            return;
+          }
+          // Again, unless some of the song got written: a player may be
+          // reading it.
+          final file =
+              started.isCompleted ? File((await started.future).path) : null;
+          final written =
+              file != null && await file.exists() && await file.length() > 0;
+          if (attempt >= _attempts || written) {
+            throw YtDlpException.fromOutput(err, "Couldn't download the song");
+          }
+          // yt-dlp would take an empty file for a finished download.
+          if (file != null && await file.exists()) await file.delete();
+        }
+      } catch (e) {
+        fail(e);
+      }
+    }();
+
+    return YtDlpFetch(started.future, finished.future);
+  }
+
+  static Map<String, Object?>? _jsonObject(String text) {
+    try {
+      final json = jsonDecode(text.trim());
+      return json is Map<String, Object?> ? json : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   static Map<String, Object?>? _lastJsonObject(String output) {

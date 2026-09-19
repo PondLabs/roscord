@@ -1,7 +1,7 @@
 // dart:ffi bindings to the booth's player in librust_lib_commet
-// (rust/dj_audio, `commet_music_*`). The player decodes a downloaded song
-// and hands it, 10 ms at a time, to the WebRTC track flutter-webrtc feeds
-// from `commet_music_pull` (commet_music_source.h).
+// (rust/dj_audio, `commet_music_*`). The player decodes a song, whole or
+// still downloading, and hands it, 10 ms at a time, to the WebRTC track
+// flutter-webrtc feeds from `commet_music_pull` (commet_music_source.h).
 import 'dart:ffi';
 
 import 'package:commet/config/rust_library.dart';
@@ -30,7 +30,7 @@ final class MusicStatus extends Struct {
 enum MusicState { idle, playing, paused, ended, error, buffering }
 
 class DjMusicBindings {
-  static const abiVersion = 1;
+  static const abiVersion = 2;
 
   final DynamicLibrary lib;
 
@@ -64,6 +64,8 @@ class DjMusicBindings {
       bindings.seek;
       bindings.setGain;
       bindings.status;
+      bindings.fileGrowing;
+      bindings.fileDone;
       bindings.pullAddress;
       return _instance = bindings;
     } catch (e) {
@@ -100,6 +102,35 @@ class DjMusicBindings {
           void Function(Pointer<Void>, Pointer<MusicStatus>)>(
           'commet_music_status');
 
+  late final void Function(Pointer<Utf8>, int, int) fileGrowing =
+      lib.lookupFunction<Void Function(Pointer<Utf8>, Uint64, Uint64),
+          void Function(Pointer<Utf8>, int, int)>('commet_music_file_growing');
+  late final void Function(Pointer<Utf8>, int) fileDone = lib.lookupFunction<
+      Void Function(Pointer<Utf8>, Uint8),
+      void Function(Pointer<Utf8>, int)>('commet_music_file_done');
+
+  /// [path] is being downloaded: players read it as it arrives, waiting
+  /// for what isn't there yet. [totalBytes] and [durationMs] are 0 when
+  /// unknown.
+  void markGrowing(String path, {int totalBytes = 0, int durationMs = 0}) {
+    final native = path.toNativeUtf8();
+    try {
+      fileGrowing(native, totalBytes, durationMs);
+    } finally {
+      malloc.free(native);
+    }
+  }
+
+  /// The download of [path] ended, whole ([ok]) or broken off.
+  void markDone(String path, {required bool ok}) {
+    final native = path.toNativeUtf8();
+    try {
+      fileDone(native, ok ? 1 : 0);
+    } finally {
+      malloc.free(native);
+    }
+  }
+
   /// Address of `commet_music_pull`, for the C++ pacing thread.
   late final int pullAddress = lib
       .lookup<
@@ -132,7 +163,9 @@ class DjMusicPlayer {
 
   bool get isFreed => _handle == nullptr;
 
-  /// Loads [path] at [positionMs]; throws with a readable reason.
+  /// Loads [path] at [positionMs]; throws with a readable reason. A file
+  /// still downloading ([DjMusicBindings.markGrowing]) loads in the
+  /// background instead, and a failure shows in [status].
   void open(String path, {required int positionMs, required int trackId}) {
     final native = path.toNativeUtf8();
     try {

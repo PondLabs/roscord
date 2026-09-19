@@ -9,6 +9,11 @@
 //! Only 48 kHz is produced; any other rate yields silence. `free` must only
 //! be called once pulls have stopped; it joins the decoder thread.
 //!
+//! `file_growing` and `file_done` describe a download to every player: a
+//! file named there is read as it arrives (see [`crate::growing`]), and
+//! `open` and `seek` on it return at once, the file being opened in the
+//! background.
+//!
 //! Negative return codes: -1 arguments, -2 cannot open file, -3 unsupported
 //! format or no audio track, -4 seek failed, -5 decoder failure (status
 //! only).
@@ -17,10 +22,10 @@ use std::ffi::{c_char, c_void, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 
-use crate::{Player, ERR_ARGS};
+use crate::{growing, Player, ERR_ARGS};
 
 /// Bump when `MusicStatus` or the function signatures change.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -88,6 +93,40 @@ pub unsafe extern "C" fn commet_music_open(
         player.open(Path::new(path), start_ms, track_id)
     }))
     .unwrap_or(ERR_ARGS)
+}
+
+unsafe fn path_arg<'a>(path_utf8: *const c_char) -> Option<&'a Path> {
+    if path_utf8.is_null() {
+        return None;
+    }
+    CStr::from_ptr(path_utf8).to_str().ok().map(Path::new)
+}
+
+/// `path` is being downloaded: `total_len` bytes and `duration_ms` long,
+/// either 0 if unknown. Call before opening it.
+///
+/// # Safety
+/// `path_utf8` must be null or a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn commet_music_file_growing(
+    path_utf8: *const c_char,
+    total_len: u64,
+    duration_ms: u64,
+) {
+    if let Some(path) = path_arg(path_utf8) {
+        let _ = catch_unwind(|| growing::begin(path, total_len, duration_ms));
+    }
+}
+
+/// The download of `path` ended, complete (`ok` 1) or broken off (0).
+///
+/// # Safety
+/// `path_utf8` must be null or a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn commet_music_file_done(path_utf8: *const c_char, ok: u8) {
+    if let Some(path) = path_arg(path_utf8) {
+        let _ = catch_unwind(|| growing::finish(path, ok != 0));
+    }
 }
 
 /// # Safety

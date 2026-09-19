@@ -28,6 +28,7 @@ class VoipStreamView extends StatefulWidget {
       this.fit = BoxFit.cover,
       this.borderColor,
       this.canFullscreen = true,
+      this.canStopWatching = true,
       this.onFullscreen});
   final VoipStream stream;
   final VoipSession session;
@@ -39,6 +40,10 @@ class VoipStreamView extends StatefulWidget {
   final Function()? onFullscreen;
   final Color? borderColor;
   final bool canFullscreen;
+
+  /// Whether the corner shows the stop watching button (the fullscreen view
+  /// has its own way out).
+  final bool canStopWatching;
 
   @override
   State<VoipStreamView> createState() => _VoipStreamViewState();
@@ -173,7 +178,9 @@ class _VoipStreamViewState extends State<VoipStreamView> {
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                if (widget.stream.requiresWatching && widget.stream.isWatching)
+                if (widget.canStopWatching &&
+                    widget.stream.requiresWatching &&
+                    widget.stream.isWatching)
                   Tooltip(
                     message: labelStopWatchingStream,
                     child: SizedBox(
@@ -192,11 +199,11 @@ class _VoipStreamViewState extends State<VoipStreamView> {
                     (widget.stream.type == VoipStreamType.video ||
                         widget.stream.type == VoipStreamType.screenshare))
                   SizedBox(
-                    width: 40,
-                    height: 40,
+                    width: 48,
+                    height: 48,
                     child: tiamat.IconButton(
                       icon: Icons.fullscreen,
-                      size: 20,
+                      size: 28,
                       onPressed: widget.onFullscreen,
                     ),
                   ),

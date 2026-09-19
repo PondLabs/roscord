@@ -8,8 +8,9 @@ other.
 
 ## Shape
 
-The DJ's desktop client downloads each song with yt-dlp, decodes it in Rust
-and publishes it as its own stereo LiveKit track
+The DJ's desktop client downloads each song with yt-dlp, plays it while it
+downloads, decodes it in Rust and publishes it as its own stereo LiveKit
+track
 (`commet-dj-music`, 128 kbps Opus, DTX and RED off). Listeners just receive
 that track, so:
 
@@ -37,7 +38,7 @@ send the music back into the room through their microphone.
 | `commet/lib/client/components/dj/` | Platform-free booth: models, wire protocol, link parsing, the `DjSession` state machine. Unit tested in `commet/unit_test/dj/`. |
 | `commet/lib/client/matrix/components/dj/` | LiveKit transport, `DjBooths` (one booth per call, opened and closed by `MatrixLivekitVoipSession`), platform switch (`dj_platform*.dart`). |
 | `.../dj/native/` | Desktop only: `DjTools` (yt-dlp and Deno, found on PATH or downloaded with consent), `YtDlp`, `NativeDjLinkResolver` (yt-dlp, Spotify embed pages), `DjSongCache`, `NativeDjEngine`, FFI bindings. |
-| `rust/dj_audio` | The player: symphonia decode (AAC/MP4 incl. fragmented, MP3, Vorbis, FLAC, WAV), resampling to 48 kHz stereo, a ring buffer filled by a decoder thread, fades, gain. C ABI `commet_music_*`, linked into `librust_lib_commet`. |
+| `rust/dj_audio` | The player: symphonia decode (AAC/MP4 incl. fragmented, MP3, Vorbis, FLAC, WAV) of whole files or files still downloading (`growing.rs`), resampling to 48 kHz stereo, a ring buffer filled by a decoder thread, fades, gain. C ABI `commet_music_*`, linked into `librust_lib_commet`. |
 | `third_party/flutter-webrtc` | `commetCreateMusicTrack` / `commetStopMusicTrack` and `commet_music_source.h`: a kCustom audio source fed by a 10 ms pacing thread calling `commet_music_pull`. |
 | `third_party/livekit-client-sdk-flutter` | `AudioPublishOptions.stereo`: `TF_STEREO` on the track, `stereo=1;sprop-stereo=1` in our offer, and the subscriber answer mirrors stereo where the server offers it. |
 | `commet/lib/ui/organisms/dj/` | Booth panel, now-playing pill, spinning record, member badges and right-click actions, tools prompt. |
@@ -79,7 +80,8 @@ How the epoch moves:
   next epoch and starts playing 250 ms after that announcement is out; the
   old DJ fades out when it sees it. Queue, position and pause carry over. A
   DJ who hangs up during a pass doesn't empty the booth: the target finishes
-  the pass. A target that fails or says no answers `pfail`. The DJ's queue
+  the pass. A target that fails or says no answers `pfail`. The target
+  waits for the whole song, not just its start: it picks it up mid-way. The DJ's queue
   is locked while a pass is pending.
 - **Request.** A desktop listener asks; the DJ's state lists them, which puts
   a ✋ next to their name for everyone. Web and Android get an explanation
@@ -109,8 +111,22 @@ Scaffold for snack bars.
 - Spotify's audio is DRM protected: its public embed page gives title,
   artists and length (album and playlist pages list about 50 tracks), and
   each song plays from yt-dlp's `ytsearch1:` best YouTube match.
+- Songs play while they download, as a video does. yt-dlp writes the file
+  in place (`--no-part`, `--fixup never`) and prints its name and size
+  (`--print before_dl:`) before the first byte; Dart hands both to the
+  player (`commet_music_file_growing`), which reads the file as it grows
+  and waits for bytes that haven't arrived, then says when yt-dlp is done
+  (`commet_music_file_done`). YouTube's audio is fragmented MP4 with its
+  index up front, so it starts after the first few KB. Opening and seeking
+  such a file happen on the decoder thread, so nothing waits on the
+  network in the UI.
+- A download that breaks off plays what arrived, then the song fails with
+  yt-dlp's reason. One that fails before writing anything (YouTube answers
+  HTTP 403 now and then) is tried once more.
 - Songs are cached in `<app cache>/dj-songs/` (1.5 GB, oldest first), keyed
-  by source, and the next two queued songs are fetched ahead.
+  by source, and the next two queued songs are fetched ahead. Only a
+  finished download gets a record (`<key>.json`); anything else under its
+  key is deleted before fetching again.
 - On Windows yt-dlp runs detached (`ProcessStartMode.detachedWithStdio`) so no
   console window flashes; success is read from its output.
 
@@ -121,6 +137,9 @@ Scaffold for snack bars.
 - Spotify playlists beyond the embed page's first ~50 tracks are not read.
 - A song whose only formats are Opus/WebM, or YouTube HLS in MPEG-TS, can't
   be decoded.
+- An MP4 with its index at the end (not YouTube's) only starts once it has
+  all downloaded, and so does fragmented MP4 whose size the site doesn't
+  give.
 - Listening on web depends on the LiveKit audio element volume (0..100 %); on
   desktop the music can be boosted to 150 %.
 - Downloading YouTube audio without ads is against YouTube's terms.

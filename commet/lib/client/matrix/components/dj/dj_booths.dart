@@ -31,6 +31,24 @@ class DjBooths {
   static DjSession? of(VoipSession? session) =>
       session == null ? null : _booths[session];
 
+  /// Calls whose booth panel someone asked to see (the DJ row in the
+  /// sidebar), until the call view takes the request. Kept, not only
+  /// broadcast: the call view may not be showing yet.
+  static final Set<VoipSession> _panelWanted = {};
+  static final StreamController<VoipSession> _panelRequests =
+      StreamController.broadcast();
+  static Stream<VoipSession> get onPanelRequested => _panelRequests.stream;
+
+  /// Asks the call view of [session] to open its booth panel.
+  static void showPanel(VoipSession session) {
+    _panelWanted.add(session);
+    _panelRequests.add(session);
+  }
+
+  /// Whether the booth panel of [session] was asked for, clearing the ask.
+  static bool takePanelRequest(VoipSession session) =>
+      _panelWanted.remove(session);
+
   static DjSession open(VoipSession session, lk.Room room) {
     final existing = _booths[session];
     if (existing != null) return existing;

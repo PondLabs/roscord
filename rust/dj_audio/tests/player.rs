@@ -666,7 +666,7 @@ fn switching_tracks_is_click_free() {
 
 #[test]
 fn ffi_round_trip() {
-    assert_eq!(commet_music_abi_version(), 1);
+    assert_eq!(commet_music_abi_version(), 2);
     let path = gap_wav(44_100);
     let c_path = CString::new(path.to_str().unwrap()).unwrap();
     unsafe {
