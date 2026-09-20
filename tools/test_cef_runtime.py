@@ -36,6 +36,10 @@ WINDOWS_FILES = {
     "Resources/locales/en-US.pak": b"locale",
     "LICENSE.txt": b"BSD license\n",
     "CREDITS.html": b"<html>credits</html>\n",
+    "Release/libcef.lib": b"import library",
+    "cmake/cef_variables.cmake": b"set(CEF_ROOT .)\n",
+    "include/cef_app.h": b"// fixture header\n",
+    "libcef_dll/CMakeLists.txt": b"# fixture wrapper\n",
     "include/not-staged.h": b"not staged",
 }
 
@@ -195,6 +199,18 @@ class CEFRuntimeToolTests(unittest.TestCase):
             self.assertEqual(sbom["bomFormat"], "CycloneDX")
             self.assertEqual(sbom["specVersion"], "1.5")
             self.assertTrue(any(component["name"] == "Chromium" for component in sbom["components"]))
+
+    def test_stage_sdk_includes_build_inputs_without_accepting_unlisted_files(self) -> None:
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            lock, archives = _fixture_lock(directory)
+            sdk = directory / "sdk"
+            result = cef_runtime.stage_sdk("windows-x64", archives["windows-x64"], sdk, lock)
+            self.assertIn("include/cef_app.h", result["files"])
+            self.assertIn("libcef_dll/CMakeLists.txt", result["files"])
+            self.assertIn("Release/libcef.lib", result["files"])
+            self.assertTrue((sdk / "Release/libcef.dll").exists())
+            self.assertFalse((sdk / "Release/bootstrapc.exe").exists())
 
     def test_archive_hash_and_raw_manifest_are_verified_independently(self) -> None:
         with TemporaryDirectory() as temporary:

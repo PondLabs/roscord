@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:commet/cache/file_cache.dart';
+import 'package:commet/browser_runtime.dart';
 import 'package:commet/client/client_manager.dart';
 import 'package:commet/client/components/component.dart';
 import 'package:commet/client/components/push_notification/android/unified_push_notifier.dart';
@@ -64,6 +65,7 @@ Preferences preferences = Preferences();
 ShortcutsManager shortcutsManager = ShortcutsManager();
 BackgroundTaskManager backgroundTaskManager = BackgroundTaskManager();
 ClientManager? clientManager;
+BrowserRuntime? browserRuntime;
 
 bool isHeadless = false;
 
@@ -216,6 +218,13 @@ Future<void> initNecessary() async {
   if ((PlatformUtils.isWindows || PlatformUtils.isLinux) && !_rustLibReady) {
     await RustLib.init();
     _rustLibReady = true;
+  }
+
+  // The Windows adapter starts its single authenticated CEF host lazily on
+  // the first surface open; constructing it here makes the public runtime
+  // available to desktop callers without starting a process during startup.
+  if (PlatformUtils.isWindows) {
+    browserRuntime ??= WindowsBrowserRuntime();
   }
 
   fileCache = FileCache.getFileCacheInstance();

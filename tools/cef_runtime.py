@@ -300,6 +300,30 @@ def validate_lock(lock: Mapping[str, Any]) -> dict[str, Any]:
                     f"{platform}.runtime.required pattern is not allow-listed: {required_pattern}"
                 )
         _validate_optional_patterns(runtime.get("forbidden"), f"{platform}.runtime.forbidden")
+        build_sdk = record.get("build_sdk")
+        if platform == "windows-x64":
+            if not isinstance(build_sdk, dict):
+                raise LockError(f"{platform}.build_sdk must be an object")
+            build_required = _validate_patterns(
+                build_sdk.get("required"), f"{platform}.build_sdk.required"
+            )
+            build_allowlist = _validate_patterns(
+                build_sdk.get("allowlist"), f"{platform}.build_sdk.allowlist"
+            )
+            missing_build = [
+                pattern
+                for pattern in build_required
+                if not any(_pattern_covers(allowed, pattern) for allowed in build_allowlist)
+            ]
+            if missing_build:
+                raise LockError(
+                    f"{platform}.build_sdk.required is not allow-listed: {missing_build}"
+                )
+            _validate_optional_patterns(
+                build_sdk.get("forbidden"), f"{platform}.build_sdk.forbidden"
+            )
+        elif build_sdk is not None:
+            raise LockError(f"{platform}.build_sdk is only supported for Windows")
         bootstrap = record.get("bootstrap", {})
         if not isinstance(bootstrap, dict):
             raise LockError(f"{platform}.bootstrap must be an object")
@@ -522,13 +546,11 @@ def _path_matches(path: str, pattern: str) -> bool:
 
 
 def _pattern_covers(pattern: str, candidate: str) -> bool:
-    if pattern == candidate:
-        return True
-    if pattern.endswith("/**") and candidate.startswith(pattern[:-2]):
-        return True
-    if pattern.endswith("/*") and candidate.startswith(pattern[:-1]) and "/" not in candidate[len(pattern) - 1 :]:
-        return True
-    return False
+    # Required entries are themselves lock patterns.  An allow-list pattern
+    # covers one when the candidate path is accepted by that same safe
+    # fnmatch grammar; validation has already rejected absolute and traversal
+    # patterns.
+    return fnmatch.fnmatchcase(candidate, pattern)
 
 
 def _find_archive_root(extracted: Path) -> Path:
@@ -821,6 +843,78 @@ def stage_runtime(
     }
 
 
+def stage_sdk(
+    platform: str,
+    archive: Path | str,
+    destination: Path | str,
+    lock: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Verify and stage the locked CEF build SDK alongside its runtime.
+
+    Release payloads intentionally omit headers, CMake files, and import
+    libraries.  Native host builds use this separate directory, which keeps
+    the exact pinned SDK available without ever shipping it in the app.
+    """
+
+    if platform != "windows-x64":
+        raise LockError("the CEF build SDK is currently supported only on Windows")
+    lock = validate_lock(lock or load_lock())
+    record = _platform_record(lock, platform)
+    build_sdk = record["build_sdk"]
+    verify_archive(platform, archive, lock)
+    destination = Path(destination)
+    with tempfile.TemporaryDirectory(prefix="roscord-cef-sdk-") as temporary:
+        extracted = safe_extract(archive, Path(temporary) / "archive")
+        root = _find_archive_root(extracted)
+        runtime = record["runtime"]
+        runtime_allowlist = list(runtime["allowlist"])
+        build_allowlist = list(build_sdk["allowlist"])
+        runtime_forbidden = list(runtime.get("forbidden", []))
+        build_forbidden = list(build_sdk.get("forbidden", []))
+        files = _relative_files(root)
+        selected: list[tuple[Path, str]] = []
+        for path in files:
+            relative = path.relative_to(root).as_posix()
+            if any(_path_matches(relative, pattern) for pattern in build_forbidden):
+                continue
+            if any(_path_matches(relative, pattern) for pattern in build_allowlist):
+                selected.append((path, relative))
+            elif any(_path_matches(relative, pattern) for pattern in runtime_allowlist):
+                selected.append((path, relative))
+            elif any(_path_matches(relative, pattern) for pattern in runtime_forbidden):
+                # Runtime-only forbidden files (for example bootstrapc.exe and
+                # the import library) are either intentionally omitted or are
+                # selected above by the build SDK allow-list.
+                continue
+            elif relative.startswith(("Release/", "Resources/", "include/", "cmake/", "libcef_dll/")):
+                raise LockError(f"unexpected CEF SDK file in archive: {relative}")
+
+        selected_names = {relative for _, relative in selected}
+        for required in list(runtime["required"]) + list(build_sdk["required"]):
+            if not any(_path_matches(name, required) for name in selected_names):
+                raise LockError(f"required CEF SDK input is missing: {required}")
+        _ensure_no_symlink_ancestors(destination)
+        if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
+            raise LockError(f"staging destination must be a real directory: {destination}")
+        if destination.exists() and any(destination.iterdir()):
+            raise LockError(f"staging destination must be empty: {destination}")
+        destination.mkdir(parents=True, exist_ok=True)
+        for source, relative in selected:
+            target = destination.joinpath(*PurePosixPath(relative).parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            os.chmod(target, stat.S_IMODE(source.stat().st_mode))
+
+    manifest, digest = filesystem_manifest(destination)
+    return {
+        "platform": platform,
+        "cef_version": lock["cef_version"],
+        "files": sorted(selected_names),
+        "manifest": manifest,
+        "manifest_sha256": digest,
+    }
+
+
 def _verify_project_bootstrap(
     platform: str,
     project_root: Path | str | None,
@@ -1071,6 +1165,13 @@ def _parser() -> argparse.ArgumentParser:
     stage.add_argument("archive", type=Path)
     stage.add_argument("destination", type=Path)
 
+    sdk = subparsers.add_parser(
+        "stage-sdk", help="verify and stage the locked Windows CEF build SDK"
+    )
+    sdk.add_argument("--platform", type=_platform_argument, default="windows-x64")
+    sdk.add_argument("archive", type=Path)
+    sdk.add_argument("destination", type=Path)
+
     metadata = subparsers.add_parser("metadata", help="generate notices, SBOM, and provenance")
     metadata.add_argument("--platform", type=_platform_argument, required=True)
     metadata.add_argument(
@@ -1110,6 +1211,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                         lock,
                         project_root=args.project_root,
                     ),
+                    indent=2,
+                )
+            )
+        elif args.command == "stage-sdk":
+            print(
+                json.dumps(
+                    stage_sdk(args.platform, args.archive, args.destination, lock),
                     indent=2,
                 )
             )
