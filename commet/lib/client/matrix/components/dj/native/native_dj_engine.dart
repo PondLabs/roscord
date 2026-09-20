@@ -121,9 +121,8 @@ class DjSongCache {
     }
     // fc00::/7 unique local; ::ffff:a.b.c.d mapped IPv4.
     if ((b[0] & 0xfe) == 0xfc) return true;
-    final mapped = b.sublist(0, 10).every((x) => x == 0) &&
-        b[10] == 0xff &&
-        b[11] == 0xff;
+    final mapped =
+        b.sublist(0, 10).every((x) => x == 0) && b[10] == 0xff && b[11] == 0xff;
     return mapped &&
         isPrivateAddress(InternetAddress.fromRawAddress(b.sublist(12)));
   }
@@ -147,10 +146,8 @@ class DjSongCache {
     // The callback must not return a future: while it runs the map still
     // holds this chain, and awaiting what `remove` gives back would be
     // waiting on ourselves. A void body cannot.
-    unawaited(song
-        .then((s) => s.complete)
-        .catchError((Object _) {})
-        .then<void>((_) {
+    unawaited(
+        song.then((s) => s.complete).catchError((Object _) {}).then<void>((_) {
       _inFlight.remove(key);
     }));
     return song;
@@ -263,9 +260,8 @@ class DjSongCache {
     }
   }
 
-  static DateTime _newest(List<(File, FileStat)> files) => files
-      .map((f) => f.$2.modified)
-      .reduce((a, b) => a.isAfter(b) ? a : b);
+  static DateTime _newest(List<(File, FileStat)> files) =>
+      files.map((f) => f.$2.modified).reduce((a, b) => a.isAfter(b) ? a : b);
 }
 
 class NativeDjEngine implements DjPlaybackEngine {
@@ -331,8 +327,8 @@ class NativeDjEngine implements DjPlaybackEngine {
     if (_shutDown) return;
 
     // ignore: invalid_use_of_internal_member
-    final lkTrack = _lkTrack = lk.LocalAudioTrack(lk.TrackSource.unknown,
-        stream, track, const lk.AudioCaptureOptions());
+    final lkTrack = _lkTrack = lk.LocalAudioTrack(
+        lk.TrackSource.unknown, stream, track, const lk.AudioCaptureOptions());
     await participant.publishAudioTrack(lkTrack,
         publishOptions: const lk.AudioPublishOptions(
           name: MatrixLivekitVoipStream.musicTrackName,
@@ -379,8 +375,7 @@ class NativeDjEngine implements DjPlaybackEngine {
         try {
           await participant.removePublishedTrack(publication.sid);
         } catch (e, s) {
-          Log.onError(e, s,
-              content: 'DJ booth: could not unpublish the music');
+          Log.onError(e, s, content: 'DJ booth: could not unpublish the music');
         }
       }
     }
@@ -570,9 +565,8 @@ class _LocalMonitor {
   /// Asks for stereo Opus in both directions.
   static String? _stereo(String? sdp) {
     if (sdp == null) return null;
-    final opus =
-        RegExp(r'a=rtpmap:(\d+) opus/48000/2', caseSensitive: false)
-            .firstMatch(sdp);
+    final opus = RegExp(r'a=rtpmap:(\d+) opus/48000/2', caseSensitive: false)
+        .firstMatch(sdp);
     if (opus == null) return sdp;
     final pt = opus[1];
     return sdp.replaceAllMapped(RegExp('a=fmtp:$pt ([^\r\n]*)'), (m) {

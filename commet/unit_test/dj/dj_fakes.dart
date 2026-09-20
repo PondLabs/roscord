@@ -67,8 +67,8 @@ class FakeDjTransport implements DjTransport {
       scheduleMicrotask(() {
         if (member._incoming.isClosed) return;
         if (member.deafTo.contains(selfIdentity)) return;
-        member._incoming.add(DjIncoming(
-            selfIdentity, jsonDecode(wire) as Map<String, Object?>));
+        member._incoming.add(
+            DjIncoming(selfIdentity, jsonDecode(wire) as Map<String, Object?>));
       });
     }
   }

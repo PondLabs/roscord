@@ -127,7 +127,8 @@ void main() {
     expect(dj.isDj, isTrue);
 
     dj.addLinks([
-      for (var i = 0; i < 12; i++) 'https://www.youtube.com/watch?v=abcdefghij$i'
+      for (var i = 0; i < 12; i++)
+        'https://www.youtube.com/watch?v=abcdefghij$i'
     ].join('\n'));
 
     await tester.pumpWidget(_app(DjBoothPanel(session: _Session(), dj: dj)));
@@ -265,8 +266,7 @@ void main() {
     await _drain(tester);
 
     expect(dj.hasRequestedUser('@l:x'), isTrue, reason: 'the ✋ shows');
-    final items =
-        djMemberMenuItems(dj, userId: '@l:x', displayName: 'l');
+    final items = djMemberMenuItems(dj, userId: '@l:x', displayName: 'l');
     dj.passTo('@l:x:L1'); // what the panel's "Pass the decks" button does
     final passTarget = dj.passTarget;
     await _teardown(tester, [dj, listener]);
@@ -277,7 +277,8 @@ void main() {
         reason: 'the enabled "Pass the decks" button does nothing');
   });
 
-  testWidgets('right-click on a member row inside an activity box opens the '
+  testWidgets(
+      'right-click on a member row inside an activity box opens the '
       'member menu, not the activity one', (tester) async {
     await tester.pumpWidget(_app(
       AdaptiveContextMenu(
@@ -316,7 +317,8 @@ void main() {
     await _teardown(tester, [dj, l]);
   });
 
-  testWidgets('editing a queued song does not use its text fields after '
+  testWidgets(
+      'editing a queued song does not use its text fields after '
       'disposing them', (tester) async {
     final call = FakeCall();
     final dj = _session(call, '@dj:x:D1');

@@ -307,7 +307,8 @@ class _Booth extends StatelessWidget {
     return CustomScrollView(
       slivers: [
         SliverToBoxAdapter(
-          child: _DjStrip(key: const ValueKey('strip'), dj: dj, memberOf: memberOf),
+          child: _DjStrip(
+              key: const ValueKey('strip'), dj: dj, memberOf: memberOf),
         ),
         if (_handover(context) case final line?)
           SliverToBoxAdapter(key: const ValueKey('handover'), child: line),
@@ -427,9 +428,8 @@ class _DjStrip extends StatelessWidget {
     } else if (dj.isJoining) {
       line = 'Getting the decks ready…';
     } else {
-      line = you
-          ? "You're on the decks"
-          : '${member.displayName} is on the decks';
+      line =
+          you ? "You're on the decks" : '${member.displayName} is on the decks';
     }
 
     Widget? action;
@@ -447,7 +447,8 @@ class _DjStrip extends StatelessWidget {
               dimension: 18, child: CircularProgressIndicator(strokeWidth: 2)),
           if (dj.djIdentity != dj.selfIdentity)
             TextButton(
-                onPressed: () => dj.stopDjing(), child: const Text('No thanks')),
+                onPressed: () => dj.stopDjing(),
+                child: const Text('No thanks')),
         ],
       );
     } else if (dj.caps.canDj) {
@@ -520,8 +521,8 @@ class _Requests extends StatelessWidget {
               for (final identity in dj.requests)
                 Builder(builder: (context) {
                   final member = memberOf(djUserIdOf(identity));
-                  final canPass =
-                      dj.passTarget == null && dj.capsOf(identity)?.canDj == true;
+                  final canPass = dj.passTarget == null &&
+                      dj.capsOf(identity)?.canDj == true;
                   return Row(
                     spacing: 10,
                     children: [
@@ -701,7 +702,8 @@ class _NowPlayingState extends State<_NowPlaying> {
               IconButton(
                 tooltip: 'Back to the start',
                 icon: const Icon(Icons.replay_rounded),
-                onPressed: controls && !dj.isBuffering ? () => dj.seek(0) : null,
+                onPressed:
+                    controls && !dj.isBuffering ? () => dj.seek(0) : null,
               ),
               IconButton.filled(
                 tooltip: dj.isPlaying ? 'Pause for everyone' : 'Play',

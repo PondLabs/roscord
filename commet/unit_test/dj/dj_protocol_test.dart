@@ -15,7 +15,8 @@ void main() {
         for (var i = 0; i < 900; i++)
           DjTrack(
               id: 'id$i',
-              source: 'https://www.youtube.com/watch?v=${'$i'.padLeft(11, 'x')}',
+              source:
+                  'https://www.youtube.com/watch?v=${'$i'.padLeft(11, 'x')}',
               kind: DjSource.youtube,
               // Long enough to need many parts.
               title: 'Title ${i * 7919 % 10007} ${i.toRadixString(36)}',
@@ -50,10 +51,13 @@ void main() {
 
     test('nonsense parts are dropped', () {
       final assembler = DjPartAssembler();
-      expect(assembler.add('@a', {'t': 'part', 'id': 'x', 'i': 5, 'n': 2, 'd': ''}),
+      expect(
+          assembler
+              .add('@a', {'t': 'part', 'id': 'x', 'i': 5, 'n': 2, 'd': ''}),
           isNull);
       expect(
-          assembler.add('@a', {'t': 'part', 'id': 'x', 'i': 0, 'n': 1, 'd': '!!'}),
+          assembler
+              .add('@a', {'t': 'part', 'id': 'x', 'i': 0, 'n': 1, 'd': '!!'}),
           isNull);
       expect(DjProtocol.decodePacket(DjProtocol.encodePacket({'no': 'type'})),
           isNull);
@@ -139,10 +143,11 @@ void main() {
           p('https://open.spotify.com/intl-de/album/4LH4d3cOWNNsVw41Gqt2kv')
               ?.type,
           DjLinkType.spotifyAlbum);
-      expect(p('https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M')
-          ?.source, DjSource.spotify);
-      expect(p('https://open.spotify.com/artist/0gxyHStUsqpMadRV0Di1Qt'),
-          isNull);
+      expect(
+          p('https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M')?.source,
+          DjSource.spotify);
+      expect(
+          p('https://open.spotify.com/artist/0gxyHStUsqpMadRV0Di1Qt'), isNull);
       expect(p('https://open.spotify.com/'), isNull);
     });
 

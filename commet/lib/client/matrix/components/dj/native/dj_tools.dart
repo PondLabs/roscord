@@ -130,7 +130,9 @@ class DjToolPaths {
   final bool managedYtDlp;
 
   const DjToolPaths(
-      {required this.ytDlp, required this.jsRuntime, required this.managedYtDlp});
+      {required this.ytDlp,
+      required this.jsRuntime,
+      required this.managedYtDlp});
 }
 
 class DjTools {
@@ -140,8 +142,8 @@ class DjTools {
   Directory? _dir;
 
   Future<Directory> get directory async {
-    final dir = _dir ??=
-        Directory(p.join((await getApplicationSupportDirectory()).path, 'dj-tools'));
+    final dir = _dir ??= Directory(
+        p.join((await getApplicationSupportDirectory()).path, 'dj-tools'));
     if (!await dir.exists()) await dir.create(recursive: true);
     return dir;
   }
@@ -165,7 +167,8 @@ class DjTools {
     final ytDlp = await _findYtDlp();
     final js = await _findJsRuntime();
     if (ytDlp == null || js == null) return null;
-    _found = DjToolPaths(ytDlp: ytDlp.$1, jsRuntime: js, managedYtDlp: ytDlp.$2);
+    _found =
+        DjToolPaths(ytDlp: ytDlp.$1, jsRuntime: js, managedYtDlp: ytDlp.$2);
     _updateInBackground(_found!);
     return _found;
   }
@@ -183,7 +186,8 @@ class DjTools {
   static bool _recentYtDlp(String version) {
     final match = RegExp(r'(\d{4})\.(\d{1,2})\.(\d{1,2})').firstMatch(version);
     if (match == null) return false;
-    final v = (int.parse(match[1]!), int.parse(match[2]!), int.parse(match[3]!));
+    final v =
+        (int.parse(match[1]!), int.parse(match[2]!), int.parse(match[3]!));
     if (v.$1 != minYtDlp.$1) return v.$1 > minYtDlp.$1;
     if (v.$2 != minYtDlp.$2) return v.$2 > minYtDlp.$2;
     return v.$3 >= minYtDlp.$3;
@@ -211,8 +215,8 @@ class DjTools {
   }
 
   static bool _atLeast(String output, String prefix, List<int> wanted) {
-    final match =
-        RegExp('${RegExp.escape(prefix)}\\s*(\\d+)\\.(\\d+)').firstMatch(output);
+    final match = RegExp('${RegExp.escape(prefix)}\\s*(\\d+)\\.(\\d+)')
+        .firstMatch(output);
     if (match == null) return false;
     final major = int.parse(match[1]!);
     final minor = int.parse(match[2]!);
@@ -221,8 +225,8 @@ class DjTools {
 
   static Future<String?> _version(String program, List<String> args) async {
     try {
-      final result = await runQuietly(program, args,
-          timeout: const Duration(seconds: 10));
+      final result =
+          await runQuietly(program, args, timeout: const Duration(seconds: 10));
       final out = result.stdout.trim();
       if (result.exitCode != 0) return null;
       return out.isEmpty ? null : out;
@@ -232,7 +236,10 @@ class DjTools {
   }
 
   /// Rough download sizes, for the consent prompt.
-  static const downloadSizes = {DjTool.ytDlp: '18 MB', DjTool.jsRuntime: '45 MB'};
+  static const downloadSizes = {
+    DjTool.ytDlp: '18 MB',
+    DjTool.jsRuntime: '45 MB'
+  };
 
   /// Downloads what is [missing]. [onProgress] gets the tool being fetched
   /// and how far along it is (0..1, null while unknown).

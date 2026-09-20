@@ -56,8 +56,10 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
     final error = tester.takeException();
-    final shown =
-        find.textContaining("Couldn't hand the booth over").evaluate().isNotEmpty;
+    final shown = find
+        .textContaining("Couldn't hand the booth over")
+        .evaluate()
+        .isNotEmpty;
     // Let it time out.
     await tester.pump(const Duration(seconds: 8));
 
@@ -211,8 +213,8 @@ void main() {
       'the pass times out while the target is still on the setup prompt: '
       'the target is told the handover was called off', () async {
     final call = FakeCall();
-    final dj =
-        _session(call, '@dj:x:D1', passTimeout: const Duration(milliseconds: 200));
+    final dj = _session(call, '@dj:x:D1',
+        passTimeout: const Duration(milliseconds: 200));
     final consent = Completer<bool>();
     final b = _session(call, '@b:x:B1', prepare: () => consent.future);
     final notices = <DjNotice>[];

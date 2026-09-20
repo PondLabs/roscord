@@ -91,9 +91,10 @@ class NativeDjLinkResolver implements DjResolver {
       if (url == null) continue;
       final kind = _kindOf(entry, link);
       final id = _string(entry['id']);
-      final youtubeId = kind == DjSource.youtube && id != null && id.length == 11
-          ? id
-          : DjLinks.youtubeVideoId(url);
+      final youtubeId =
+          kind == DjSource.youtube && id != null && id.length == 11
+              ? id
+              : DjLinks.youtubeVideoId(url);
       tracks.add(DjTrack(
         id: newId(),
         source: youtubeId != null
@@ -115,10 +116,9 @@ class NativeDjLinkResolver implements DjResolver {
   }
 
   static DjSource _kindOf(Map<String, Object?> entry, DjLink link) {
-    final extractor = (_string(entry['ie_key']) ??
-            _string(entry['extractor_key']) ??
-            '')
-        .toLowerCase();
+    final extractor =
+        (_string(entry['ie_key']) ?? _string(entry['extractor_key']) ?? '')
+            .toLowerCase();
     if (extractor.startsWith('youtube')) return DjSource.youtube;
     if (extractor.startsWith('soundcloud')) return DjSource.soundcloud;
     return link.source == DjSource.spotify ? DjSource.other : link.source;
@@ -175,8 +175,9 @@ class SpotifyEmbed {
 
   Future<List<DjTrack>> tracks(DjLink link,
       {required String addedBy, String Function()? newId}) async {
-    newId ??= () => List.generate(
-        3, (_) => _random.nextInt(1 << 30).toRadixString(36)).join();
+    newId ??= () =>
+        List.generate(3, (_) => _random.nextInt(1 << 30).toRadixString(36))
+            .join();
     final type = link.url.split('/').reversed.skip(1).first;
     final response = await _http.get(
         Uri.parse('https://open.spotify.com/embed/$type/${link.id}'),
@@ -208,7 +209,8 @@ class SpotifyEmbed {
     } catch (_) {
       return const [];
     }
-    final entity = _path(data, ['props', 'pageProps', 'state', 'data', 'entity']);
+    final entity =
+        _path(data, ['props', 'pageProps', 'state', 'data', 'entity']);
     if (entity is! Map) return const [];
 
     final cover = _coverOf(entity);
@@ -223,8 +225,8 @@ class SpotifyEmbed {
               .join(', ')
           : null;
       return [
-        _track(title, artists, entity['duration'], link.url, cover, addedBy,
-            newId)
+        _track(
+            title, artists, entity['duration'], link.url, cover, addedBy, newId)
       ];
     }
 

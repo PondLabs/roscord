@@ -188,8 +188,7 @@ class DjSession extends ChangeNotifier {
     return !transport.isPresent(dj) || _djSilent;
   }
 
-  bool get _djSilent =>
-      _now().difference(_lastHeardFromDj) > djSilenceLimit;
+  bool get _djSilent => _now().difference(_lastHeardFromDj) > djSilenceLimit;
 
   /// When the DJ last said anything (a state or a tick).
   DateTime _lastHeardFromDj = DateTime.fromMillisecondsSinceEpoch(0);
@@ -366,8 +365,9 @@ class DjSession extends ChangeNotifier {
   }
 
   Future<void> _send(Map<String, Object?> message, {List<String>? to}) {
-    final sent = _outbox.then((_) => transport.send(message, to: to)).then(
-        (_) {}, onError: (_) {
+    final sent = _outbox
+        .then((_) => transport.send(message, to: to))
+        .then((_) {}, onError: (_) {
       // The data channel reports its own failures; the booth carries on and
       // the next state or tick repairs what was lost.
     });
@@ -422,7 +422,9 @@ class DjSession extends ChangeNotifier {
     _sendCaps(to: [sender]);
     if (isDj) {
       _sendState(to: [sender]);
-    } else if (_snap.dj == null && _snap.epoch > 0 && _role == DjRole.listener) {
+    } else if (_snap.dj == null &&
+        _snap.epoch > 0 &&
+        _role == DjRole.listener) {
       // An empty booth has nobody to speak for it: whoever knows it does,
       // so a newcomer claims with the right epoch and the kept queue.
       _sendState(to: [sender]);
@@ -484,7 +486,9 @@ class DjSession extends ChangeNotifier {
           'e': snap.epoch,
           'pid': passId,
           'why': "their app can't DJ",
-        }, to: [snap.dj!]);
+        }, to: [
+          snap.dj!
+        ]);
       }
     }
     _notify();
@@ -934,8 +938,14 @@ class DjSession extends ChangeNotifier {
         final passId = _takingPass;
         await _abandon(engine);
         if (from != null && passId != null) {
-          _send({'t': 'pfail', 'e': _snap.epoch, 'pid': passId, 'why': 'they said no'},
-              to: [from]);
+          _send({
+            't': 'pfail',
+            'e': _snap.epoch,
+            'pid': passId,
+            'why': 'they said no'
+          }, to: [
+            from
+          ]);
         }
       }
       return;
@@ -997,8 +1007,11 @@ class DjSession extends ChangeNotifier {
   Future<void> seek(int positionMs) async {
     if (_locked || _snap.current == null || _loading) return;
     final duration = durationMs;
-    final target = max(0,
-        duration != null && duration > 0 ? min(positionMs, duration) : positionMs);
+    final target = max(
+        0,
+        duration != null && duration > 0
+            ? min(positionMs, duration)
+            : positionMs);
     try {
       await _engine?.seek(target);
     } catch (e) {
@@ -1159,8 +1172,9 @@ class DjSession extends ChangeNotifier {
     _notify();
     final results = [
       for (final p in pending)
-        resolver.resolve(p.link, addedBy: selfUserId).then<List<DjTrack>?>(
-            (tracks) => tracks, onError: (Object e) {
+        resolver
+            .resolve(p.link, addedBy: selfUserId)
+            .then<List<DjTrack>?>((tracks) => tracks, onError: (Object e) {
           _notice("Couldn't add ${p.link.url}: $e", isError: true);
           return null;
         }),

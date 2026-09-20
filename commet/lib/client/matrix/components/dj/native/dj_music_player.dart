@@ -46,9 +46,8 @@ class DjMusicBindings {
     final lib = openRustLibrary();
     if (lib == null) return null;
     try {
-      final version =
-          lib.lookupFunction<Uint32 Function(), int Function()>(
-              'commet_music_abi_version')();
+      final version = lib.lookupFunction<Uint32 Function(), int Function()>(
+          'commet_music_abi_version')();
       if (version != abiVersion) {
         Log.w('DJ booth: music player ABI $version, expected $abiVersion');
         return null;
@@ -74,20 +73,20 @@ class DjMusicBindings {
     }
   }
 
-  late final Pointer<Void> Function() create = lib
-      .lookupFunction<Pointer<Void> Function(), Pointer<Void> Function()>(
+  late final Pointer<Void> Function() create =
+      lib.lookupFunction<Pointer<Void> Function(), Pointer<Void> Function()>(
           'commet_music_new');
   late final void Function(Pointer<Void>) free = lib.lookupFunction<
-      Void Function(Pointer<Void>), void Function(Pointer<Void>)>(
-      'commet_music_free');
+      Void Function(Pointer<Void>),
+      void Function(Pointer<Void>)>('commet_music_free');
   late final int Function(Pointer<Void>, Pointer<Utf8>, int, int) open =
       lib.lookupFunction<
           Int32 Function(Pointer<Void>, Pointer<Utf8>, Uint64, Uint64),
-          int Function(Pointer<Void>, Pointer<Utf8>, int, int)>(
-          'commet_music_open');
+          int Function(
+              Pointer<Void>, Pointer<Utf8>, int, int)>('commet_music_open');
   late final void Function(Pointer<Void>) stop = lib.lookupFunction<
-      Void Function(Pointer<Void>), void Function(Pointer<Void>)>(
-      'commet_music_stop');
+      Void Function(Pointer<Void>),
+      void Function(Pointer<Void>)>('commet_music_stop');
   late final void Function(Pointer<Void>, int) setPaused = lib.lookupFunction<
       Void Function(Pointer<Void>, Uint8),
       void Function(Pointer<Void>, int)>('commet_music_set_paused');
@@ -98,9 +97,10 @@ class DjMusicBindings {
       Void Function(Pointer<Void>, Float),
       void Function(Pointer<Void>, double)>('commet_music_set_gain');
   late final void Function(Pointer<Void>, Pointer<MusicStatus>) status =
-      lib.lookupFunction<Void Function(Pointer<Void>, Pointer<MusicStatus>),
-          void Function(Pointer<Void>, Pointer<MusicStatus>)>(
-          'commet_music_status');
+      lib.lookupFunction<
+          Void Function(Pointer<Void>, Pointer<MusicStatus>),
+          void Function(
+              Pointer<Void>, Pointer<MusicStatus>)>('commet_music_status');
 
   late final void Function(Pointer<Utf8>, int, int) fileGrowing =
       lib.lookupFunction<Void Function(Pointer<Utf8>, Uint64, Uint64),

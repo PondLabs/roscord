@@ -83,7 +83,8 @@ class DjBooths {
     // applies to this call's music too.
     void applyListening() {
       if (session.isDeafened) return;
-      for (final stream in session.streams.whereType<MatrixLivekitVoipStream>()) {
+      for (final stream
+          in session.streams.whereType<MatrixLivekitVoipStream>()) {
         if (stream.type == VoipStreamType.music &&
             stream.direction == VoipStreamDirection.incoming) {
           stream.applyVolume(preferences.djMusicVolume.value);
