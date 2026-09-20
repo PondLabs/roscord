@@ -141,54 +141,6 @@ void main() {
             'a row above the Expanded queue');
   });
 
-  testWidgets('only the DJ can set how loud the room hears the music',
-      (tester) async {
-    final call = FakeCall();
-    final dj = _session(call, '@dj:x:D1');
-    final listener = _session(call, '@b:x:B1');
-    await dj.becomeDj();
-    await _drain(tester);
-
-    // The listener sends nothing, so a room-wide level is not theirs to
-    // set: they get their own volume and nothing else.
-    await tester
-        .pumpWidget(_app(DjBoothPanel(session: _Session(), dj: listener)));
-    await tester.pump();
-    expect(find.byType(DjMasterVolume), findsNothing);
-    expect(find.byType(DjMusicVolume), findsOneWidget);
-
-    await tester.pumpWidget(_app(DjBoothPanel(session: _Session(), dj: dj)));
-    await tester.pump();
-    expect(find.byType(DjMasterVolume), findsOneWidget);
-    expect(find.byType(DjMusicVolume), findsOneWidget);
-
-    await _teardown(tester, [dj, listener]);
-  });
-
-  testWidgets('the room level is heard while dragged and saved when let go',
-      (tester) async {
-    final call = FakeCall();
-    final dj = _session(call, '@dj:x:D1');
-    await dj.becomeDj();
-    await _drain(tester);
-    await tester.pumpWidget(_app(DjBoothPanel(session: _Session(), dj: dj)));
-    await tester.pump();
-
-    // Dragging: the live level is what everything listening reads, and
-    // nothing is written yet.
-    await setDjMasterVolume(0.4, save: false);
-    expect(liveDjMasterVolume.value, 0.4);
-    expect(preferences.djMasterVolume.value, 1.0);
-
-    // Letting go saves it, and the live level steps out of the way only
-    // once the saved one has caught up.
-    await setDjMasterVolume(0.4);
-    expect(preferences.djMasterVolume.value, 0.4);
-    expect(liveDjMasterVolume.value, isNull);
-
-    await _teardown(tester, [dj]);
-  });
-
   for (final height in [720.0, 560.0, 480.0, 420.0]) {
     testWidgets(
         'side panel fits a playing DJ with two people asking, ${height}px tall',

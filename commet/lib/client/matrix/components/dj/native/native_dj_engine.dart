@@ -268,17 +268,14 @@ class NativeDjEngine implements DjPlaybackEngine {
   final lk.Room room;
   final DjMusicBindings bindings;
 
-  NativeDjEngine(this.room, this.bindings,
-      {double monitorVolume = 1, double masterVolume = 1})
-      : _monitorVolume = monitorVolume,
-        _masterVolume = masterVolume;
+  NativeDjEngine(this.room, this.bindings, {double monitorVolume = 1})
+      : _monitorVolume = monitorVolume;
 
   DjMusicPlayer? _player;
   rtc.MediaStream? _stream;
   lk.LocalAudioTrack? _lkTrack;
   final _LocalMonitor _monitor = _LocalMonitor();
   double _monitorVolume;
-  double _masterVolume;
 
   /// Tracks ids for the Rust player, which counts them in integers.
   final Map<String, int> _numbers = {};
@@ -303,9 +300,6 @@ class NativeDjEngine implements DjPlaybackEngine {
     final participant = room.localParticipant;
     if (participant == null) throw StateError('Not connected to the call');
     final player = _player = DjMusicPlayer(bindings);
-    // Before a single block is pulled, so the room never hears the song
-    // at full volume for an instant first.
-    player.setGain(_masterVolume);
 
     final response = await rtc.WebRTC.invokeMethod(
         'commetCreateMusicTrack', <String, dynamic>{
@@ -494,14 +488,6 @@ class NativeDjEngine implements DjPlaybackEngine {
   set monitorVolume(double volume) {
     _monitorVolume = volume;
     _monitor.setVolume(volume);
-  }
-
-  @override
-  set masterVolume(double volume) {
-    _masterVolume = volume;
-    // The player ramps to it, so this is click-free mid-song. The monitor
-    // hears it too: it receives the very track this gain shapes.
-    _player?.setGain(volume);
   }
 }
 

@@ -555,24 +555,6 @@ void main() {
       expect(b.session.isPlaying, isTrue);
     });
 
-    test('the room level reaches the player, a listener has nowhere to put it',
-        () async {
-      final a = await djWith('@a:x:DEV1', ['https://youtu.be/aaaaaaaaaaa']);
-      final b = join('@b:x:DEV2');
-      await settle();
-
-      // The DJ's booth sends the music, so the level lands on the player
-      // and everyone in the room hears it.
-      a.session.masterVolume = 0.25;
-      expect(a.engine!.master, 0.25);
-
-      // A listener has no engine: setting it changes nothing and, above
-      // all, does not throw.
-      expect(b.engine, isNull);
-      b.session.masterVolume = 0.25;
-      expect(b.session.isDj, isFalse);
-    });
-
     test('a long queue reaches everyone in one piece', () async {
       final resolver = FakeResolver(count: 400);
       final a = join('@a:x:DEV1', resolver: resolver);

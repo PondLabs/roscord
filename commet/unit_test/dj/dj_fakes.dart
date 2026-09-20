@@ -193,11 +193,6 @@ class FakeEngine implements DjPlaybackEngine {
 
   @override
   set monitorVolume(double volume) => monitor = volume;
-
-  double master = 1.0;
-
-  @override
-  set masterVolume(double volume) => master = volume;
 }
 
 /// Turns any link into [count] tracks titled after it.

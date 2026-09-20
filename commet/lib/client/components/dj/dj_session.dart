@@ -1405,8 +1405,4 @@ class DjSession extends ChangeNotifier {
   /// How loud the DJ hears their own music. Listeners set theirs on the
   /// music stream instead.
   set monitorVolume(double volume) => _engine?.monitorVolume = volume;
-
-  /// How loud this booth sends its music out, for everyone. Only the DJ
-  /// has an engine to set it on.
-  set masterVolume(double volume) => _engine?.masterVolume = volume;
 }

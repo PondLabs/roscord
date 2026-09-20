@@ -19,11 +19,9 @@ that track, so:
 - the music arrives through WebRTC playout, so the echo canceller removes it
   from every listener's microphone, loudspeaker users included;
 - each listener's volume is the playback volume of that one track
-  (`preferences.djMusicVolume`, one level for all music, apart from voices);
-- and the DJ sets how loud it goes out for everyone
-  (`preferences.djMasterVolume`), applied as the Rust player's gain, so it
-  is in the track itself before anyone receives it. Their own monitor
-  follows it, because the monitor receives that very track.
+  (`preferences.djMusicVolume`, one level for all music, apart from voices).
+  The booth always sends at full level; how loud the music is, is each
+  listener's own business.
 
 Only desktop (Linux, Windows) can DJ: it needs the Rust player
 (`librust_lib_commet` is not built for Android or web) and to run yt-dlp.
@@ -45,7 +43,7 @@ send the music back into the room through their microphone.
 | `rust/dj_audio` | The player: symphonia decode (Opus in WebM/Ogg, AAC/MP4 incl. fragmented, MP3, Vorbis, FLAC, WAV) of whole files or files still downloading (`growing.rs`), resampling to 48 kHz stereo, a ring buffer filled by a decoder thread, fades, gain. C ABI `commet_music_*`, linked into `librust_lib_commet`. Opus is `opus.rs`, on the pure-Rust `opus-rs`. |
 | `third_party/flutter-webrtc` | `commetCreateMusicTrack` / `commetStopMusicTrack` and `commet_music_source.h`: a kCustom audio source fed by a 10 ms pacing thread calling `commet_music_pull`. |
 | `third_party/livekit-client-sdk-flutter` | `AudioPublishOptions.stereo`: `TF_STEREO` on the track, `stereo=1;sprop-stereo=1` in our offer, and the subscriber answer mirrors stereo where the server offers it. |
-| `commet/lib/ui/organisms/dj/` | Booth panel, now-playing pill, spinning record, member badges and right-click actions, tools prompt, the listener's music volume and the DJ's room volume. |
+| `commet/lib/ui/organisms/dj/` | Booth panel, now-playing pill, spinning record, member badges and right-click actions, tools prompt, the listener's music volume. |
 
 ## Who is the DJ
 
