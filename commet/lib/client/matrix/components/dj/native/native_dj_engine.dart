@@ -13,6 +13,7 @@ import 'dart:io';
 
 import 'package:commet/client/components/dj/dj_engine.dart';
 import 'package:commet/client/components/dj/dj_models.dart';
+import 'package:commet/client/components/dj/in_flight.dart';
 import 'package:commet/client/matrix/components/dj/native/dj_music_player.dart';
 import 'package:commet/client/matrix/components/dj/native/dj_tools.dart';
 import 'package:commet/client/matrix/components/dj/native/yt_dlp.dart';
@@ -37,7 +38,7 @@ class DjSongCache {
   static const maxBytes = 1500 * 1024 * 1024;
 
   Directory? _dir;
-  final Map<String, Future<YtDlpDownload>> _inFlight = {};
+  final InFlight<YtDlpDownload> _inFlight = InFlight();
 
   /// Songs used since the app started: never trimmed, one may be playing.
   final Set<String> _used = {};
@@ -115,8 +116,7 @@ class DjSongCache {
     }
     final key = _keyOf(source);
     _used.add(key);
-    return _inFlight[key] ??= _fetch(source, key, trusted: trusted)
-        .whenComplete(() => _inFlight.remove(key));
+    return _inFlight.run(key, () => _fetch(source, key, trusted: trusted));
   }
 
   Future<YtDlpDownload> _fetch(String source, String key,
@@ -181,7 +181,7 @@ class DjSongCache {
           0, (sum, s) => sum + s.value.fold<int>(0, (t, f) => t + f.$2.size));
       for (final song in songs) {
         if (total <= maxBytes) break;
-        if (_used.contains(song.key) || _inFlight.containsKey(song.key)) {
+        if (_used.contains(song.key) || _inFlight.isRunning(song.key)) {
           continue;
         }
         for (final (file, stat) in song.value) {
