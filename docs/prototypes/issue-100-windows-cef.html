@@ -493,8 +493,11 @@
       walkthroughTabs.innerHTML = WALKTHROUGHS.map((flow) => `<button class="walkthrough-tab ${flow.id === activeWalkthrough ? 'active' : ''}" data-walkthrough="${flow.id}">${flow.title}</button>`).join('');
       walkthroughTabs.querySelectorAll('[data-walkthrough]').forEach((button) => button.addEventListener('click', () => {
         activeWalkthrough = button.dataset.walkthrough;
+        const flow = WALKTHROUGHS.find((item) => item.id === activeWalkthrough);
+        state = initialState(flow.mode);
+        walkthroughProgress[flow.id] = [];
         renderWalkthroughTabs();
-        renderWalkthrough();
+        renderState();
       }));
     }
 
