@@ -85,6 +85,25 @@
           "libcef_dll/**",
           "tests/**"
         ]
+      },
+      "build_sdk": {
+        "required": [
+          "Release/libcef.lib",
+          "include/cef_app.h",
+          "cmake/cef_variables.cmake",
+          "libcef_dll/CMakeLists.txt"
+        ],
+        "allowlist": [
+          "Release/*.lib",
+          "cmake/**",
+          "include/**",
+          "libcef_dll/**"
+        ],
+        "forbidden": [
+          "Debug/**",
+          "tests/**",
+          "tools/**"
+        ]
       }
     },
     "linux-x64": {

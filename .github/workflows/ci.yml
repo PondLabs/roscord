@@ -61,7 +61,7 @@ jobs:
       - name: Verify locked CEF release inputs
         run: |
           python3 tools/cef_runtime.py validate-lock
-          python3 -m unittest tools.test_cef_runtime
+          python3 -m unittest tools.test_cef_runtime tools.test_cef_host_contract
 
       - name: Setup Rust
         if: steps.find.outputs.rust_crates != '' || steps.find.outputs.dart == 'true'
