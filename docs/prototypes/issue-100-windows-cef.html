@@ -320,11 +320,11 @@
       {
         id: 'embedded',
         title: 'Embedded happy path',
-        description: 'Exercise the texture contract: start one host, open OSR, drive a widget, prove permissions and IME, resize, try the optional GPU copy, and close cleanly.',
+        description: 'Exercise the texture contract: start one host, select an account profile, open OSR, drive a widget, prove permissions and IME, resize, try the optional GPU copy, and close cleanly.',
         mode: 'embedded',
         steps: [
-          ['START_HOST', 'Start native host'], ['OPEN_BROWSER', 'Open OSR browser'], ['NAVIGATE', 'Navigate'],
-          ['SEND_JS', 'Send JS IPC'], ['RECEIVE_JS', 'Receive JS IPC'], ['SELECT_PROFILE', 'Select profile'],
+          ['START_HOST', 'Start native host'], ['SELECT_PROFILE', 'Select profile'], ['OPEN_BROWSER', 'Open OSR browser'], ['NAVIGATE', 'Navigate'],
+          ['SEND_JS', 'Send JS IPC'], ['RECEIVE_JS', 'Receive JS IPC'],
           ['REQUEST_PERMISSION', 'Request permission'], ['DENY_PERMISSION', 'Deny by default'], ['FOCUS', 'Focus'],
           ['IME', 'Commit IME'], ['RESIZE', 'Resize'], ['TOGGLE_GPU', 'Try GPU copy'], ['POPUP', 'Open popup'],
           ['CLOSE_POPUP', 'Close popup'], ['CLOSE_BROWSER', 'Close browser'], ['SHUTDOWN', 'Shutdown host']
@@ -336,8 +336,8 @@
         description: 'Use the same host commands with a native windowed browser. Notice that frames do not cross into Flutter, while profile, permission, input, popup, and shutdown rules stay the same.',
         mode: 'separate',
         steps: [
-          ['START_HOST', 'Start native host'], ['OPEN_BROWSER', 'Open owned HWND'], ['NAVIGATE', 'Navigate'],
-          ['SEND_JS', 'Send JS IPC'], ['RECEIVE_JS', 'Receive JS IPC'], ['SELECT_PROFILE', 'Select profile'],
+          ['START_HOST', 'Start native host'], ['SELECT_PROFILE', 'Select profile'], ['OPEN_BROWSER', 'Open owned HWND'], ['NAVIGATE', 'Navigate'],
+          ['SEND_JS', 'Send JS IPC'], ['RECEIVE_JS', 'Receive JS IPC'],
           ['REQUEST_PERMISSION', 'Request permission'], ['ALLOW_PERMISSION', 'Allow for this run'], ['FOCUS', 'Focus'],
           ['IME', 'Commit IME'], ['RESIZE', 'Resize'], ['TOGGLE_GPU', 'Use native GPU'], ['POPUP', 'Open popup'],
           ['CLOSE_POPUP', 'Close popup'], ['CLOSE_BROWSER', 'Close browser'], ['SHUTDOWN', 'Shutdown host']
@@ -350,8 +350,9 @@
         mode: 'embedded',
         steps: [
           ['SHUTDOWN', 'Reject early shutdown'], ['SEND_JS', 'Reject early IPC'], ['REQUEST_PERMISSION', 'Reject early permission'],
-          ['START_HOST', 'Start host'], ['OPEN_BROWSER', 'Open browser'], ['SELECT_PROFILE', 'Reject live profile switch'],
-          ['SHUTDOWN', 'Reject shutdown with browser'], ['CLOSE_BROWSER', 'Close browser'], ['SHUTDOWN', 'Shutdown cleanly']
+          ['START_HOST', 'Start host'], ['SELECT_PROFILE', 'Select profile'], ['OPEN_BROWSER', 'Open browser'],
+          ['SELECT_PROFILE', 'Reject live profile switch'], ['SHUTDOWN', 'Reject shutdown with browser'],
+          ['CLOSE_BROWSER', 'Close browser'], ['SHUTDOWN', 'Shutdown cleanly']
         ]
       }
     ];
@@ -392,8 +393,9 @@
           return event({ ...state, host: 'running' }, 'CEF host initialized; framed control channel ready.');
         case 'OPEN_BROWSER':
           if (state.host !== 'running') return blocked(state, 'start the native host first');
+          if (state.profile === 'unselected') return blocked(state, 'select an account profile before opening a browser');
           if (state.browser === 'open') return blocked(state, 'browser is already open');
-          return event({ ...state, browser: 'open', profile: 'unselected', permission: 'not requested', focus: 'focused' }, `Browser created using ${MODES[state.mode].surface}.`);
+          return event({ ...state, browser: 'open', permission: 'not requested', focus: 'focused' }, `Browser created using ${MODES[state.mode].surface}.`);
         case 'NAVIGATE':
           if (state.browser !== 'open') return blocked(state, 'open a browser first');
           return event({ ...state, url: 'https://widget.local/fixture', js: 'idle' }, 'Navigation command sent; load-stop event received.');
