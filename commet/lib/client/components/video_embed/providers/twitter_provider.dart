@@ -15,6 +15,45 @@ class TwitterStatusInfo {
   const TwitterStatusInfo({required this.username, required this.statusId});
 }
 
+class TwitterPhoto {
+  final Uri url;
+  final int? width;
+  final int? height;
+
+  const TwitterPhoto({required this.url, this.width, this.height});
+
+  double? get aspectRatio {
+    final w = width;
+    final h = height;
+    if (w == null || h == null || h <= 0) return null;
+    return w / h;
+  }
+}
+
+/// A status as its own client shows it: author line, text and photos. Used to
+/// build preview cards that don't fall back to the scraped og: card.
+class TwitterPost {
+  final String text;
+  final String? authorName;
+  final String? authorHandle;
+  final List<TwitterPhoto> photos;
+
+  const TwitterPost({
+    required this.text,
+    this.authorName,
+    this.authorHandle,
+    this.photos = const [],
+  });
+
+  /// "Censored Men (@CensoredMen)", or whichever half the status carried.
+  String? get title {
+    final handle = authorHandle;
+    final name = authorName;
+    if (name == null) return handle != null ? '@$handle' : null;
+    return handle != null ? '$name (@$handle)' : name;
+  }
+}
+
 class TwitterProvider implements VideoProvider {
   TwitterProvider({http.Client? httpClient}) : _defaultHttpClient = httpClient;
 
@@ -122,19 +161,34 @@ class TwitterProvider implements VideoProvider {
     );
   }
 
-  /// First photo attached to a status, for previewing image posts (which
-  /// [resolve] rejects). Null when the status has no photos.
-  Future<Uri?> resolvePhoto(Uri uri, {http.Client? client}) async {
+  /// The status as posted (author, text, every photo), for previewing image
+  /// posts, which [resolve] rejects. Null when the status cannot be fetched.
+  Future<TwitterPost?> resolvePost(Uri uri, {http.Client? client}) async {
     final info = extractStatusInfo(uri);
     if (info == null) return null;
 
     final tweet = await _fetchTweet(info, client);
-    final media = tweet?['media'] as Map<String, dynamic>?;
-    final photos = media?['photos'] as List<dynamic>?;
-    if (photos == null || photos.isEmpty) return null;
+    if (tweet == null) return null;
 
-    final url = (photos.first as Map<String, dynamic>)['url'] as String?;
-    return url != null ? Uri.tryParse(url) : null;
+    final author = tweet['author'] as Map<String, dynamic>?;
+    final media = tweet['media'] as Map<String, dynamic>?;
+    final photos = media?['photos'] as List<dynamic>? ?? const [];
+
+    return TwitterPost(
+      text: tweet['text'] as String? ?? '',
+      authorName: author?['name'] as String?,
+      authorHandle: author?['screen_name'] as String?,
+      photos: [
+        for (final photo in photos)
+          if (photo is Map<String, dynamic>)
+            if (Uri.tryParse(photo['url'] as String? ?? '') case final url?)
+              TwitterPhoto(
+                url: url,
+                width: (photo['width'] as num?)?.toInt(),
+                height: (photo['height'] as num?)?.toInt(),
+              ),
+      ],
+    );
   }
 
   Future<Map<String, dynamic>?> _fetchTweet(

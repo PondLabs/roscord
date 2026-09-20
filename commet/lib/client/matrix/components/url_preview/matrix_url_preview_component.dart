@@ -231,15 +231,23 @@ class MatrixUrlPreviewComponent implements UrlPreviewComponent<MatrixClient> {
     var destinationType = UrlDestinationType.page;
     VideoAttachment? videoAttachment;
     VideoEmbedInfo? videoEmbedInfo;
+    var images = const <UrlPreviewImage>[];
 
     if (CompositeVideoProvider.instance.canHandle(url)) {
       try {
         videoEmbedInfo = await CompositeVideoProvider.instance.resolve(url);
         // A provider knowing the link doesn't make it a video: an X post may
-        // be text or photos only, and then it previews as a page.
+        // be text or photos only, and then it previews as a page. Prefer the
+        // status' own author/text over the scraped og: card, which appends a
+        // pic.twitter.com link and loses the author handle.
         if (videoEmbedInfo == null) {
-          final photo = await _resolvePhoto(url);
-          if (photo != null) image = photo;
+          final post = await _resolvePost(url);
+          if (post != null) {
+            images = _toPreviewImages(post.photos);
+            if (images.isNotEmpty) image = images.first.image;
+            title = post.title ?? title;
+            if (post.text.isNotEmpty) description = post.text;
+          }
         } else {
           destinationType = UrlDestinationType.video;
           siteName ??= videoEmbedInfo.platformName;
@@ -282,10 +290,6 @@ class MatrixUrlPreviewComponent implements UrlPreviewComponent<MatrixClient> {
       }
     }
 
-    if (description != null) {
-      description = description.replaceAll("\n", "    ");
-    }
-
     return UrlPreviewData(
       url,
       siteName: siteName,
@@ -295,6 +299,7 @@ class MatrixUrlPreviewComponent implements UrlPreviewComponent<MatrixClient> {
       videoEmbedInfo: videoEmbedInfo,
       type: destinationType,
       description: description,
+      images: images,
     );
   }
 
@@ -329,12 +334,18 @@ class MatrixUrlPreviewComponent implements UrlPreviewComponent<MatrixClient> {
         );
       }
 
-      final photo = await _resolvePhoto(uri);
-      if (photo != null) {
+      final post = await _resolvePost(uri);
+      final photos = post == null
+          ? const <UrlPreviewImage>[]
+          : _toPreviewImages(post.photos);
+      if (post != null && photos.isNotEmpty) {
         return UrlPreviewData(
           uri,
           siteName: CompositeVideoProvider.instance.findProvider(uri)?.name,
-          image: photo,
+          title: post.title,
+          description: post.text.isNotEmpty ? post.text : null,
+          image: photos.first.image,
+          images: photos,
           type: UrlDestinationType.image,
         );
       }
@@ -342,11 +353,19 @@ class MatrixUrlPreviewComponent implements UrlPreviewComponent<MatrixClient> {
     return null;
   }
 
-  Future<ImageProvider?> _resolvePhoto(Uri uri) async {
+  Future<TwitterPost?> _resolvePost(Uri uri) async {
     final provider = CompositeVideoProvider.instance.findProvider(uri);
     if (provider is! TwitterProvider) return null;
+    return provider.resolvePost(uri);
+  }
 
-    final photo = await provider.resolvePhoto(uri);
-    return photo != null ? NetworkImage(photo.toString()) : null;
+  List<UrlPreviewImage> _toPreviewImages(List<TwitterPhoto> photos) {
+    return [
+      for (final photo in photos)
+        UrlPreviewImage(
+          NetworkImage(photo.url.toString()),
+          aspectRatio: photo.aspectRatio,
+        ),
+    ];
   }
 }
