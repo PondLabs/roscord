@@ -62,6 +62,11 @@ jobs:
           done
           echo "rust_crates=$crates" >> "$GITHUB_OUTPUT"
 
+      - name: Verify locked CEF release inputs
+        run: |
+          python3 tools/cef_runtime.py validate-lock
+          python3 -m unittest tools.test_cef_runtime
+
       - name: Setup Rust
         if: steps.find.outputs.rust_crates != '' || steps.find.outputs.dart == 'true'
         uses: dtolnay/rust-toolchain@stable
