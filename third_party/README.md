@@ -40,6 +40,11 @@ applied to backup senders too. Marked `// COMMET` in
 track, `stereo=1;sprop-stereo=1` munged into our offer for it
 (`lib/src/core/transport.dart`), and the subscriber answer asks for stereo
 wherever the server's offer has it (`lib/src/core/engine.dart`).
+`AudioCaptureOptions.copyWith` carries every field
+(`lib/src/track/options.dart`): it used to rebuild the options from six of
+the nine, so a copy went back to `stopAudioCaptureOnMute: true` and dropped
+the `processor`, which took the web AudioWorklet off the track whenever the
+microphone was restarted to change one option.
 
 `tray_manager` shows the system tray icon (voice status: idle, live, muted).
 The `// COMMET` change makes the Linux appindicator optional: without

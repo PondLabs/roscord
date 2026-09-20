@@ -352,6 +352,10 @@ class AudioCaptureOptions extends LocalTrackOptions {
     return constraints;
   }
 
+  // COMMET: carries every field. It used to rebuild the options from six of
+  // them, so a copy silently went back to stopping the capture on mute and,
+  // worse, dropped the processor: restarting the microphone to change one
+  // option took the web AudioWorklet (our DSP) off the track.
   AudioCaptureOptions copyWith({
     String? deviceId,
     bool? noiseSuppression,
@@ -359,6 +363,9 @@ class AudioCaptureOptions extends LocalTrackOptions {
     bool? autoGainControl,
     bool? highPassFilter,
     bool? typingNoiseDetection,
+    bool? voiceIsolation,
+    bool? stopAudioCaptureOnMute,
+    TrackProcessor<AudioProcessorOptions>? processor,
   }) {
     return AudioCaptureOptions(
       deviceId: deviceId ?? this.deviceId,
@@ -367,6 +374,10 @@ class AudioCaptureOptions extends LocalTrackOptions {
       autoGainControl: autoGainControl ?? this.autoGainControl,
       highPassFilter: highPassFilter ?? this.highPassFilter,
       typingNoiseDetection: typingNoiseDetection ?? this.typingNoiseDetection,
+      voiceIsolation: voiceIsolation ?? this.voiceIsolation,
+      stopAudioCaptureOnMute:
+          stopAudioCaptureOnMute ?? this.stopAudioCaptureOnMute,
+      processor: processor ?? this.processor,
     );
   }
 }
