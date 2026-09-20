@@ -1,0 +1,667 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PROTOTYPE — Linux CEF presentation modes</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1117;
+      --panel: #151c26;
+      --panel-2: #1d2835;
+      --line: #304156;
+      --muted: #8ea1b5;
+      --text: #e8eef5;
+      --cyan: #68d5e8;
+      --green: #86dc9a;
+      --amber: #f2c66d;
+      --red: #f58a8a;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 1080px;
+      background:
+        radial-gradient(circle at 12% 0%, rgba(82, 119, 175, .18), transparent 35rem),
+        radial-gradient(circle at 94% 20%, rgba(91, 164, 171, .12), transparent 30rem),
+        var(--bg);
+      color: var(--text);
+    }
+
+    button, select, input { font: inherit; }
+    button, select, input {
+      color: var(--text);
+      background: #202b3a;
+      border: 1px solid #3d5068;
+      border-radius: 8px;
+    }
+    button {
+      cursor: pointer;
+      padding: .55rem .72rem;
+      transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+    }
+    button:hover { background: #29394d; border-color: var(--cyan); }
+    button:active { transform: translateY(1px); }
+    button.primary { background: #185463; border-color: #4eb1c2; }
+    button.danger { color: #ffd0d0; border-color: #71424c; }
+    button.active { color: #061318; background: var(--cyan); border-color: var(--cyan); }
+    select, input { width: 100%; padding: .55rem .65rem; }
+    code { font-family: "SFMono-Regular", Consolas, monospace; }
+
+    .topbar {
+      display: flex; justify-content: space-between; gap: 2rem;
+      padding: 2.1rem 3rem 1.45rem;
+      border-bottom: 1px solid rgba(95, 121, 148, .25);
+    }
+    .eyebrow, .kicker {
+      color: var(--cyan); font-size: .68rem; font-weight: 800;
+      letter-spacing: .14em; text-transform: uppercase;
+    }
+    h1, h2, h3, p { margin: 0; }
+    h1 { margin-top: .45rem; font-size: clamp(1.8rem, 3vw, 2.7rem); letter-spacing: -.045em; }
+    .lede { max-width: 52rem; margin-top: .65rem; color: var(--muted); line-height: 1.5; }
+    .top-badges {
+      display: flex; flex-wrap: wrap; align-content: flex-start; justify-content: flex-end;
+      gap: .5rem; min-width: 18rem;
+    }
+    .badge, .chip {
+      display: inline-flex; align-items: center; gap: .35rem;
+      border: 1px solid var(--line); border-radius: 999px;
+      padding: .35rem .6rem; color: var(--muted);
+      font-size: .7rem; font-weight: 700; letter-spacing: .03em;
+    }
+    .badge.good, .chip.good { color: var(--green); border-color: rgba(134,220,154,.4); background: rgba(71,127,87,.13); }
+    .badge.warn, .chip.warn { color: var(--amber); border-color: rgba(242,198,109,.4); background: rgba(134,102,43,.13); }
+    .badge.stop, .chip.stop { color: var(--red); border-color: rgba(245,138,138,.35); background: rgba(126,50,57,.13); }
+
+    main { display: grid; gap: 1rem; padding: 1.2rem 3rem 3rem; }
+    .panel {
+      border: 1px solid var(--line); border-radius: 14px;
+      background: linear-gradient(145deg, rgba(26,35,47,.96), rgba(18,24,33,.96));
+      box-shadow: 0 20px 60px rgba(0,0,0,.25);
+    }
+    .controls { display: grid; gap: 1rem; padding: 1.15rem; }
+    .controls-header, .stage-head, .inspector-head, .section-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+    }
+    .controls-header p, .hint { color: var(--muted); font-size: .77rem; }
+    h2 { font-size: .95rem; letter-spacing: -.01em; }
+    .control-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .75rem; }
+    label { display: grid; gap: .38rem; color: var(--muted); font-size: .75rem; font-weight: 700; }
+    .mode-row, .actions, .capability-row, .input-row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+    .mode-row > span { margin-right: .2rem; color: var(--muted); font-size: .75rem; font-weight: 700; }
+    .actions button { flex: 1 1 8rem; }
+    .input-row input { flex: 1 1 16rem; }
+
+    .workspace { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(20rem, .95fr); gap: 1rem; }
+    .stage, .inspector, .walkthroughs, .verdict { padding: 1rem; }
+    .stage { min-height: 38rem; }
+    .stage-canvas {
+      position: relative; min-height: 34rem; margin-top: .75rem; padding: 1rem;
+      overflow: hidden; border: 1px solid #344559; border-radius: 11px;
+      background: linear-gradient(135deg, rgba(41,64,84,.23), transparent 42%), #0e151e;
+    }
+    .flutter-shell {
+      position: relative; width: 83%; min-height: 27rem; margin: 1.15rem auto;
+      overflow: hidden; border: 1px solid #41536a; border-radius: 11px;
+      background: #151f2b; box-shadow: 0 14px 30px rgba(0,0,0,.25);
+    }
+    .flutter-toolbar {
+      display: flex; align-items: center; gap: .55rem; height: 2.45rem; padding: 0 .85rem;
+      border-bottom: 1px solid #34465a; color: var(--muted); font-size: .7rem;
+    }
+    .traffic { display: flex; gap: .3rem; }
+    .traffic i { display: block; width: .48rem; height: .48rem; border-radius: 50%; background: #51657b; }
+    .flutter-body { display: grid; grid-template-columns: 8rem 1fr; min-height: 24.5rem; }
+    .flutter-nav { padding: .8rem; border-right: 1px solid #34465a; color: #7890a9; font-size: .68rem; line-height: 2.2; }
+    .flutter-nav b { display: block; color: var(--cyan); }
+    .surface-slot { display: grid; min-height: 24.5rem; place-items: center; padding: 1rem; }
+    .surface-slot.active { background: rgba(104,213,232,.045); }
+    .browser-surface {
+      display: grid; width: min(100%, 32rem); min-height: 19rem; overflow: hidden;
+      border: 1px solid #526b82; border-radius: 8px; background: #f3f7fb; color: #183040;
+      box-shadow: 0 10px 25px rgba(0,0,0,.2);
+    }
+    .surface-chrome {
+      display: flex; align-items: center; gap: .5rem; min-height: 2rem; padding: 0 .6rem;
+      border-bottom: 1px solid #ced9e5; background: #e5edf5; color: #546a7d; font-size: .65rem;
+    }
+    .surface-body { display: grid; align-content: center; gap: .6rem; padding: 1.3rem; }
+    .surface-body h3 { color: #152d3d; font-size: 1.1rem; }
+    .surface-body p { color: #486274; font-size: .73rem; line-height: 1.45; }
+    .surface-body code { display: inline-block; max-width: 100%; overflow: hidden; color: #206179; font-size: .67rem; text-overflow: ellipsis; white-space: nowrap; }
+    .surface-state { display: flex; flex-wrap: wrap; gap: .35rem; }
+    .surface-state span { padding: .25rem .4rem; border-radius: 4px; background: #dbe8f0; color: #406073; font-size: .61rem; font-weight: 700; }
+    .placeholder { display: grid; max-width: 18rem; gap: .5rem; place-items: center; color: #637990; text-align: center; }
+    .placeholder strong { color: #a2b5c8; font-size: .8rem; }
+    .owned-window {
+      position: absolute; right: 1.7rem; bottom: 1.5rem; z-index: 3; display: none;
+      width: 19rem; min-height: 13rem; overflow: hidden; border: 1px solid #758ba1;
+      border-radius: 9px; background: #eff5f8; color: #183040; box-shadow: 0 20px 45px rgba(0,0,0,.45);
+    }
+    .owned-window.visible { display: block; }
+    .owned-title { display: flex; justify-content: space-between; padding: .52rem .65rem; border-bottom: 1px solid #cad7e2; background: #dce8f0; color: #314c60; font-size: .66rem; font-weight: 800; }
+    .owned-window .surface-body { min-height: 10.5rem; padding: .85rem; }
+    .popup { position: absolute; right: 8rem; top: 8.5rem; z-index: 4; display: none; padding: .65rem .8rem; border: 1px solid #657a8e; border-radius: 7px; background: #f0f5f8; color: #27465a; font-size: .69rem; box-shadow: 0 12px 25px rgba(0,0,0,.35); }
+    .popup.visible { display: block; }
+    .popup b { display: block; margin-bottom: .3rem; }
+    .canvas-note { position: absolute; right: 1rem; bottom: .7rem; left: 1rem; color: #6f8297; font-size: .64rem; text-align: center; }
+
+    .inspector { overflow: hidden; }
+    .inspector-scroll { display: grid; gap: .8rem; max-height: 35rem; overflow: auto; padding-right: .2rem; }
+    .state-group { padding-bottom: .8rem; border-bottom: 1px solid rgba(89,112,137,.28); }
+    .state-group:last-child { padding-bottom: 0; border-bottom: 0; }
+    .state-group h3 { margin-bottom: .5rem; color: #b4c5d6; font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; }
+    .state-list { display: grid; grid-template-columns: 1fr auto; gap: .4rem .7rem; margin: 0; font-size: .72rem; }
+    .state-list dt { color: var(--muted); }
+    .state-list dd { max-width: 13rem; margin: 0; overflow: hidden; color: var(--text); font-family: "SFMono-Regular", Consolas, monospace; font-size: .67rem; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+    .permission-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: .4rem; }
+    .permission-list span { display: flex; justify-content: space-between; gap: .35rem; padding: .36rem .42rem; border: 1px solid #2d3c4e; border-radius: 5px; color: var(--muted); font-size: .66rem; }
+    .permission-list b { color: var(--amber); font-weight: 700; }
+    .event-log { display: grid; gap: .32rem; max-height: 10.5rem; overflow: auto; padding: 0; margin: 0; list-style: none; }
+    .event-log li { display: grid; grid-template-columns: 2.5rem 1fr; gap: .45rem; padding: .3rem .38rem; border-radius: 4px; background: rgba(35,48,64,.55); color: #afc0d1; font-family: "SFMono-Regular", Consolas, monospace; font-size: .64rem; line-height: 1.35; }
+    .event-log time { color: #71879d; }
+
+    .walkthroughs, .verdict { display: grid; gap: 1rem; }
+    .tabs { display: flex; flex-wrap: wrap; gap: .45rem; }
+    .tab-panel { display: none; grid-template-columns: minmax(0, 1fr) 18rem; gap: 1rem; align-items: start; }
+    .tab-panel.active { display: grid; }
+    .flow-copy { color: var(--muted); font-size: .77rem; line-height: 1.5; }
+    .flow-steps { display: grid; gap: .45rem; margin: .85rem 0 0; padding: 0; list-style: none; }
+    .flow-steps li { display: grid; grid-template-columns: 1.7rem 1fr; gap: .6rem; align-items: center; color: #b6c7d7; font-size: .73rem; }
+    .flow-steps li::before { display: grid; width: 1.42rem; height: 1.42rem; place-items: center; border: 1px solid #3d5065; border-radius: 50%; color: var(--cyan); content: attr(data-step); font-size: .63rem; font-weight: 800; }
+    .flow-steps li.done { color: var(--green); }
+    .flow-steps li.done::before { border-color: rgba(134,220,154,.6); background: rgba(71,127,87,.18); color: var(--green); content: "✓"; }
+    .flow-aside { display: grid; gap: .6rem; padding: .8rem; border: 1px solid #314256; border-radius: 8px; background: rgba(17,24,33,.55); }
+    .flow-aside strong { color: #cfdeeb; font-size: .72rem; }
+    .flow-aside p { color: var(--muted); font-size: .69rem; line-height: 1.45; }
+    .flow-aside button { width: 100%; }
+
+    .verdict-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(20rem, .8fr); gap: 1rem; }
+    .check-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .48rem; margin: 0; padding: 0; list-style: none; }
+    .check-list li { display: flex; align-items: center; gap: .5rem; min-height: 2.1rem; padding: .42rem .52rem; border: 1px solid #2d3d50; border-radius: 6px; color: #9eb0c2; font-size: .7rem; }
+    .check-list li.pass { color: var(--green); border-color: rgba(134,220,154,.38); background: rgba(71,127,87,.1); }
+    .check-list li.gated { color: var(--amber); border-color: rgba(242,198,109,.38); background: rgba(134,102,43,.1); }
+    .check-icon { display: grid; flex: 0 0 1.1rem; height: 1.1rem; place-items: center; border: 1px solid #496077; border-radius: 50%; font-size: .63rem; font-weight: 900; }
+    .decision-card { display: grid; align-content: start; gap: .6rem; padding: .88rem; border: 1px solid rgba(104,213,232,.42); border-radius: 8px; background: rgba(51,122,137,.12); }
+    .decision-card h3 { color: var(--cyan); font-size: .78rem; letter-spacing: .07em; text-transform: uppercase; }
+    .decision-card p, .decision-card li { color: #bdd2df; font-size: .72rem; line-height: 1.5; }
+    .decision-card ul { display: grid; gap: .35rem; margin: 0; padding-left: 1rem; }
+    .footer-note { color: #677b91; font-size: .67rem; text-align: right; }
+
+    @media (max-width: 1160px) {
+      body { min-width: 0; }
+      .topbar, main { padding-right: 1.2rem; padding-left: 1.2rem; }
+      .workspace, .verdict-grid { grid-template-columns: 1fr; }
+      .inspector-scroll { max-height: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <div class="eyebrow">Throwaway prototype · wayfinder #101</div>
+      <h1>One CEF host, two Linux presentations</h1>
+      <p class="lede">
+        A browserless, in-memory probe of the proposed native <code>cef_host</code> seam.
+        It exercises one OSR lifecycle, then presents the same surface as a Flutter texture
+        or a roscord-owned window shell on X11, Wayland, and Flatpak.
+      </p>
+    </div>
+    <div class="top-badges">
+      <span class="badge warn">NO PRODUCTION CEF</span>
+      <span class="badge" id="hostBadge">HOST STOPPED</span>
+      <span class="badge" id="platformBadge">WAYLAND · FLATPAK</span>
+      <span class="badge" id="modeBadge">EMBEDDED TEXTURE</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel controls">
+      <div class="controls-header">
+        <div>
+          <div class="kicker">Free play</div>
+          <h2>Choose host conditions, then exercise a surface</h2>
+        </div>
+        <p>Every action redraws the state inspector and appends an event.</p>
+      </div>
+      <div class="control-grid">
+        <label>Linux compositor
+          <select id="platform">
+            <option value="x11">X11 / XWayland</option>
+            <option value="wayland">Wayland</option>
+          </select>
+        </label>
+        <label>Package environment
+          <select id="package">
+            <option value="appimage">Portable package</option>
+            <option value="flatpak">Flatpak sandbox</option>
+          </select>
+        </label>
+        <label>Account profile
+          <select id="profile">
+            <option value="account-alpha">account-alpha</option>
+            <option value="account-beta">account-beta</option>
+            <option value="account-gamma">account-gamma</option>
+          </select>
+        </label>
+        <label>Permission callback result
+          <select id="permissionDecision">
+            <option value="deny">Deny (safe default)</option>
+            <option value="allow-once">Allow once</option>
+            <option value="allow-profile">Allow for profile</option>
+          </select>
+        </label>
+      </div>
+      <div class="mode-row">
+        <span>Presentation mode</span>
+        <button class="mode-button active" data-mode="embedded">Embedded in Flutter</button>
+        <button class="mode-button" data-mode="window">roscord-owned window</button>
+      </div>
+      <div class="actions">
+        <button class="primary" data-action="start">Start CEF host</button>
+        <button data-action="navigate">Navigate</button>
+        <button data-action="ipc">Send JS IPC</button>
+        <button data-action="focus">Focus surface</button>
+        <button data-action="ime">Commit IME input</button>
+        <button data-action="resize">Resize / DPI</button>
+        <button data-action="popup">Open popup</button>
+        <button data-action="gpu">Probe accelerated paint</button>
+        <button class="danger" data-action="shutdown">Shutdown host</button>
+      </div>
+      <div class="input-row">
+        <input id="urlInput" value="https://widget.example.test/demo" aria-label="navigation URL" spellcheck="false">
+        <input id="imeInput" value="こんにちは — composition commit" aria-label="IME text">
+        <button data-action="reset">Reset evidence</button>
+      </div>
+      <div class="capability-row">
+        <span class="hint">Permission callbacks:</span>
+        <button data-permission="camera">Camera</button>
+        <button data-permission="microphone">Microphone</button>
+        <button data-permission="screen">Screen capture</button>
+        <button data-permission="clipboard">Clipboard</button>
+        <button data-permission="download">Download</button>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <div class="panel stage">
+        <div class="stage-head">
+          <h2>Presentation stage</h2>
+          <span class="chip" id="stageChip">No surface</span>
+        </div>
+        <div class="stage-canvas">
+          <div class="flutter-shell">
+            <div class="flutter-toolbar">
+              <span class="traffic"><i></i><i></i><i></i></span>
+              <span>roscord · Flutter desktop shell</span>
+              <span style="margin-left:auto" id="flutterSurfaceLabel">texture slot</span>
+            </div>
+            <div class="flutter-body">
+              <nav class="flutter-nav"><b>ROOM</b>timeline<br>members<br>widgets<br>settings</nav>
+              <div class="surface-slot active" id="embeddedSlot"></div>
+            </div>
+          </div>
+          <div class="owned-window" id="ownedWindow">
+            <div class="owned-title"><span>roscord · browser surface</span><span>□ ×</span></div>
+            <div class="surface-body" id="ownedBody"></div>
+          </div>
+          <div class="popup" id="popupSurface"><b>CEF popup / context menu</b>roscord-managed transient surface</div>
+          <div class="canvas-note">White browser surfaces stand in for <code>OnPaint</code> pixels; no Chromium process starts.</div>
+        </div>
+      </div>
+
+      <aside class="panel inspector">
+        <div class="inspector-head"><h2>State inspector</h2><span class="chip" id="eventCount">0 events</span></div>
+        <div class="inspector-scroll">
+          <section class="state-group">
+            <h3>Host and surface</h3>
+            <dl class="state-list">
+              <dt>lifecycle</dt><dd id="stateHost"></dd>
+              <dt>browser process</dt><dd id="stateProcess"></dd>
+              <dt>presentation</dt><dd id="stateMode"></dd>
+              <dt>surface</dt><dd id="stateSurface"></dd>
+              <dt>renderer</dt><dd id="stateRenderer"></dd>
+              <dt>compositor</dt><dd id="stateCompositor"></dd>
+              <dt>package</dt><dd id="statePackage"></dd>
+            </dl>
+          </section>
+          <section class="state-group">
+            <h3>Navigation and JS IPC</h3>
+            <dl class="state-list">
+              <dt>URL</dt><dd id="stateUrl"></dd>
+              <dt>last outbound</dt><dd id="stateIpcOut"></dd>
+              <dt>last inbound</dt><dd id="stateIpcIn"></dd>
+              <dt>profile</dt><dd id="stateProfile"></dd>
+              <dt>profile storage</dt><dd id="stateProfileDir"></dd>
+            </dl>
+          </section>
+          <section class="state-group">
+            <h3>Input and render</h3>
+            <dl class="state-list">
+              <dt>focus</dt><dd id="stateFocus"></dd>
+              <dt>IME</dt><dd id="stateIme"></dd>
+              <dt>size / DPR</dt><dd id="stateSize"></dd>
+              <dt>popup</dt><dd id="statePopup"></dd>
+              <dt>GPU probe</dt><dd id="stateGpu"></dd>
+              <dt>native child</dt><dd id="stateNativeChild"></dd>
+            </dl>
+          </section>
+          <section class="state-group"><h3>Permission callbacks</h3><div class="permission-list" id="permissionList"></div></section>
+          <section class="state-group"><h3>Event log</h3><ol class="event-log" id="eventLog"></ol></section>
+        </div>
+      </aside>
+    </section>
+
+    <section class="panel walkthroughs">
+      <div class="section-head">
+        <div><div class="kicker">Guided walkthroughs</div><h2>Run evidence sequences a maintainer can inspect</h2></div>
+        <button class="primary" data-action="run-all">Run complete probe</button>
+      </div>
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-tab="embedded-flow" role="tab">Wayland · embedded</button>
+        <button class="tab" data-tab="window-flow" role="tab">X11 · owned window</button>
+        <button class="tab" data-tab="gate-flow" role="tab">Wayland · gates</button>
+      </div>
+
+      <div class="tab-panel active" id="embedded-flow" role="tabpanel">
+        <div>
+          <p class="flow-copy">The release baseline: OSR pixels arrive at a Flutter texture in a Flatpak Wayland session. This checks navigation, framed JS IPC, account selection, focus and IME, resize, deny-by-default media permission, popups, and clean host shutdown.</p>
+          <ol class="flow-steps" data-flow="embedded"></ol>
+        </div>
+        <aside class="flow-aside">
+          <strong>Expected evidence</strong>
+          <p>Wayland does not need a native browser child. Flatpak keeps the same OSR contract. The account profile is selected before the surface starts.</p>
+          <button data-flow-run="embedded" class="primary">Run embedded flow</button>
+        </aside>
+      </div>
+
+      <div class="tab-panel" id="window-flow" role="tabpanel">
+        <div>
+          <p class="flow-copy">The comparison mode: use the same host and OSR surface behind a roscord-owned window shell. This is a presentation choice, not a second CEF runtime. X11 makes window ownership and popup behavior easy to inspect.</p>
+          <ol class="flow-steps" data-flow="window"></ol>
+        </div>
+        <aside class="flow-aside">
+          <strong>Expected evidence</strong>
+          <p>Starting the owned window after embedded mode reuses host semantics: profile, IPC, permissions, input, and shutdown remain identical.</p>
+          <button data-flow-run="window" class="primary">Run owned-window flow</button>
+        </aside>
+      </div>
+
+      <div class="tab-panel" id="gate-flow" role="tabpanel">
+        <div>
+          <p class="flow-copy">The explicit risk check: probe accelerated paint and native child embedding in a Wayland Flatpak environment. CPU <code>OnPaint</code> stays authoritative while GPU import and native child paths remain gated experiments.</p>
+          <ol class="flow-steps" data-flow="gate"></ol>
+        </div>
+        <aside class="flow-aside">
+          <strong>Expected evidence</strong>
+          <p>A gated path is recorded as a follow-up, never silently promoted to the production composition path. Shutdown must still be clean.</p>
+          <button data-flow-run="gate" class="primary">Run gate flow</button>
+        </aside>
+      </div>
+    </section>
+
+    <section class="panel verdict">
+      <div class="section-head">
+        <div><div class="kicker">Decision surface</div><h2>What this probe can settle</h2></div>
+        <span class="chip warn" id="verdictChip">Evidence incomplete</span>
+      </div>
+      <div class="verdict-grid">
+        <ul class="check-list" id="checkList"></ul>
+        <div class="decision-card">
+          <h3>Working decision</h3>
+          <p>Keep one native <code>cef_host</code> with windowless/off-screen rendering and a CPU <code>OnPaint</code> fallback. Select the presentation mode at the shell seam: embedded texture or a roscord-owned window.</p>
+          <ul>
+            <li>Wayland native child embedding stays blocked by the upstream gap.</li>
+            <li>GPU import is a gated optimization; it never replaces CPU pixels.</li>
+            <li>Flatpak is an environment to qualify, not a separate backend.</li>
+            <li>Raw CEF objects stay inside the host; IPC carries commands and events.</li>
+          </ul>
+        </div>
+      </div>
+      <p class="footer-note">Prototype only. It has no CEF dependency, native plugin registration, or persistence. Delete this directory after the decision is carried into production design.</p>
+    </section>
+  </main>
+
+  <script>
+    // PROTOTYPE ONLY — issue #101. Keep all state in memory; do not copy this into production.
+    var initialState = {
+      host: "stopped", process: "not started", platform: "wayland", package: "flatpak",
+      mode: "embedded", surface: "none", renderer: "CPU OnPaint", url: "about:blank",
+      profile: "account-alpha", profileDir: "memory://account-alpha", ipcOut: "—", ipcIn: "—",
+      focus: "blurred", ime: "—", size: { width: 960, height: 640, dpr: 1.25 },
+      popup: "closed", gpu: "not probed", nativeChild: "not probed",
+      permissions: { camera: "pending", microphone: "pending", screen: "pending", clipboard: "pending", download: "pending" },
+      events: [],
+      evidence: {
+        hostLifecycle: false, x11: false, wayland: false, flatpak: false,
+        embedded: false, window: false, navigation: false, ipc: false, profile: false,
+        inputIme: false, resize: false, permissions: false, popup: false, gpuGate: false,
+        nativeChildGate: false, shutdown: false
+      }
+    };
+    var state = clone(initialState);
+    var $ = function (selector) { return document.querySelector(selector); };
+    var $$ = function (selector) { return Array.prototype.slice.call(document.querySelectorAll(selector)); };
+    var labels = {
+      platform: { x11: "X11 / XWayland", wayland: "Wayland" },
+      package: { appimage: "portable package", flatpak: "Flatpak sandbox" },
+      mode: { embedded: "embedded texture", window: "roscord-owned window" }
+    };
+    var checkLabels = {
+      hostLifecycle: "Shared host lifecycle", x11: "X11 OSR session", wayland: "Wayland OSR session",
+      flatpak: "Flatpak environment", embedded: "Embedded Flutter texture", window: "Owned-window presentation",
+      navigation: "Navigation callback", ipc: "Framed JavaScript IPC", profile: "Per-account profile",
+      inputIme: "Focus and IME input", resize: "Resize and DPI", permissions: "Permission callbacks",
+      popup: "Popup handling", gpuGate: "GPU remains gated", nativeChildGate: "Wayland child gate recorded",
+      shutdown: "CEF shutdown"
+    };
+    var flowSteps = {
+      embedded: [
+        "Configure Wayland + Flatpak and account-alpha", "Start one windowless host and attach Flutter texture",
+        "Navigate and exchange framed JavaScript IPC", "Focus, commit IME input, and resize with DPR",
+        "Request camera with the safe deny callback", "Open a managed popup, probe GPU, then shut down"
+      ],
+      window: [
+        "Configure X11 + portable package and account-beta", "Start the same host behind an owned window shell",
+        "Navigate and exchange framed JavaScript IPC", "Focus, commit IME input, and resize the owned surface",
+        "Request microphone with the selected callback", "Open a managed popup, probe GPU, then shut down"
+      ],
+      gate: [
+        "Configure Wayland + Flatpak and owned-window comparison", "Start the OSR host and record the Wayland path",
+        "Probe accelerated paint while retaining CPU OnPaint", "Probe native child embedding and record the upstream gate",
+        "Shut down without leaving a browser process behind"
+      ]
+    };
+
+    function clone(value) { return JSON.parse(JSON.stringify(value)); }
+    function now() {
+      return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date());
+    }
+    function addEvent(message) {
+      state.events.unshift({ time: now(), message: message });
+      state.events = state.events.slice(0, 80);
+    }
+    function commit(message, mutate) {
+      if (mutate) { mutate(); }
+      if (message) { addEvent(message); }
+      render();
+    }
+    function setMode(mode) {
+      commit("presentation selected: " + labels.mode[mode], function () {
+        state.mode = mode;
+        if (state.host === "ready") {
+          state.surface = mode === "embedded" ? "flutter-texture-01" : "owned-window-01";
+          addEvent("same cef_host reused for " + labels.mode[mode]);
+        }
+      });
+    }
+    function configure(platform, packageName, profile, mode) {
+      commit("conditions selected: " + labels.platform[platform] + " / " + labels.package[packageName], function () {
+        state.platform = platform; state.package = packageName; state.profile = profile; state.mode = mode;
+        state.profileDir = "memory://" + profile; state.focus = "blurred"; state.evidence.profile = true;
+        state.permissions = clone(initialState.permissions); state.gpu = "not probed";
+        state.nativeChild = "not probed"; state.popup = "closed";
+      });
+    }
+    function startHost() {
+      if (state.host === "ready") { commit("start requested: cef_host already ready"); return; }
+      commit("CefInitialize → OSR host ready", function () {
+        state.host = "ready"; state.process = "browser + renderer";
+        state.surface = state.mode === "embedded" ? "flutter-texture-01" : "owned-window-01";
+        state.renderer = "CPU OnPaint"; state.url = "about:blank"; state.focus = "blurred";
+        state.profileDir = "memory://" + state.profile; state.evidence.hostLifecycle = true;
+        state.evidence[state.platform] = true; if (state.package === "flatpak") { state.evidence.flatpak = true; } state.evidence[state.mode] = true;
+        addEvent("profile opened: " + state.profileDir); addEvent("surface created: " + state.surface);
+        addEvent(state.platform === "wayland" ? "Wayland: OSR avoids native child-surface dependency" : "X11: OSR surface attached inside Flutter shell");
+        if (state.package === "flatpak") { addEvent("Flatpak: sandbox keeps the same host protocol"); }
+      });
+    }
+    function navigate() {
+      var input = $("#urlInput").value.trim() || "https://widget.example.test/demo";
+      if (state.host !== "ready") { commit("navigation ignored: start cef_host first"); return; }
+      commit("navigation committed: " + input, function () {
+        state.url = input; state.ipcIn = "navigation.committed"; state.evidence.navigation = true;
+      });
+    }
+    function sendIpc() {
+      if (state.host !== "ready") { commit("JS IPC ignored: start cef_host first"); return; }
+      commit("framed JS IPC round-trip completed", function () {
+        state.ipcOut = "widget.ready {surface, profile}"; state.ipcIn = "host.ack {requestId: 07}"; state.evidence.ipc = true;
+      });
+    }
+    function focusSurface() {
+      if (state.host !== "ready") { commit("focus ignored: no surface"); return; }
+      commit("focus event delivered to the active surface", function () { state.focus = "focused"; });
+    }
+    function commitIme() {
+      if (state.host !== "ready") { commit("IME input ignored: no surface"); return; }
+      var input = $("#imeInput").value.trim() || "composition commit";
+      commit("IME composition committed: " + input, function () { state.ime = input; state.focus = "focused"; state.evidence.inputIme = true; });
+    }
+    function resizeSurface() {
+      if (state.host !== "ready") { commit("resize ignored: no surface"); return; }
+      commit("resize + device-pixel-ratio event delivered", function () {
+        state.size = state.size.width === 960 ? { width: 1280, height: 760, dpr: 1.5 } : { width: 960, height: 640, dpr: 1.25 };
+        state.evidence.resize = true;
+      });
+    }
+    function openPopup() {
+      if (state.host !== "ready") { commit("popup ignored: no surface"); return; }
+      commit("popup requested → roscord-managed transient surface", function () { state.popup = "open / managed"; state.evidence.popup = true; });
+    }
+    function probeGpu() {
+      if (state.host !== "ready") { commit("GPU probe ignored: no host"); return; }
+      commit("accelerated paint probe recorded; CPU fallback stays authoritative", function () {
+        state.gpu = state.platform === "wayland" && state.package === "flatpak" ? "gated: dma-buf import unavailable" : "gated: copy/import follow-up";
+        state.renderer = "CPU OnPaint (authoritative)"; state.evidence.gpuGate = true;
+      });
+    }
+    function probeNativeChild() {
+      if (state.host !== "ready") { commit("native-child probe ignored: no host"); return; }
+      commit("native child probe recorded as an upstream Wayland gate", function () {
+        state.nativeChild = state.platform === "wayland" ? "blocked: upstream CEF Wayland work" : "comparison only: outside Flutter tree";
+        state.evidence.nativeChildGate = true;
+      });
+    }
+    function requestPermission(capability) {
+      if (state.host !== "ready") { commit(capability + " permission ignored: no host"); return; }
+      var decision = $("#permissionDecision").value;
+      var text = { deny: "denied", "allow-once": "allowed once", "allow-profile": "allowed for profile" }[decision];
+      commit(capability + " permission callback → " + text, function () { state.permissions[capability] = text; state.evidence.permissions = true; });
+    }
+    function shutdownHost() {
+      if (state.host !== "ready") { commit("shutdown requested: host already stopped"); return; }
+      commit("CefShutdown → browser process and surfaces released", function () {
+        state.host = "stopped"; state.process = "stopped"; state.surface = "none"; state.popup = "closed"; state.focus = "blurred"; state.evidence.shutdown = true;
+      });
+    }
+    function resetEvidence() {
+      state = clone(initialState); addEvent("evidence reset: in-memory prototype state cleared"); render();
+    }
+    function escapeHtml(value) {
+      return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+    }
+    function surfaceHtml(mode) {
+      var active = state.host === "ready" && state.mode === mode;
+      if (!active) {
+        return '<div class="placeholder"><strong>' + (mode === "embedded" ? "Embedded texture slot" : "Owned-window surface") + '</strong><span>' + (state.host === "ready" ? "Select this presentation mode to view it." : "Start the host to create this surface.") + "</span></div>";
+      }
+      return '<div class="browser-surface"><div class="surface-chrome"><span class="chip good">OSR pixels</span><code>' + escapeHtml(state.url) + '</code></div><div class="surface-body"><h3>' + (mode === "embedded" ? "Widget inside Flutter" : "Widget in roscord window") + '</h3><p>This is one ' + escapeHtml(state.profile) + ' browser surface. Commands cross the host seam as framed events; CEF objects never leave the native host.</p><div class="surface-state"><span>' + escapeHtml(state.platform) + '</span><span>' + escapeHtml(state.renderer) + '</span><span>' + state.size.width + " × " + state.size.height + '</span><span>profile isolated</span></div></div></div>';
+    }
+    function render() {
+      $("#platform").value = state.platform; $("#package").value = state.package; $("#profile").value = state.profile;
+      $("#embeddedSlot").classList.toggle("active", state.mode === "embedded"); $("#embeddedSlot").innerHTML = surfaceHtml("embedded");
+      $("#ownedWindow").classList.toggle("visible", state.host === "ready" && state.mode === "window"); $("#ownedBody").innerHTML = surfaceHtml("window");
+      $("#popupSurface").classList.toggle("visible", state.popup.indexOf("open") === 0); $("#flutterSurfaceLabel").textContent = state.mode === "embedded" ? "texture slot" : "shell only";
+      $$(".mode-button").forEach(function (button) { button.classList.toggle("active", button.dataset.mode === state.mode); });
+      var hostBadge = $("#hostBadge"); hostBadge.textContent = state.host === "ready" ? "HOST READY" : "HOST STOPPED"; hostBadge.className = "badge " + (state.host === "ready" ? "good" : "stop");
+      $("#platformBadge").textContent = (labels.platform[state.platform] + " · " + labels.package[state.package]).toUpperCase();
+      $("#modeBadge").textContent = labels.mode[state.mode].toUpperCase(); $("#stageChip").textContent = state.surface === "none" ? "No surface" : state.surface; $("#stageChip").className = "chip " + (state.surface === "none" ? "" : "good");
+      $("#eventCount").textContent = state.events.length + " event" + (state.events.length === 1 ? "" : "s");
+      var fields = {
+        stateHost: state.host, stateProcess: state.process, stateMode: labels.mode[state.mode], stateSurface: state.surface,
+        stateRenderer: state.renderer, stateCompositor: labels.platform[state.platform], statePackage: labels.package[state.package],
+        stateUrl: state.url, stateIpcOut: state.ipcOut, stateIpcIn: state.ipcIn, stateProfile: state.profile, stateProfileDir: state.profileDir,
+        stateFocus: state.focus, stateIme: state.ime, stateSize: state.size.width + " × " + state.size.height + " @ " + state.size.dpr + "x",
+        statePopup: state.popup, stateGpu: state.gpu, stateNativeChild: state.nativeChild
+      };
+      Object.keys(fields).forEach(function (id) { $("#" + id).textContent = fields[id]; });
+      $("#permissionList").innerHTML = Object.keys(state.permissions).map(function (key) { return '<span><span>' + key + '</span><b>' + state.permissions[key] + "</b></span>"; }).join("");
+      $("#eventLog").innerHTML = state.events.length ? state.events.map(function (event) { return '<li><time>' + event.time + '</time><span>' + escapeHtml(event.message) + "</span></li>"; }).join("") : '<li><time>—</time><span>No actions yet.</span></li>';
+      $("#checkList").innerHTML = Object.keys(checkLabels).map(function (key) {
+        var pass = state.evidence[key], gated = key === "gpuGate" || key === "nativeChildGate";
+        return '<li class="' + (pass ? (gated ? "gated" : "pass") : "") + '"><span class="check-icon">' + (pass ? (gated ? "!" : "✓") : "·") + "</span><span>" + checkLabels[key] + "</span></li>";
+      }).join("");
+      var keys = Object.keys(state.evidence).filter(function (key) { return key !== "gpuGate" && key !== "nativeChildGate"; });
+      var complete = keys.every(function (key) { return state.evidence[key]; });
+      $("#verdictChip").textContent = complete ? "Decision evidence complete" : "Evidence incomplete"; $("#verdictChip").className = "chip " + (complete ? "good" : "warn");
+      Object.keys(flowSteps).forEach(function (flow) {
+        var checks = {
+          embedded: ["wayland", "flatpak", "embedded", "navigation", "ipc", "inputIme", "resize", "permissions", "popup", "gpuGate", "shutdown"],
+          window: ["x11", "window", "navigation", "ipc", "inputIme", "resize", "permissions", "popup", "gpuGate", "shutdown"],
+          gate: ["wayland", "flatpak", "gpuGate", "nativeChildGate", "shutdown"]
+        }[flow];
+        var done = checks.filter(function (key) { return state.evidence[key]; }).length;
+        $$(".flow-steps[data-flow='" + flow + "']").forEach(function (list) {
+          list.innerHTML = flowSteps[flow].map(function (step, index) { return '<li class="' + (index < done ? "done" : "") + '" data-step="' + (index + 1) + '">' + step + "</li>"; }).join("");
+        });
+      });
+    }
+    function runFlow(flow) {
+      if (flow === "embedded") {
+        configure("wayland", "flatpak", "account-alpha", "embedded"); startHost(); navigate(); sendIpc(); focusSurface(); commitIme(); resizeSurface();
+        $("#permissionDecision").value = "deny"; requestPermission("camera"); openPopup(); probeGpu(); shutdownHost();
+      }
+      if (flow === "window") {
+        configure("x11", "appimage", "account-beta", "window"); startHost(); navigate(); sendIpc(); focusSurface(); commitIme(); resizeSurface();
+        $("#permissionDecision").value = "allow-once"; requestPermission("microphone"); openPopup(); probeGpu(); shutdownHost();
+      }
+      if (flow === "gate") {
+        configure("wayland", "flatpak", "account-alpha", "window"); startHost(); probeGpu(); probeNativeChild(); shutdownHost();
+      }
+    }
+    function runAll() { resetEvidence(); runFlow("embedded"); runFlow("window"); runFlow("gate"); addEvent("complete probe finished: review green checks and gated paths"); render(); }
+
+    $$("[data-mode]").forEach(function (button) { button.addEventListener("click", function () { setMode(button.dataset.mode); }); });
+    $$("[data-action]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        var actions = { start: startHost, navigate: navigate, ipc: sendIpc, focus: focusSurface, ime: commitIme, resize: resizeSurface, popup: openPopup, gpu: probeGpu, shutdown: shutdownHost, reset: resetEvidence, "run-all": runAll };
+        actions[button.dataset.action]();
+      });
+    });
+    $$("[data-permission]").forEach(function (button) { button.addEventListener("click", function () { requestPermission(button.dataset.permission); }); });
+    $("#platform").addEventListener("change", function (event) { commit("compositor selected: " + labels.platform[event.target.value], function () { state.platform = event.target.value; }); });
+    $("#package").addEventListener("change", function (event) { commit("package selected: " + labels.package[event.target.value], function () { state.package = event.target.value; }); });
+    $("#profile").addEventListener("change", function (event) { commit("profile selected: " + event.target.value, function () { state.profile = event.target.value; state.profileDir = "memory://" + state.profile; state.evidence.profile = true; }); });
+    $$(".tab").forEach(function (tab) {
+      tab.addEventListener("click", function () { $$(".tab").forEach(function (item) { item.classList.toggle("active", item === tab); }); $$(".tab-panel").forEach(function (panel) { panel.classList.toggle("active", panel.id === tab.dataset.tab); }); });
+    });
+    $$("[data-flow-run]").forEach(function (button) { button.addEventListener("click", function () { runFlow(button.dataset.flowRun); }); });
+    render();
+  </script>
+</body>
+</html>
