@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Windows CEF presentation modes — disposable prototype</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172033;
+      --muted: #5c687d;
+      --line: #d8deea;
+      --panel: #ffffff;
+      --canvas: #f4f6fa;
+      --accent: #335cff;
+      --accent-soft: #e9edff;
+      --good: #14734d;
+      --good-soft: #e6f6ee;
+      --warn: #8a5a00;
+      --warn-soft: #fff5d6;
+      --bad: #a73737;
+      --bad-soft: #fff0f0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background: var(--canvas);
+      line-height: 1.45;
+    }
+    button, select { font: inherit; }
+    button {
+      color: var(--ink);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0.55rem 0.75rem;
+      background: var(--panel);
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    button:focus-visible, select:focus-visible { outline: 3px solid #b9c5ff; outline-offset: 2px; }
+    button.primary { color: #fff; border-color: var(--accent); background: var(--accent); }
+    button.danger { color: var(--bad); border-color: #e2aaaa; background: var(--bad-soft); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    .page { max-width: 1400px; margin: 0 auto; padding: 2rem clamp(1rem, 4vw, 3.5rem) 4rem; }
+    .prototype-banner {
+      display: inline-flex;
+      gap: 0.5rem;
+      align-items: center;
+      color: #223070;
+      background: var(--accent-soft);
+      border: 1px solid #bdc8ff;
+      border-radius: 999px;
+      padding: 0.35rem 0.7rem;
+      font-size: 0.77rem;
+      font-weight: 800;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+    h1 { max-width: 950px; margin: 1rem 0 0.6rem; font-size: clamp(2rem, 4vw, 3.4rem); line-height: 1.04; letter-spacing: -0.045em; }
+    h2 { margin: 0; font-size: 1.1rem; }
+    h3 { margin: 0; font-size: 0.96rem; }
+    p { margin: 0.35rem 0; }
+    .lede { max-width: 940px; color: var(--muted); font-size: 1.05rem; }
+    .question {
+      max-width: 1050px;
+      margin-top: 1.2rem;
+      padding: 1rem 1.15rem;
+      border-left: 4px solid var(--accent);
+      border-radius: 0 10px 10px 0;
+      background: var(--panel);
+      box-shadow: 0 7px 24px rgba(26, 43, 88, 0.06);
+    }
+    .question strong { display: block; margin-bottom: 0.25rem; }
+
+    .mode-switcher {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.65rem;
+      margin: 1.5rem 0 1rem;
+    }
+    .mode-button { flex: 1 1 250px; text-align: left; padding: 0.9rem 1rem; }
+    .mode-button strong, .mode-button span { display: block; }
+    .mode-button span { color: var(--muted); margin-top: 0.25rem; font-size: 0.84rem; }
+    .mode-button.active { color: #1f2d75; border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+
+    .layout { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(330px, 0.8fr); gap: 1rem; align-items: start; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 8px 28px rgba(26, 43, 88, 0.055); }
+    .panel-header { display: flex; justify-content: space-between; gap: 1rem; align-items: start; padding: 1rem 1.1rem 0.8rem; border-bottom: 1px solid var(--line); }
+    .panel-header p { color: var(--muted); font-size: 0.85rem; }
+    .panel-body { padding: 1.1rem; }
+
+    .state-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.55rem; }
+    .state-cell { min-height: 70px; padding: 0.7rem; border: 1px solid var(--line); border-radius: 9px; background: #fbfcfe; }
+    .state-cell dt { color: var(--muted); font-size: 0.72rem; font-weight: 750; letter-spacing: 0.04em; text-transform: uppercase; }
+    .state-cell dd { margin: 0.28rem 0 0; overflow-wrap: anywhere; font-size: 0.92rem; font-weight: 720; }
+    .state-cell dd.good { color: var(--good); }
+    .state-cell dd.warn { color: var(--warn); }
+    .state-cell dd.bad { color: var(--bad); }
+    .state-cell dd.muted { color: var(--muted); font-weight: 550; }
+
+    .subsection { margin-top: 1.2rem; }
+    .subsection:first-child { margin-top: 0; }
+    .subsection-title { display: flex; justify-content: space-between; gap: 1rem; align-items: baseline; margin-bottom: 0.6rem; }
+    .subsection-title small { color: var(--muted); font-weight: 550; }
+    .button-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.55rem; }
+    .button-grid button { text-align: left; }
+    .button-grid button small { display: block; color: var(--muted); margin-top: 0.18rem; font-size: 0.74rem; }
+    .inline-controls { display: flex; flex-wrap: wrap; gap: 0.55rem; align-items: center; }
+    select { min-width: 180px; border: 1px solid var(--line); border-radius: 8px; padding: 0.55rem 0.65rem; color: var(--ink); background: var(--panel); }
+
+    .event-log { max-height: 300px; overflow: auto; margin: 0; padding: 0; list-style: none; }
+    .event-log li { display: grid; grid-template-columns: 4.1rem minmax(0, 1fr); gap: 0.55rem; padding: 0.55rem 0; border-bottom: 1px solid #edf0f5; font-size: 0.82rem; }
+    .event-log li:last-child { border-bottom: 0; }
+    .event-log time { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .event-log .blocked { color: var(--bad); }
+    .event-log .success { color: var(--good); }
+
+    .verdict { padding: 0.95rem 1rem; border: 1px solid #b9dfc9; border-radius: 10px; background: var(--good-soft); }
+    .verdict strong { display: block; color: var(--good); margin-bottom: 0.2rem; }
+    .verdict ul, .limits ul { margin: 0.5rem 0 0 1.1rem; padding: 0; }
+    .verdict li, .limits li { margin: 0.28rem 0; }
+    .limits { padding: 0.95rem 1rem; border: 1px solid #eedb9c; border-radius: 10px; background: var(--warn-soft); }
+    .limits strong { color: var(--warn); }
+
+    .walkthrough-tabs { display: flex; gap: 0.45rem; overflow-x: auto; padding-bottom: 0.15rem; }
+    .walkthrough-tab { flex: 0 0 auto; border-radius: 999px; padding: 0.45rem 0.75rem; font-size: 0.8rem; }
+    .walkthrough-tab.active { color: #1f2d75; border-color: #aebcff; background: var(--accent-soft); }
+    .walkthrough-panel { margin-top: 0.8rem; padding: 0.9rem; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfe; }
+    .walkthrough-panel p { color: var(--muted); font-size: 0.86rem; }
+    .walkthrough-steps { display: flex; flex-wrap: wrap; gap: 0.45rem; margin-top: 0.75rem; }
+    .walkthrough-steps button { font-size: 0.8rem; }
+    .walkthrough-steps button.done { color: var(--good); border-color: #9ed2b7; background: var(--good-soft); }
+    .walkthrough-steps button.next { border-color: var(--accent); background: var(--accent-soft); }
+    .walkthrough-status { margin-top: 0.7rem; color: var(--muted); font-size: 0.8rem; }
+
+    .mode-contract { display: grid; gap: 0.55rem; }
+    .contract-row { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 0.75rem; padding-bottom: 0.55rem; border-bottom: 1px solid #edf0f5; font-size: 0.83rem; }
+    .contract-row:last-child { padding-bottom: 0; border-bottom: 0; }
+    .contract-row strong { color: var(--muted); font-size: 0.75rem; letter-spacing: 0.04em; text-transform: uppercase; }
+    code { padding: 0.1rem 0.25rem; border-radius: 4px; background: #eef1f6; font-size: 0.82em; }
+    .footer-note { margin-top: 1.2rem; color: var(--muted); font-size: 0.8rem; }
+
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 620px) {
+      .state-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .button-grid { grid-template-columns: 1fr; }
+      .contract-row { grid-template-columns: 1fr; gap: 0.15rem; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="prototype-banner">Disposable prototype · issue #100 · Windows CEF</div>
+    <h1>One native seam, two presentation modes</h1>
+    <p class="lede">A click-through model for deciding whether a single CEF host can serve an embedded Flutter surface and a separate roscord-owned window without putting CEF objects or frame buffers in Dart.</p>
+
+    <div class="question">
+      <strong>Question this prototype answers</strong>
+      Can one native host expose the same browser contract in both Windows presentation modes while keeping navigation, JavaScript IPC, profile selection, permissions, input/IME, resize, paint, popups, and shutdown explicit?
+    </div>
+
+    <section class="mode-switcher" aria-label="Presentation mode">
+      <button class="mode-button active" data-mode="embedded">
+        <strong>Embedded in Flutter</strong>
+        <span>Windowless CEF → CPU pixel texture (D3D11 copy is optional)</span>
+      </button>
+      <button class="mode-button" data-mode="separate">
+        <strong>Separate roscord window</strong>
+        <span>Windowed CEF → an owned top-level HWND</span>
+      </button>
+    </section>
+
+    <div class="layout">
+      <div>
+        <section class="panel" aria-labelledby="state-heading">
+          <div class="panel-header">
+            <div>
+              <h2 id="state-heading">Live host state</h2>
+              <p>Every action goes through the same pure reducer used by both modes.</p>
+            </div>
+            <button class="danger" data-action="RESET">Reset</button>
+          </div>
+          <div class="panel-body">
+            <dl class="state-grid" id="state-grid"></dl>
+            <div class="subsection">
+              <div class="subsection-title"><h3>Mode contract</h3><small id="mode-contract-caption"></small></div>
+              <div class="mode-contract" id="mode-contract"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel subsection" aria-labelledby="actions-heading">
+          <div class="panel-header">
+            <div>
+              <h2 id="actions-heading">Free play</h2>
+              <p>Try actions in any order. Blocked actions are intentional contract failures.</p>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="subsection">
+              <div class="subsection-title"><h3>Host and browser lifecycle</h3><small>CEF process boundary</small></div>
+              <div class="button-grid">
+                <button data-action="START_HOST">Start host<small>Initialize CEF and the framed command channel</small></button>
+                <button data-action="OPEN_BROWSER">Open browser<small>Create one browser using this mode's surface policy</small></button>
+                <button data-action="CLOSE_BROWSER">Close browser<small>Release browser resources before host shutdown</small></button>
+                <button data-action="SHUTDOWN">Shutdown host<small>Stop the message loop after all browsers close</small></button>
+              </div>
+            </div>
+
+            <div class="subsection">
+              <div class="subsection-title"><h3>Navigation and JavaScript IPC</h3><small>Framed control messages</small></div>
+              <div class="button-grid">
+                <button data-action="NAVIGATE">Navigate to widget fixture<small>Send a URL command and wait for a load event</small></button>
+                <button data-action="SEND_JS">Send JavaScript message<small>Host → page command, no frame data in a method channel</small></button>
+                <button data-action="RECEIVE_JS">Receive JavaScript message<small>Page → host event with an origin and payload</small></button>
+              </div>
+            </div>
+
+            <div class="subsection">
+              <div class="subsection-title"><h3>Profile and permissions</h3><small>Per-account state, deny by default</small></div>
+              <div class="inline-controls">
+                <select id="profile-select" aria-label="Account profile">
+                  <option value="alice">Account Alice</option>
+                  <option value="bob">Account Bob</option>
+                  <option value="guest">Guest (no account)</option>
+                </select>
+                <button data-action="SELECT_PROFILE">Select profile</button>
+                <button data-action="REQUEST_PERMISSION">Request camera + microphone</button>
+                <button data-action="ALLOW_PERMISSION">Allow</button>
+                <button data-action="DENY_PERMISSION">Deny</button>
+              </div>
+            </div>
+
+            <div class="subsection">
+              <div class="subsection-title"><h3>Input, resize, paint, and popups</h3><small>Callbacks that cannot stay implicit</small></div>
+              <div class="button-grid">
+                <button data-action="FOCUS">Focus browser<small>Forward focus and a pointer target</small></button>
+                <button data-action="IME">Commit IME text<small>Exercise composition → committed text</small></button>
+                <button data-action="RESIZE">Resize to 1280 × 720<small>Call WasResized / update the HWND bounds</small></button>
+                <button data-action="TOGGLE_GPU">Toggle GPU paint path<small>Embedded copies the shared handle; windowed stays native</small></button>
+                <button data-action="POPUP">Open a popup<small>Composite PET_POPUP or create a native child</small></button>
+                <button data-action="CLOSE_POPUP">Close popup<small>Return focus to the main browser</small></button>
+              </div>
+            </div>
+
+            <div class="subsection">
+              <div class="subsection-title"><h3>Guided walkthroughs</h3><small>Start with a known state</small></div>
+              <div class="walkthrough-tabs" id="walkthrough-tabs"></div>
+              <div class="walkthrough-panel" id="walkthrough-panel"></div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <aside>
+        <section class="panel" aria-labelledby="verdict-heading">
+          <div class="panel-header"><div><h2 id="verdict-heading">Prototype verdict</h2><p>What the model supports</p></div></div>
+          <div class="panel-body">
+            <div class="verdict">
+              <strong>Keep one native host seam; make presentation a policy.</strong>
+              <ul>
+                <li>Embedded mode uses CEF OSR with a CPU <code>OnPaint</code> texture as the contract.</li>
+                <li>Separate mode uses a host-owned windowed CEF browser and the same framed control/event protocol.</li>
+                <li>Windows accelerated paint is an opt-in copy path after the software path is stable.</li>
+                <li>Profiles, permission decisions, input/IME, popup routing, and shutdown stay host-owned.</li>
+              </ul>
+            </div>
+            <div class="limits subsection">
+              <strong>What this does not prove</strong>
+              <ul>
+                <li>CEF binaries, sandbox bootstrap, signing, or package footprint.</li>
+                <li>Actual HWND, D3D11, IME, accessibility, or GPU-driver behavior.</li>
+                <li>Production Flutter plugin code. This file is the disposable decision aid.</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel subsection" aria-labelledby="events-heading">
+          <div class="panel-header"><div><h2 id="events-heading">Event log</h2><p>Most recent event first</p></div></div>
+          <div class="panel-body"><ol class="event-log" id="event-log" aria-live="polite"></ol></div>
+        </section>
+      </aside>
+    </div>
+
+    <p class="footer-note">Disposable by design: save a copy if the decision needs to be revisited, then remove this file when the native CEF seam is implemented.</p>
+  </main>
+
+  <script>
+    // Prototype question: can one native CEF host make the embedded texture and
+    // separate HWND modes share one explicit browser contract? This reducer is
+    // intentionally portable; it has no DOM references and no real CEF calls.
+    const MODES = {
+      embedded: {
+        label: 'Embedded in Flutter',
+        surface: 'Windowless CEF → Flutter pixel texture',
+        hostHandle: 'Hidden parent HWND (dialogs, DPI, monitor)',
+        frameTransport: 'BGRA OnPaint → client-owned RGBA texture',
+        popup: 'PET_POPUP composited over the texture',
+        gpu: 'Optional D3D11 handle copy (never retained after callback)'
+      },
+      separate: {
+        label: 'Separate roscord window',
+        surface: 'Windowed CEF → roscord-owned top-level HWND',
+        hostHandle: 'Owned top-level HWND',
+        frameTransport: 'CEF native compositor (no Flutter frame copy)',
+        popup: 'Native popup/child window managed by the host',
+        gpu: 'CEF native GPU compositor'
+      }
+    };
+
+    const WALKTHROUGHS = [
+      {
+        id: 'embedded',
+        title: 'Embedded happy path',
+        description: 'Exercise the texture contract: start one host, open OSR, drive a widget, prove permissions and IME, resize, try the optional GPU copy, and close cleanly.',
+        mode: 'embedded',
+        steps: [
+          ['START_HOST', 'Start native host'], ['OPEN_BROWSER', 'Open OSR browser'], ['NAVIGATE', 'Navigate'],
+          ['SEND_JS', 'Send JS IPC'], ['RECEIVE_JS', 'Receive JS IPC'], ['SELECT_PROFILE', 'Select profile'],
+          ['REQUEST_PERMISSION', 'Request permission'], ['DENY_PERMISSION', 'Deny by default'], ['FOCUS', 'Focus'],
+          ['IME', 'Commit IME'], ['RESIZE', 'Resize'], ['TOGGLE_GPU', 'Try GPU copy'], ['POPUP', 'Open popup'],
+          ['CLOSE_POPUP', 'Close popup'], ['CLOSE_BROWSER', 'Close browser'], ['SHUTDOWN', 'Shutdown host']
+        ]
+      },
+      {
+        id: 'separate',
+        title: 'Separate window path',
+        description: 'Use the same host commands with a native windowed browser. Notice that frames do not cross into Flutter, while profile, permission, input, popup, and shutdown rules stay the same.',
+        mode: 'separate',
+        steps: [
+          ['START_HOST', 'Start native host'], ['OPEN_BROWSER', 'Open owned HWND'], ['NAVIGATE', 'Navigate'],
+          ['SEND_JS', 'Send JS IPC'], ['RECEIVE_JS', 'Receive JS IPC'], ['SELECT_PROFILE', 'Select profile'],
+          ['REQUEST_PERMISSION', 'Request permission'], ['ALLOW_PERMISSION', 'Allow for this run'], ['FOCUS', 'Focus'],
+          ['IME', 'Commit IME'], ['RESIZE', 'Resize'], ['TOGGLE_GPU', 'Use native GPU'], ['POPUP', 'Open popup'],
+          ['CLOSE_POPUP', 'Close popup'], ['CLOSE_BROWSER', 'Close browser'], ['SHUTDOWN', 'Shutdown host']
+        ]
+      },
+      {
+        id: 'guardrails',
+        title: 'Guardrails and failure cases',
+        description: 'Start fresh and try the unsafe order: shutdown while a browser is open, IPC before navigation, permissions before a browser, and a profile switch while a browser is active.',
+        mode: 'embedded',
+        steps: [
+          ['SHUTDOWN', 'Reject early shutdown'], ['SEND_JS', 'Reject early IPC'], ['REQUEST_PERMISSION', 'Reject early permission'],
+          ['START_HOST', 'Start host'], ['OPEN_BROWSER', 'Open browser'], ['SELECT_PROFILE', 'Reject live profile switch'],
+          ['SHUTDOWN', 'Reject shutdown with browser'], ['CLOSE_BROWSER', 'Close browser'], ['SHUTDOWN', 'Shutdown cleanly']
+        ]
+      }
+    ];
+
+    function initialState(mode = 'embedded') {
+      return {
+        mode,
+        host: 'stopped',
+        browser: 'closed',
+        url: 'about:blank',
+        profile: 'unselected',
+        permission: 'not requested',
+        focus: 'unfocused',
+        ime: 'idle',
+        viewport: '1024 × 640',
+        paint: mode === 'embedded' ? 'CPU OnPaint' : 'native compositor',
+        popup: 'closed',
+        js: 'idle',
+        lastChange: 'Reset',
+        events: [{ kind: 'success', text: `Reset to ${MODES[mode].label}.` }]
+      };
+    }
+
+    function event(state, text, kind = 'success') {
+      return { ...state, lastChange: text, events: [{ kind, text }, ...state.events].slice(0, 18) };
+    }
+
+    function blocked(state, text) { return event(state, `Blocked: ${text}`, 'blocked'); }
+
+    function reduce(state, action) {
+      switch (action.type) {
+        case 'SET_MODE':
+          if (state.host !== 'stopped' || state.browser !== 'closed') return blocked(state, 'stop the host before changing presentation mode');
+          return event(initialState(action.mode), `Selected ${MODES[action.mode].label}.`);
+        case 'RESET': return initialState(state.mode);
+        case 'START_HOST':
+          if (state.host === 'running') return blocked(state, 'host is already running');
+          return event({ ...state, host: 'running' }, 'CEF host initialized; framed control channel ready.');
+        case 'OPEN_BROWSER':
+          if (state.host !== 'running') return blocked(state, 'start the native host first');
+          if (state.browser === 'open') return blocked(state, 'browser is already open');
+          return event({ ...state, browser: 'open', profile: 'unselected', permission: 'not requested', focus: 'focused' }, `Browser created using ${MODES[state.mode].surface}.`);
+        case 'NAVIGATE':
+          if (state.browser !== 'open') return blocked(state, 'open a browser first');
+          return event({ ...state, url: 'https://widget.local/fixture', js: 'idle' }, 'Navigation command sent; load-stop event received.');
+        case 'SEND_JS':
+          if (state.browser !== 'open' || state.url === 'about:blank') return blocked(state, 'navigate before sending JavaScript IPC');
+          return event({ ...state, js: 'host → page delivered' }, 'Framed JS command delivered without moving frame data through Dart.');
+        case 'RECEIVE_JS':
+          if (state.browser !== 'open' || state.url === 'about:blank') return blocked(state, 'navigate before receiving JavaScript IPC');
+          return event({ ...state, js: 'page → host received' }, 'Page event received with origin and payload metadata.');
+        case 'SELECT_PROFILE':
+          if (state.browser === 'open') return blocked(state, 'close the browser before switching account profiles');
+          if (state.host !== 'running') return blocked(state, 'start the host before selecting a profile');
+          return event({ ...state, profile: action.profile }, `Selected isolated profile ${action.profile}.`);
+        case 'REQUEST_PERMISSION':
+          if (state.browser !== 'open') return blocked(state, 'open a browser before requesting media permission');
+          return event({ ...state, permission: 'pending' }, 'Permission callback surfaced camera + microphone request to roscord.');
+        case 'ALLOW_PERMISSION':
+          if (state.permission !== 'pending') return blocked(state, 'there is no pending media permission request');
+          return event({ ...state, permission: 'allowed for this run' }, 'Permission callback answered allow for this run.');
+        case 'DENY_PERMISSION':
+          if (state.permission !== 'pending') return blocked(state, 'there is no pending media permission request');
+          return event({ ...state, permission: 'denied' }, 'Permission callback answered deny (default policy).');
+        case 'FOCUS':
+          if (state.browser !== 'open') return blocked(state, 'open a browser before focusing it');
+          return event({ ...state, focus: 'focused' }, 'Focus and pointer target forwarded to the browser.');
+        case 'IME':
+          if (state.browser !== 'open' || state.focus !== 'focused') return blocked(state, 'focus the browser before committing IME text');
+          return event({ ...state, ime: 'composition committed: こんにちは' }, 'IME composition committed through the native text bridge.');
+        case 'RESIZE':
+          if (state.browser !== 'open') return blocked(state, 'open a browser before resizing it');
+          return event({ ...state, viewport: '1280 × 720' }, state.mode === 'embedded' ? 'WasResized sent; texture viewport is 1280 × 720.' : 'HWND bounds updated to 1280 × 720.');
+        case 'TOGGLE_GPU':
+          if (state.browser !== 'open') return blocked(state, 'open a browser before changing its paint path');
+          if (state.mode === 'embedded') {
+            const next = state.paint === 'CPU OnPaint' ? 'D3D11 accelerated copy' : 'CPU OnPaint';
+            return event({ ...state, paint: next }, next === 'CPU OnPaint' ? 'Returned to portable CPU OnPaint baseline.' : 'Accelerated paint handle copied into client-owned texture before callback return.');
+          }
+          return event({ ...state, paint: 'native compositor' }, 'Windowed browser keeps GPU ownership inside CEF; no Flutter texture import needed.');
+        case 'POPUP':
+          if (state.browser !== 'open') return blocked(state, 'open a browser before opening a popup');
+          return event({ ...state, popup: 'open' }, `${MODES[state.mode].popup}.`);
+        case 'CLOSE_POPUP':
+          if (state.popup !== 'open') return blocked(state, 'there is no open popup');
+          return event({ ...state, popup: 'closed' }, 'Popup closed; focus returned to the main browser.');
+        case 'CLOSE_BROWSER':
+          if (state.browser !== 'open') return blocked(state, 'there is no open browser');
+          return event({ ...state, browser: 'closed', popup: 'closed', focus: 'unfocused', js: 'idle' }, 'Browser closed and its callbacks drained.');
+        case 'SHUTDOWN':
+          if (state.browser === 'open') return blocked(state, 'close every browser before shutting down the host');
+          if (state.host !== 'running') return blocked(state, 'host is already stopped');
+          return event({ ...state, host: 'stopped', profile: 'unselected', permission: 'not requested' }, 'CEF message loop stopped and host shut down cleanly.');
+        default: return state;
+      }
+    }
+
+    let state = initialState();
+    let activeWalkthrough = 'embedded';
+    const walkthroughProgress = Object.fromEntries(WALKTHROUGHS.map((flow) => [flow.id, []]));
+
+    const stateGrid = document.querySelector('#state-grid');
+    const modeContract = document.querySelector('#mode-contract');
+    const modeContractCaption = document.querySelector('#mode-contract-caption');
+    const eventLog = document.querySelector('#event-log');
+    const profileSelect = document.querySelector('#profile-select');
+    const walkthroughTabs = document.querySelector('#walkthrough-tabs');
+    const walkthroughPanel = document.querySelector('#walkthrough-panel');
+
+    const valueClass = (value) => {
+      if (['running', 'open', 'focused', 'allowed for this run', 'page → host received', 'host → page delivered', 'D3D11 accelerated copy'].includes(value)) return 'good';
+      if (['pending', 'unselected', 'not requested', 'unfocused', 'idle', 'closed', 'CPU OnPaint', 'native compositor'].includes(value)) return 'muted';
+      if (['denied', 'stopped'].includes(value)) return 'warn';
+      return '';
+    };
+
+    function renderState() {
+      const fields = [
+        ['Presentation', MODES[state.mode].label], ['Host process', state.host], ['Browser', state.browser],
+        ['URL', state.url], ['Account profile', state.profile], ['Media permission', state.permission],
+        ['Focus', state.focus], ['IME', state.ime], ['Viewport', state.viewport], ['Paint path', state.paint],
+        ['Popup', state.popup], ['Last change', state.lastChange]
+      ];
+      stateGrid.innerHTML = fields.map(([label, value]) => `<div class="state-cell"><dt>${label}</dt><dd class="${valueClass(value)}">${value}</dd></div>`).join('');
+      const contract = MODES[state.mode];
+      modeContractCaption.textContent = state.mode === 'embedded' ? 'Flutter scene owns layout' : 'Native window owns layout';
+      modeContract.innerHTML = [
+        ['Surface', contract.surface], ['Window handle', contract.hostHandle], ['Frame transport', contract.frameTransport],
+        ['Popup policy', contract.popup], ['GPU option', contract.gpu]
+      ].map(([label, value]) => `<div class="contract-row"><strong>${label}</strong><span>${value}</span></div>`).join('');
+      eventLog.innerHTML = state.events.map(({ kind, text }, index) => `<li class="${kind}"><time>${index === 0 ? 'now' : `-${index}`}</time><span>${text}</span></li>`).join('');
+      document.querySelectorAll('[data-mode]').forEach((button) => button.classList.toggle('active', button.dataset.mode === state.mode));
+      renderWalkthrough();
+    }
+
+    function renderWalkthroughTabs() {
+      walkthroughTabs.innerHTML = WALKTHROUGHS.map((flow) => `<button class="walkthrough-tab ${flow.id === activeWalkthrough ? 'active' : ''}" data-walkthrough="${flow.id}">${flow.title}</button>`).join('');
+      walkthroughTabs.querySelectorAll('[data-walkthrough]').forEach((button) => button.addEventListener('click', () => {
+        activeWalkthrough = button.dataset.walkthrough;
+        renderWalkthroughTabs();
+        renderWalkthrough();
+      }));
+    }
+
+    function renderWalkthrough() {
+      const flow = WALKTHROUGHS.find((item) => item.id === activeWalkthrough);
+      const completed = walkthroughProgress[flow.id];
+      const nextIndex = flow.steps.findIndex((step, index) => !completed.includes(index));
+      const next = nextIndex === -1 ? null : flow.steps[nextIndex];
+      walkthroughPanel.innerHTML = `<strong>${flow.title}</strong><p>${flow.description}</p><div class="walkthrough-steps">${flow.steps.map(([action, label], index) => {
+        const done = completed.includes(index);
+        const isNext = nextIndex === index;
+        return `<button class="${done ? 'done' : isNext ? 'next' : ''}" data-step="${action}" data-step-index="${index}">${done ? '✓ ' : ''}${label}</button>`;
+      }).join('')}</div><div class="walkthrough-status">${completed.length}/${flow.steps.length} steps clicked${next ? ` · next: <strong>${next[1]}</strong>` : ' · walkthrough complete'}</div>`;
+      walkthroughPanel.querySelectorAll('[data-step]').forEach((button) => button.addEventListener('click', () => {
+        const action = button.dataset.step;
+        dispatch(action);
+        const index = Number(button.dataset.stepIndex);
+        if (!walkthroughProgress[flow.id].includes(index)) walkthroughProgress[flow.id].push(index);
+        renderWalkthrough();
+      }));
+    }
+
+    function dispatch(type, extra = {}) {
+      state = reduce(state, { type, ...extra });
+      renderState();
+    }
+
+    document.querySelectorAll('[data-action]').forEach((button) => button.addEventListener('click', () => {
+      const action = button.dataset.action;
+      dispatch(action, action === 'SELECT_PROFILE' ? { profile: profileSelect.value } : {});
+    }));
+    document.querySelectorAll('[data-mode]').forEach((button) => button.addEventListener('click', () => dispatch('SET_MODE', { mode: button.dataset.mode })));
+
+    renderWalkthroughTabs();
+    renderState();
+  </script>
+</body>
+</html>
