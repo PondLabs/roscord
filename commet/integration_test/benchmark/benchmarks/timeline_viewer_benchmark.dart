@@ -18,9 +18,18 @@ void main() {
       ),
     ));
 
-    await tester.pump(const Duration(seconds: 1));
-
+    // The viewer builds its timeline asynchronously, so wait for the list
+    // rather than guessing at how long that takes: a fixed pump reports
+    // "Bad state: No element" from inside scrollUntilVisible, which says
+    // nothing about what was actually missing.
     final listFinder = find.byType(Scrollable);
+    await tester.pump(const Duration(seconds: 1));
+    for (var i = 0; i < 100 && listFinder.evaluate().isEmpty; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    expect(listFinder, findsOneWidget,
+        reason: 'the timeline viewer never drew its list');
+
     final itemFinder = find.text(finalEventMessage);
 
     var reportKey = 'TimelineViewer Scrolling';

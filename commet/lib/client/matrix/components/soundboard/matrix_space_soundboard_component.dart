@@ -15,6 +15,7 @@ import 'package:commet/client/components/soundboard/soundboard_emoji.dart';
 import 'package:commet/client/components/soundboard/soundboard_sound.dart';
 import 'package:commet/client/components/soundboard/soundboard_validation.dart';
 import 'package:commet/client/matrix/matrix_client.dart';
+import 'package:commet/client/matrix/matrix_room_permissions.dart';
 import 'package:commet/client/matrix/matrix_space.dart';
 import 'package:matrix/matrix.dart' as matrix;
 import 'package:uuid/uuid.dart';
@@ -81,7 +82,7 @@ class MatrixSpaceSoundboardComponent
 
   @override
   bool get canManage => matrixSpace.matrixRoom
-      .canChangeStateEvent(SpaceSoundboardComponent.stateEventType);
+      .canChangeState(SpaceSoundboardComponent.stateEventType);
 
   @override
   Future<SoundboardSound> addSound({

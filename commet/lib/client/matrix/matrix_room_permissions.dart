@@ -3,52 +3,66 @@ import 'package:matrix/matrix.dart' as matrix;
 
 import '../permissions.dart';
 
+/// The SDK answers "may I?" by working out what power level *we* hold, and
+/// reaches for `client.userID!` to do it. A client that has not finished
+/// logging in has no user id, and that null check thrown from inside a build
+/// takes the screen down with it. Until we know who we are, we may do
+/// nothing.
+extension KnownUserPermissions on matrix.Room {
+  /// [canChangeStateEvent], answered rather than thrown before login.
+  bool canChangeState(String type) =>
+      client.userID != null && canChangeStateEvent(type);
+
+  /// The same guard for everything else the SDK works out that way.
+  bool asSelf(bool Function() permitted) =>
+      client.userID == null ? false : permitted();
+}
+
 class MatrixRoomPermissions extends Permissions {
   late matrix.Room room;
 
   MatrixRoomPermissions(this.room);
 
   @override
-  bool get canBan => room.canBan;
+  bool get canBan => room.asSelf(() => room.canBan);
 
   @override
-  bool get canKick => room.canKick;
+  bool get canKick => room.asSelf(() => room.canKick);
 
   @override
-  bool get canSendMessage => room.canSendDefaultMessages;
+  bool get canSendMessage => room.asSelf(() => room.canSendDefaultMessages);
 
   @override
-  bool get canEditAvatar => room.canChangeStateEvent("m.room.avatar");
+  bool get canEditAvatar => room.canChangeState("m.room.avatar");
 
   @override
-  bool get canEditName => room.canChangeStateEvent("m.room.name");
+  bool get canEditName => room.canChangeState("m.room.name");
 
   @override
-  bool get canEditTopic =>
-      room.canChangeStateEvent(matrix.EventTypes.RoomTopic);
+  bool get canEditTopic => room.canChangeState(matrix.EventTypes.RoomTopic);
 
   @override
-  bool get canEnableE2EE => room.canChangeStateEvent("m.room.encryption");
+  bool get canEnableE2EE => room.canChangeState("m.room.encryption");
 
   @override
   bool get canEditRoomEmoticons =>
-      room.canChangeStateEvent(MatrixEmoticonComponent.roomEmotesStateKey);
+      room.canChangeState(MatrixEmoticonComponent.roomEmotesStateKey);
 
   @override
-  bool get canDeleteOtherUserMessages => room.canRedact;
+  bool get canDeleteOtherUserMessages => room.asSelf(() => room.canRedact);
 
   @override
-  bool get canEditChildren =>
-      room.canChangeStateEvent(matrix.EventTypes.SpaceChild);
+  bool get canEditChildren => room.canChangeState(matrix.EventTypes.SpaceChild);
 
   @override
-  bool get canInviteUser => room.canInvite;
+  bool get canInviteUser => room.asSelf(() => room.canInvite);
 
   @override
-  bool get canChangeRoles => room.canChangePowerLevel;
+  bool get canChangeRoles => room.asSelf(() => room.canChangePowerLevel);
 
   @override
-  bool get canMentionRoom => canUserMentionRoom(room.client.userID!, room);
+  bool get canMentionRoom =>
+      room.asSelf(() => canUserMentionRoom(room.client.userID!, room));
 
   static bool canUserMentionRoom(String user, matrix.Room room) {
     int powerLevel = 50;
@@ -69,5 +83,5 @@ class MatrixRoomPermissions extends Permissions {
 
   @override
   bool get canChangeVisibility =>
-      room.canChangeStateEvent(matrix.EventTypes.RoomJoinRules);
+      room.canChangeState(matrix.EventTypes.RoomJoinRules);
 }

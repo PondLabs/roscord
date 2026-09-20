@@ -1,3 +1,4 @@
+import 'package:commet/client/matrix/matrix_room_permissions.dart';
 import 'package:commet/debug/log.dart';
 import 'package:commet/main.dart';
 import 'package:commet/ui/pages/settings/categories/room/permissions/matrix/matrix_room_permissions_view.dart';
@@ -494,7 +495,7 @@ class _MatrixRoomPermissionsPageState extends State<MatrixRoomPermissionsPage> {
       return const Center(child: CircularProgressIndicator());
     }
 
-    var canEdit = widget.room.canChangeStateEvent("m.room.power_levels");
+    var canEdit = widget.room.canChangeState("m.room.power_levels");
     return MatrixRoomPermissionsView(
       permissions,
       roles,

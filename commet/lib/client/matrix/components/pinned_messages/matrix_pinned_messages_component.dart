@@ -1,6 +1,7 @@
 import 'package:commet/client/components/pinned_messages/pinned_messages_component.dart';
 import 'package:commet/client/matrix/matrix_client.dart';
 import 'package:commet/client/matrix/matrix_room.dart';
+import 'package:commet/client/matrix/matrix_room_permissions.dart';
 import 'package:matrix/matrix_api_lite/model/event_types.dart';
 
 class MatrixPinnedMessagesComponent
@@ -15,7 +16,7 @@ class MatrixPinnedMessagesComponent
 
   @override
   bool get canPinMessages =>
-      room.matrixRoom.canChangeStateEvent(EventTypes.RoomPinnedEvents);
+      room.matrixRoom.canChangeState(EventTypes.RoomPinnedEvents);
 
   @override
   List<String> getPinnedMessages() {

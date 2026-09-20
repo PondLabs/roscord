@@ -7,6 +7,7 @@ import 'package:commet/client/matrix/components/matrix_sync_listener.dart';
 import 'package:commet/client/matrix/components/voip_room/matrix_livekit_backend.dart';
 import 'package:commet/client/matrix/matrix_client.dart';
 import 'package:commet/client/matrix/matrix_room.dart';
+import 'package:commet/client/matrix/matrix_room_permissions.dart';
 import 'package:commet/debug/log.dart';
 import 'package:commet/main.dart';
 import 'package:matrix/matrix.dart';
@@ -175,7 +176,7 @@ class MatrixVoipRoomComponent
   }
 
   @override
-  bool get canJoinCall => room.matrixRoom.canChangeStateEvent(
+  bool get canJoinCall => room.matrixRoom.canChangeState(
         MatrixVoipRoomComponent.callMemberStateEvent,
       );
 
