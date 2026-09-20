@@ -210,7 +210,7 @@ impl SurfaceSpec {
         &self.policy
     }
 
-    fn validate(&self) -> Result<(), RuntimeError> {
+    pub(crate) fn validate(&self) -> Result<(), RuntimeError> {
         if self.privacy == PrivacyMode::Private && self.profile_key.as_str().is_empty() {
             return Err(RuntimeError::InvalidSpec(
                 "private surfaces still require an opaque profile key".into(),
@@ -492,7 +492,7 @@ impl SurfaceCommand {
         }
     }
 
-    fn validate(&self) -> Result<(), RuntimeError> {
+    pub(crate) fn validate(&self) -> Result<(), RuntimeError> {
         if self.sequence() == 0 {
             return Err(RuntimeError::InvalidCommand(
                 "command sequence must be greater than zero".into(),
@@ -1212,6 +1212,11 @@ impl FramedCodec {
         frame.extend_from_slice(&length.to_be_bytes());
         frame.extend_from_slice(&body);
         Ok(frame)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn max_frame_bytes(&self) -> usize {
+        self.max_frame_bytes
     }
 
     pub fn decode(&self, frame: &[u8]) -> Result<WireMessage, ProtocolError> {

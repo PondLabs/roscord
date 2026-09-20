@@ -1,5 +1,9 @@
 pub mod api;
 pub mod browser_runtime;
+#[cfg(target_os = "linux")]
+pub mod cef_host;
+#[cfg(target_os = "linux")]
+pub mod linux_browser_runtime;
 mod frb_generated;
 
 // Voice DSP (noise suppression, gate, ducking). Re-exported so its C ABI

@@ -49,3 +49,44 @@ The tool is intentionally not a runtime downloader.  Signing the final
 manifests, native binaries, and packages happens in the downstream artifact
 qualification gate; a signing or qualification failure must withhold the
 complete Windows/Linux release.
+
+## Linux host
+
+Linux and Flatpak use the bundled `cef_host` executable as the one CEF process
+owner. The parent starts it with an absolute, staged runtime and profile root:
+
+```text
+cef_host \
+  --socket "$XDG_RUNTIME_DIR/roscord/cef-host-<nonce>.sock" \
+  --parent-pid "$PPID" \
+  --parent-nonce "$NONCE" \
+  --cef-root "/path/to/bundle/cef" \
+  --profile-root "$XDG_DATA_HOME/roscord/browser-profiles"
+```
+
+The host rejects elevated launches, sandbox-bypass flags, missing or
+symlinked CEF inputs, system-library lookup, insecure profile/socket roots,
+and a pre-existing endpoint. It authenticates the connecting process with
+Linux peer credentials and authenticates every length-framed message with the
+parent nonce and protocol version. The ordinary-user user-namespace sandbox
+route is accepted when the kernel permits it; no native Wayland child
+embedding is required.
+
+The Linux CMake build needs a full CEF SDK for the C API bridge and a staged
+runtime for packaging; the staged runtime intentionally contains no headers:
+
+```text
+cmake -S commet/linux -B build/linux \
+  -DROSCORD_CEF_SDK_ROOT=/path/to/cef-sdk \
+  -DROSCORD_CEF_RUNTIME_DIR=/path/to/staged/cef
+```
+
+`cef_host` opens `Release/libcef.so` from the explicit `--cef-root` at
+runtime. It has no link-time or system CEF dependency, and a build without the
+SDK bridge fails closed when launched.
+
+CEF's shared executable entry point is run before the host opens its socket,
+so renderer/GPU/utility child invocations cannot accidentally become another
+transport owner. Open and close are exposed as `opened`, `ready`, and
+`closed` BrowserRuntime events; malformed, oversized, stale, and
+profile-mismatched messages fail closed.
