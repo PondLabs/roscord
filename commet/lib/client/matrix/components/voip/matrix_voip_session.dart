@@ -130,7 +130,7 @@ class MatrixVoipSession implements VoipSession {
   @override
   Future<void> acceptCall(
       {bool withMicrophone = false, bool withCamera = false}) async {
-    WebrtcDefaultDevices.selectOutputDevice();
+    await WebrtcDefaultDevices.selectOutputDevice();
 
     var defaultStream = await WebrtcDefaultDevices.getDefaultMicrophone();
 

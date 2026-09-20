@@ -267,10 +267,11 @@ class _VoipSettingsPage extends State<VoipSettingsPage> {
           "Default Audio Input",
           preferences.voipDefaultAudioInput.value,
           microphones!,
+          kind: AudioDeviceKind.input,
           onSelected: (device) async {
             await preferences.voipDefaultAudioInput.set(device?.label);
 
-            WebrtcDefaultDevices.selectInputDevice();
+            await WebrtcDefaultDevices.selectInputDevice();
 
             setState(() {});
           },
@@ -280,10 +281,11 @@ class _VoipSettingsPage extends State<VoipSettingsPage> {
           "Audio Output",
           preferences.voipDefaultAudioOutput.value,
           speakers!,
+          kind: AudioDeviceKind.output,
           onSelected: (device) async {
             await preferences.voipDefaultAudioOutput.set(device?.label);
 
-            WebrtcDefaultDevices.selectOutputDevice();
+            await WebrtcDefaultDevices.selectOutputDevice();
             setState(() {});
           },
         ),
@@ -303,9 +305,13 @@ class _VoipSettingsPage extends State<VoipSettingsPage> {
 
   Widget buildPicker(
       String label, String? selected, List<webrtc.MediaDeviceInfo> microphones,
-      {Function(webrtc.MediaDeviceInfo? device)? onSelected}) {
+      {AudioDeviceKind? kind,
+      Function(webrtc.MediaDeviceInfo? device)? onSelected}) {
+    // By name, then by id: the same two ways the pick is matched when it
+    // is applied, so what is shown here is what is in use.
     var selectedDevice =
-        microphones.firstWhereOrNull((i) => i.label == selected);
+        microphones.firstWhereOrNull((i) => i.label == selected) ??
+            microphones.firstWhereOrNull((i) => i.deviceId == selected);
 
     List<webrtc.MediaDeviceInfo?> items = [null, ...microphones];
 
@@ -324,6 +330,15 @@ class _VoipSettingsPage extends State<VoipSettingsPage> {
               }
             },
             value: selectedDevice),
+        // Saying so beats leaving the picker looking empty while the
+        // system quietly plays through something else.
+        if (selected != null && selectedDevice == null)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: tiamat.Text.labelLow(
+                '"$selected" is not connected, so the system default is in '
+                'use. It will be picked up again when it comes back.'),
+          ),
       ],
     );
   }

@@ -198,8 +198,8 @@ class MatrixVoipComponent
   Future<void> stopRingtone() async {}
 
   @override
-  Future<void> startCall(String roomId, CallType type, {String? userId}) {
-    WebrtcDefaultDevices.selectOutputDevice();
+  Future<void> startCall(String roomId, CallType type, {String? userId}) async {
+    await WebrtcDefaultDevices.selectOutputDevice();
 
     var callType = switch (type) {
       CallType.voice => mx.CallType.kVoice,
@@ -207,7 +207,7 @@ class MatrixVoipComponent
     };
 
     var room = client.getMatrixClient().getRoomById(roomId);
-    return voip.inviteToCall(room!, callType, userId: userId);
+    await voip.inviteToCall(room!, callType, userId: userId);
   }
 
   @override

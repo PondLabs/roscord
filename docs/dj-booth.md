@@ -19,7 +19,11 @@ that track, so:
 - the music arrives through WebRTC playout, so the echo canceller removes it
   from every listener's microphone, loudspeaker users included;
 - each listener's volume is the playback volume of that one track
-  (`preferences.djMusicVolume`, one level for all music, apart from voices).
+  (`preferences.djMusicVolume`, one level for all music, apart from voices);
+- and the DJ sets how loud it goes out for everyone
+  (`preferences.djMasterVolume`), applied as the Rust player's gain, so it
+  is in the track itself before anyone receives it. Their own monitor
+  follows it, because the monitor receives that very track.
 
 Only desktop (Linux, Windows) can DJ: it needs the Rust player
 (`librust_lib_commet` is not built for Android or web) and to run yt-dlp.
@@ -38,10 +42,10 @@ send the music back into the room through their microphone.
 | `commet/lib/client/components/dj/` | Platform-free booth: models, wire protocol, link parsing, the `DjSession` state machine. Unit tested in `commet/unit_test/dj/`. |
 | `commet/lib/client/matrix/components/dj/` | LiveKit transport, `DjBooths` (one booth per call, opened and closed by `MatrixLivekitVoipSession`), platform switch (`dj_platform*.dart`). |
 | `.../dj/native/` | Desktop only: `DjTools` (yt-dlp and Deno, found on PATH or downloaded with consent), `YtDlp`, `NativeDjLinkResolver` (yt-dlp, Spotify embed pages), `DjSongCache`, `NativeDjEngine`, FFI bindings. |
-| `rust/dj_audio` | The player: symphonia decode (AAC/MP4 incl. fragmented, MP3, Vorbis, FLAC, WAV) of whole files or files still downloading (`growing.rs`), resampling to 48 kHz stereo, a ring buffer filled by a decoder thread, fades, gain. C ABI `commet_music_*`, linked into `librust_lib_commet`. |
+| `rust/dj_audio` | The player: symphonia decode (Opus in WebM/Ogg, AAC/MP4 incl. fragmented, MP3, Vorbis, FLAC, WAV) of whole files or files still downloading (`growing.rs`), resampling to 48 kHz stereo, a ring buffer filled by a decoder thread, fades, gain. C ABI `commet_music_*`, linked into `librust_lib_commet`. Opus is `opus.rs`, on the pure-Rust `opus-rs`. |
 | `third_party/flutter-webrtc` | `commetCreateMusicTrack` / `commetStopMusicTrack` and `commet_music_source.h`: a kCustom audio source fed by a 10 ms pacing thread calling `commet_music_pull`. |
 | `third_party/livekit-client-sdk-flutter` | `AudioPublishOptions.stereo`: `TF_STEREO` on the track, `stereo=1;sprop-stereo=1` in our offer, and the subscriber answer mirrors stereo where the server offers it. |
-| `commet/lib/ui/organisms/dj/` | Booth panel, now-playing pill, spinning record, member badges and right-click actions, tools prompt. |
+| `commet/lib/ui/organisms/dj/` | Booth panel, now-playing pill, spinning record, member badges and right-click actions, tools prompt, the listener's music volume and the DJ's room volume. |
 
 ## Who is the DJ
 
@@ -105,9 +109,15 @@ Scaffold for snack bars.
   `yt-dlp -U` once a day.
 - YouTube needs a JavaScript runtime: Deno ≥ 2.3 or Node ≥ 22 from PATH, else
   Deno is downloaded the same way (about 45 MB).
-- Formats are picked for the Rust decoder: AAC in MP4 over plain HTTP first
-  (YouTube itag 140), then MP3 (SoundCloud), Vorbis, FLAC. Opus/WebM-only
-  sources fail with a readable error.
+- Formats are picked for the Rust decoder: Opus in WebM at 96 kbps or more
+  first (YouTube itag 251), then AAC in MP4 over plain HTTP (itag 140), MP3
+  (SoundCloud), Vorbis, FLAC — all over plain HTTP, highest bitrate first
+  (`--format-sort abr,asr`), and each download's codec, bitrate and sample
+  rate go in the log.
+- Opus is preferred because YouTube's is about the same bitrate as its AAC
+  and keeps roughly 4 kHz more treble, and because it needs no second lossy
+  stage beyond the 128 kbps the room's track is published at. Below 96 kbps
+  the AAC is the better of the two, so that is where the line sits.
 - Spotify's audio is DRM protected: its public embed page gives title,
   artists and length (album and playlist pages list about 50 tracks), and
   each song plays from yt-dlp's `ytsearch1:` best YouTube match.
@@ -127,16 +137,28 @@ Scaffold for snack bars.
   by source, and the next two queued songs are fetched ahead. Only a
   finished download gets a record (`<key>.json`); anything else under its
   key is deleted before fetching again.
-- On Windows yt-dlp runs detached (`ProcessStartMode.detachedWithStdio`) so no
-  console window flashes; success is read from its output.
+- On Windows the booth starts yt-dlp itself, with `CreateProcessW` and
+  `CREATE_NO_WINDOW` (`windows_hidden_process.dart`), and reads its output
+  from files in a temporary directory. Dart can only start a child normally,
+  which gives a console app its own console window, or detached, which gives
+  it none and so hands a fresh console to whatever *it* starts — and yt-dlp
+  starts the JavaScript runtime for every YouTube link. `CREATE_NO_WINDOW`
+  gives a console with no window, which the whole tree inherits.
 
 ## Known gaps
 
 - The queue lives only in the call: when everyone leaves, it is gone.
 - Only the DJ edits the queue.
 - Spotify playlists beyond the embed page's first ~50 tracks are not read.
-- A song whose only formats are Opus/WebM, or YouTube HLS in MPEG-TS, can't
-  be decoded.
+- A song whose only formats are YouTube HLS in MPEG-TS can't be decoded.
+- Opus is decoded by `opus-rs`, which plays CELT within 82 dB of libopus but
+  SILK only within 15 dB, and mis-reads some multi-frame packets. The booth
+  works around both: `opus.rs` splits packets into frames itself, and turns
+  down any stream that is not CELT, which is why only Opus at 96 kbps and
+  up is downloaded. A stream that switches to SILK part way through, or
+  that changes how many channels it codes (which `opus-rs` will not
+  decode), stops with "its audio format isn't supported" instead of
+  sounding wrong.
 - An MP4 with its index at the end (not YouTube's) only starts once it has
   all downloaded, and so does fragmented MP4 whose size the site doesn't
   give.

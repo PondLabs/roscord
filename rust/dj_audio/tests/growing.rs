@@ -105,6 +105,12 @@ fn plays_while_downloading() {
         // moov at the end: nothing plays before the whole file is in, but
         // it still plays.
         ("tone_gap.m4a", true),
+        // WebM keeps its index at the end too, but is read as a stream
+        // while it downloads so the song starts at once (see
+        // `GrowingFile::stream_while_growing`).
+        ("tone_gap.webm", true),
+        ("tone_gap.webm", false),
+        ("tone_gap.opus", true),
     ] {
         let label = format!("{name} (length announced: {announce_len})");
         let data = std::fs::read(fixture(name)).unwrap();

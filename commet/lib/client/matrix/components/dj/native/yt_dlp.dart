@@ -53,6 +53,38 @@ class YtDlpFetch {
   YtDlpFetch(this.started, this.finished);
 }
 
+/// What a download's audio is, from the fields yt-dlp printed:
+/// `mp4a.40.2 130 kbps, 44.1 kHz stereo (format 140)`. Unknown parts are
+/// left out rather than guessed.
+String describeDownloadedAudio(Map<String, Object?> info) {
+  final parts = <String>[];
+  final codec = info['acodec'];
+  if (codec is String && codec.isNotEmpty && codec != 'none') {
+    parts.add(codec);
+  }
+  final abr = info['abr'];
+  if (abr is num && abr > 0) parts.add('${abr.round()} kbps');
+  final asr = info['asr'];
+  if (asr is num && asr > 0) {
+    final khz = asr / 1000;
+    parts.add('${khz == khz.roundToDouble() ? khz.round() : khz} kHz');
+  }
+  final channels = info['audio_channels'];
+  if (channels is num) {
+    parts.add(switch (channels.round()) {
+      1 => 'mono',
+      2 => 'stereo',
+      final n => '$n channels',
+    });
+  }
+  final format = info['format_id'];
+  final described =
+      parts.isEmpty ? 'audio of an unreported kind' : parts.join(', ');
+  return format is String && format.isNotEmpty
+      ? '$described (format $format)'
+      : described;
+}
+
 class YtDlp {
   final DjToolPaths tools;
 
@@ -87,12 +119,26 @@ class YtDlp {
     return json;
   }
 
-  /// Audio formats the booth's decoder reads (AAC in MP4, MP3, Vorbis,
-  /// FLAC) over plain HTTP: HLS from YouTube comes in MPEG-TS, which it
-  /// doesn't read. MP3 is the exception, SoundCloud's HLS MP3 segments join
-  /// into a valid file. The last resort is a small video with AAC audio,
-  /// never a big HLS one.
-  static const formatSelector = 'ba[acodec^=mp4a][protocol^=http]'
+  /// Lowest bitrate at which an Opus stream is taken. Two reasons, and
+  /// they agree: below it YouTube's AAC is the better of the two, and
+  /// libopus only settles on CELT — the one mode the booth's Opus decoder
+  /// plays well (see rust/dj_audio/src/opus.rs) — once it has bits to
+  /// spare.
+  static const minOpusKbps = 96;
+
+  /// Audio formats the booth's decoder reads (Opus in WebM or Ogg, AAC in
+  /// MP4, MP3, Vorbis, FLAC) over plain HTTP: HLS from YouTube comes in
+  /// MPEG-TS, which it doesn't read. MP3 is the exception, SoundCloud's HLS
+  /// MP3 segments join into a valid file. The last resort is a small video
+  /// with AAC audio, never a big HLS one.
+  ///
+  /// Opus comes first where there is enough of it: YouTube's itag 251 is
+  /// about the same bitrate as its AAC (itag 140) and keeps roughly 4 kHz
+  /// more treble.
+  static const formatSelector = 'ba[acodec=opus][abr>=$minOpusKbps]'
+      '[protocol^=http][ext=webm]'
+      '/ba[acodec=opus][abr>=$minOpusKbps][protocol^=http][ext=opus]'
+      '/ba[acodec^=mp4a][protocol^=http]'
       '/ba[acodec=mp3]'
       '/ba[ext=m4a][protocol^=http]'
       '/ba[ext=mp3]'
@@ -102,7 +148,10 @@ class YtDlp {
       '/ba[protocol^=http]';
 
   static const _fields = 'title,uploader,channel,artist,creator,duration,'
-      'thumbnail,id,extractor_key';
+      'thumbnail,id,extractor_key,'
+      // What the audio actually is, so a song that sounds thin can be told
+      // apart from one that is: see [describeDownloadedAudio].
+      'format_id,acodec,abr,asr,audio_channels';
   static const _startMark = 'commet-start ';
   static const _doneMark = 'commet-done ';
 
@@ -151,6 +200,12 @@ class YtDlp {
         '--no-simulate',
         '-f',
         formatSelector,
+        // Within whichever alternative of [formatSelector] matches, the
+        // loudest-in-bits one. yt-dlp's own order weighs `quality`,
+        // `channels` and codec before the bitrate, so a site offering the
+        // same codec twice could otherwise hand us the smaller file.
+        '--format-sort',
+        'abr,asr',
         '-o',
         // `%` is template syntax in yt-dlp's output name.
         '${directory.replaceAll('%', '%%')}${Platform.pathSeparator}'

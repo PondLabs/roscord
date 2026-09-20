@@ -168,6 +168,8 @@ class DjSongCache {
         final info = jsonDecode(await infoFile.readAsString());
         final path = info is Map ? info['filepath'] : null;
         if (path is String && await File(path).exists()) {
+          Log.i('DJ booth: playing a cached '
+              '${describeDownloadedAudio(Map<String, Object?>.from(info))}');
           // Touched, so trimming keeps what is played often.
           final now = DateTime.now();
           await infoFile.setLastModified(now);
@@ -199,6 +201,7 @@ class DjSongCache {
         directory: dir.path, name: key, knownSitesOnly: !trusted);
     final started = await fetch.started;
     final path = started.path;
+    Log.i('DJ booth: downloading ${describeDownloadedAudio(started.info)}');
 
     // The player reads the file as yt-dlp writes it, until told it is done.
     final bindings = DjMusicBindings.load();
@@ -245,7 +248,7 @@ class DjSongCache {
           0, (sum, s) => sum + s.value.fold<int>(0, (t, f) => t + f.$2.size));
       for (final song in songs) {
         if (total <= maxBytes) break;
-        if (_used.contains(song.key) || _inFlight.isRunning(song.key)) {
+        if (_used.contains(song.key) || _inFlight.containsKey(song.key)) {
           continue;
         }
         for (final (file, stat) in song.value) {
@@ -269,14 +272,17 @@ class NativeDjEngine implements DjPlaybackEngine {
   final lk.Room room;
   final DjMusicBindings bindings;
 
-  NativeDjEngine(this.room, this.bindings, {double monitorVolume = 1})
-      : _monitorVolume = monitorVolume;
+  NativeDjEngine(this.room, this.bindings,
+      {double monitorVolume = 1, double masterVolume = 1})
+      : _monitorVolume = monitorVolume,
+        _masterVolume = masterVolume;
 
   DjMusicPlayer? _player;
   rtc.MediaStream? _stream;
   lk.LocalAudioTrack? _lkTrack;
   final _LocalMonitor _monitor = _LocalMonitor();
   double _monitorVolume;
+  double _masterVolume;
 
   /// Tracks ids for the Rust player, which counts them in integers.
   final Map<String, int> _numbers = {};
@@ -301,6 +307,9 @@ class NativeDjEngine implements DjPlaybackEngine {
     final participant = room.localParticipant;
     if (participant == null) throw StateError('Not connected to the call');
     final player = _player = DjMusicPlayer(bindings);
+    // Before a single block is pulled, so the room never hears the song
+    // at full volume for an instant first.
+    player.setGain(_masterVolume);
 
     final response = await rtc.WebRTC.invokeMethod(
         'commetCreateMusicTrack', <String, dynamic>{
@@ -490,6 +499,14 @@ class NativeDjEngine implements DjPlaybackEngine {
   set monitorVolume(double volume) {
     _monitorVolume = volume;
     _monitor.setVolume(volume);
+  }
+
+  @override
+  set masterVolume(double volume) {
+    _masterVolume = volume;
+    // The player ramps to it, so this is click-free mid-song. The monitor
+    // hears it too: it receives the very track this gain shapes.
+    _player?.setGain(volume);
   }
 }
 

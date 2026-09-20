@@ -85,6 +85,14 @@ pub(crate) struct GrowingFile {
     pos: u64,
     growth: Arc<Growth>,
     stop: Arc<AtomicBool>,
+    /// Whether the reader may be told it can seek. A Matroska file keeps
+    /// its index at the end, and symphonia goes and reads it as soon as it
+    /// is told the stream is seekable — which, half way through a
+    /// download, waits for the whole file. Saying no makes it read the
+    /// clusters in order instead, so the song starts at once; once the
+    /// download is done there is nothing to wait for and seeking is on
+    /// again.
+    seekable_while_growing: bool,
 }
 
 fn stopped() -> io::Error {
@@ -103,6 +111,7 @@ impl GrowingFile {
                         pos: 0,
                         growth,
                         stop,
+                        seekable_while_growing: true,
                     })
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -117,6 +126,13 @@ impl GrowingFile {
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    /// Reads the file in order while it downloads (see
+    /// [`GrowingFile::seekable_while_growing`]).
+    pub fn stream_while_growing(mut self) -> Self {
+        self.seekable_while_growing = false;
+        self
     }
 
     fn total(&self) -> Option<u64> {
@@ -197,7 +213,7 @@ impl Seek for GrowingFile {
 
 impl MediaSource for GrowingFile {
     fn is_seekable(&self) -> bool {
-        true
+        self.seekable_while_growing || self.growth.state.load(Ordering::Acquire) == COMPLETE
     }
 
     fn byte_len(&self) -> Option<u64> {

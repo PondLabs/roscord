@@ -559,7 +559,28 @@ void FlutterWebRTC::HandleMethodCall(
       return;
     }
 
-    RTCMediaTrack* track = MediaTrackForId(trackId);
+    // COMMET: a track received on a peer connection keeps the id of the
+    // local track it was sent from, and MediaTrackForId answers with local
+    // tracks first. The DJ booth's monitor receives its own music track in
+    // this same process, so without looking in the peer connection the
+    // lookup lands on the local track, whose source has no playout volume,
+    // and the DJ's music ignores the booth's volume. Android already
+    // resolves the track through the peer connection it was given.
+    const std::string peerConnectionId = findString(params, "peerConnectionId");
+    scoped_refptr<RTCMediaTrack> received;
+    if (!peerConnectionId.empty()) {
+      FlutterPeerConnectionObserver* observer =
+          PeerConnectionObserversForId(peerConnectionId);
+      if (observer != nullptr) {
+        received = observer->MediaTrackForId(trackId);
+      }
+    }
+
+    // Kept in a scoped_refptr, so the track outlives this block whichever
+    // map it came from.
+    scoped_refptr<RTCMediaTrack> resolved =
+        received != nullptr ? received : MediaTrackForId(trackId);
+    RTCMediaTrack* track = resolved.get();
     if (nullptr == track) {
       result->Error("setVolume", "setVolume() Unable to find provided track");
       return;

@@ -490,6 +490,13 @@ class Preferences {
   DoublePreference djMusicVolume =
       DoublePreference("dj_music_volume", defaultValue: 0.6);
 
+  /// How loud the booth sends its music to the room, set by whoever is
+  /// DJing (0..2). Applied to the track everyone hears, before each
+  /// listener's own [djMusicVolume] scales it. Local-only: it travels as
+  /// the audio, not as a setting.
+  DoublePreference djMasterVolume =
+      DoublePreference("dj_master_volume", defaultValue: 1.0);
+
   /// Level the booth's mute button goes back to.
   DoublePreference djMusicPremuteVolume =
       DoublePreference("dj_music_premute_volume", defaultValue: 0.6);
