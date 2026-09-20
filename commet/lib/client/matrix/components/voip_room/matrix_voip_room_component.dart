@@ -8,6 +8,7 @@ import 'package:commet/client/matrix/components/voip_room/matrix_livekit_backend
 import 'package:commet/client/matrix/matrix_client.dart';
 import 'package:commet/client/matrix/matrix_room.dart';
 import 'package:commet/debug/log.dart';
+import 'package:commet/main.dart';
 import 'package:matrix/matrix.dart';
 
 class MatrixVoipRoomComponent
@@ -146,6 +147,12 @@ class MatrixVoipRoomComponent
     // Leaving is memoised, so this only waits for a hang up already running:
     // two overlapping sessions fought over the membership state (issue #48).
     await currentSession?.hangUpCall();
+
+    // One voice channel at a time. Walking into another room's channel
+    // leaves the one being stood in, and before the join rather than after,
+    // so the two are never both live and never both claim a membership.
+    await clientManager?.callManager
+        .leaveOtherCalls(client: client, roomId: room.identifier);
 
     currentSession = await backend.join();
     currentSession?.onStateChanged.listen(onStateChanged);
