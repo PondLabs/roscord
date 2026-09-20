@@ -11,7 +11,6 @@ import 'package:commet/ui/molecules/video_player/video_playback_dialog.dart';
 import 'package:commet/utils/links/link_utils.dart';
 import 'package:flutter/material.dart';
 import 'package:tiamat/atoms/tile.dart';
-import 'package:tiamat/tiamat.dart' as tiamat;
 
 typedef VideoPreviewOpener = Future<void> Function(
   BuildContext context,
@@ -86,6 +85,22 @@ class _UrlPreviewWidgetState extends State<UrlPreviewWidget> {
       widget.data?.videoEmbedInfo != null;
 
   bool get isShortForm => widget.data?.videoEmbedInfo?.isShortForm ?? false;
+
+  // Photo posts get media-card scale (like videos), not the compact page card.
+  bool get isPhotoPost =>
+      widget.data?.images.isNotEmpty == true ||
+      widget.data?.type == UrlDestinationType.image;
+
+  bool get isGallery => (widget.data?.images.length ?? 0) > 1;
+
+  // Discord-style link embeds put a page's og:image on the right as a small
+  // thumbnail, and reserve full media below the text for videos and photos.
+  bool get isPageThumbnail =>
+      hasBody &&
+      !isVideo &&
+      !isPhotoPost &&
+      widget.data?.image != null &&
+      widget.data?.video == null;
 
   Future<void> _openVideo({required bool autoplay}) async {
     setState(() {
@@ -171,8 +186,20 @@ class _UrlPreviewWidgetState extends State<UrlPreviewWidget> {
 
   @override
   Widget build(BuildContext context) {
-    final double maxWidth = isVideo ? (isShortForm ? 280 : 420) : 300;
-    final double maxHeight = isVideo ? (isShortForm ? 480 : 360) : 240;
+    final double maxWidth;
+    final double maxHeight;
+    if (isVideo) {
+      maxWidth = isShortForm ? 280 : 480;
+      maxHeight = isShortForm ? 480 : 420;
+    } else if (isPhotoPost) {
+      maxWidth = 480;
+      // Room for the text body plus a media cap of 480; the photo shrinks
+      // within what is left, so the card never overflows.
+      maxHeight = 620;
+    } else {
+      maxWidth = 480;
+      maxHeight = isPageThumbnail ? double.infinity : 420;
+    }
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(8),
@@ -187,46 +214,70 @@ class _UrlPreviewWidgetState extends State<UrlPreviewWidget> {
                     ? () => _openVideo(autoplay: false)
                     : _openLink,
             child: Padding(
-              padding: const EdgeInsets.all(8.0),
+              padding: const EdgeInsets.all(12.0),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.start,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  ConstrainedBox(
-                    constraints: BoxConstraints(
-                      maxWidth: maxWidth,
-                      maxHeight: maxHeight,
+                  Flexible(
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxWidth: maxWidth,
+                        maxHeight: maxHeight,
+                      ),
+                      child: widget.data == null
+                          ? buildLoadingDisplay()
+                          : Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisAlignment: MainAxisAlignment.start,
+                              children: [
+                                if (isPageThumbnail)
+                                  Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Expanded(child: body(context)),
+                                      const SizedBox(width: 10),
+                                      _buildPageThumbnail(),
+                                    ],
+                                  )
+                                else ...[
+                                  Align(
+                                    alignment: Alignment.topLeft,
+                                    child: body(context),
+                                  ),
+                                  if (hasBody)
+                                    const SizedBox(
+                                      width: 10,
+                                      height: 10,
+                                    ),
+                                  if (isVideo)
+                                    Flexible(child: _buildVideoThumbnail())
+                                  else if (isGallery)
+                                    Flexible(child: _buildPhotoGrid())
+                                  else if (widget.data!.image != null &&
+                                      widget.data?.video == null)
+                                    Flexible(
+                                      child: isPhotoPost
+                                          ? ConstrainedBox(
+                                              constraints: const BoxConstraints(
+                                                  maxHeight: 480),
+                                              child: image(),
+                                            )
+                                          : image(),
+                                    )
+                                  else if (widget.data!.video != null)
+                                    MessageAttachment(
+                                      previewMedia: true,
+                                      widget.data!.video!,
+                                      constrainSize: false,
+                                    ),
+                                ],
+                              ],
+                            ),
                     ),
-                    child: widget.data == null
-                        ? buildLoadingDisplay()
-                        : Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisAlignment: MainAxisAlignment.start,
-                            children: [
-                              Align(
-                                alignment: Alignment.topLeft,
-                                child: body(context),
-                              ),
-                              if (hasBody)
-                                const SizedBox(
-                                  width: 10,
-                                  height: 10,
-                                ),
-                              if (isVideo)
-                                Flexible(child: _buildVideoThumbnail())
-                              else if (widget.data!.image != null &&
-                                  widget.data?.video == null)
-                                Flexible(child: image())
-                              else if (widget.data!.video != null)
-                                MessageAttachment(
-                                  previewMedia: true,
-                                  widget.data!.video!,
-                                  constrainSize: false,
-                                ),
-                            ],
-                          ),
                   ),
                 ],
               ),
@@ -448,7 +499,8 @@ class _UrlPreviewWidgetState extends State<UrlPreviewWidget> {
   }
 
   Widget image() {
-    return ClipRRect(
+    final photos = widget.data!.images;
+    final picture = ClipRRect(
       borderRadius: BorderRadius.circular(4),
       child: InkWell(
         onTap: widget.data?.type != UrlDestinationType.video
@@ -463,6 +515,120 @@ class _UrlPreviewWidgetState extends State<UrlPreviewWidget> {
         ),
       ),
     );
+
+    // Post media knows its dimensions up front, so reserve the space instead
+    // of letting the card jump when the photo loads.
+    final aspectRatio = photos.isEmpty ? null : photos.first.aspectRatio;
+    if (aspectRatio == null || aspectRatio <= 0) return picture;
+    return AspectRatio(aspectRatio: aspectRatio, child: picture);
+  }
+
+  /// A page's og:image, right-aligned and small, the way Discord frames
+  /// link embeds with a thumbnail instead of a hero image.
+  Widget _buildPageThumbnail() {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(6),
+      child: InkWell(
+        onTap: () => Lightbox.show(context, image: widget.data!.image),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 120, maxHeight: 120),
+          child: Image(
+            image: widget.data!.image!,
+            filterQuality: FilterQuality.medium,
+            fit: BoxFit.cover,
+          ),
+        ),
+      ),
+    );
+  }
+
+  static const double _photoGridGap = 4;
+
+  /// X's layout: 2 photos side by side, 3 as one large photo next to two
+  /// stacked ones, 4 as a 2x2. Cells are cropped squares; each opens in the
+  /// lightbox on tap, like multi-image room messages.
+  Widget _buildPhotoGrid() {
+    final photos = widget.data!.images.take(4).toList();
+    final gallery = [for (final photo in photos) photo.image];
+
+    return LayoutBuilder(builder: (context, constraints) {
+      const gap = _photoGridGap;
+
+      if (photos.length == 3) {
+        final large =
+            min((constraints.maxWidth - gap) * 2 / 3, constraints.maxHeight);
+        final small = (large - gap) / 2;
+        if (small <= 0) return const SizedBox.shrink();
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _photoCell(photos[0], gallery, 0, large),
+            const SizedBox(width: gap),
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _photoCell(photos[1], gallery, 1, small),
+                const SizedBox(height: gap),
+                _photoCell(photos[2], gallery, 2, small),
+              ],
+            ),
+          ],
+        );
+      }
+
+      final rows = photos.length <= 2 ? 1 : 2;
+      final cell = min(
+          (constraints.maxWidth - gap) / 2,
+          rows == 1
+              ? constraints.maxHeight
+              : (constraints.maxHeight - gap) / 2);
+      if (cell <= 0) return const SizedBox.shrink();
+
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (var row = 0; row < (photos.length + 1) ~/ 2; row++) ...[
+            if (row > 0) const SizedBox(height: gap),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _photoCell(photos[row * 2], gallery, row * 2, cell),
+                if (row * 2 + 1 < photos.length) ...[
+                  const SizedBox(width: gap),
+                  _photoCell(photos[row * 2 + 1], gallery, row * 2 + 1, cell),
+                ],
+              ],
+            ),
+          ],
+        ],
+      );
+    });
+  }
+
+  Widget _photoCell(UrlPreviewImage photo, List<ImageProvider> gallery,
+      int index, double size) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(4),
+      child: InkWell(
+        onTap: () => Lightbox.show(
+          context,
+          image: photo.image,
+          gallery: gallery,
+          initialIndex: index,
+        ),
+        child: SizedBox(
+          width: size,
+          height: size,
+          child: Image(
+            image: photo.image,
+            filterQuality: FilterQuality.medium,
+            fit: BoxFit.cover,
+          ),
+        ),
+      ),
+    );
   }
 
   bool get hasBody =>
@@ -470,14 +636,24 @@ class _UrlPreviewWidgetState extends State<UrlPreviewWidget> {
       widget.data?.title != null ||
       widget.data?.description != null;
 
+  // Discord-style preview hierarchy: 14 site line, 16 bold title, 14 body,
+  // 12 footer link. Applies to every preview (X, YouTube, Instagram, pages).
   Widget body(BuildContext context) {
+    final theme = Theme.of(context);
+    final textTheme = theme.textTheme;
+    final secondary = theme.colorScheme.secondary;
+
     return Column(
       mainAxisAlignment: MainAxisAlignment.start,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (widget.data!.siteName != null)
-          tiamat.Text.labelLow(
+          Text(
             widget.data!.siteName!,
+            style: textTheme.labelLarge!.copyWith(
+              fontWeight: FontWeight.w400,
+              color: secondary,
+            ),
             maxLines: 1,
             overflow: TextOverflow.fade,
           ),
@@ -486,16 +662,21 @@ class _UrlPreviewWidgetState extends State<UrlPreviewWidget> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (widget.data!.title != null)
-              tiamat.Text.labelEmphasised(
+              Text(
                 widget.data!.title!,
-                maxLines: 1,
+                style: textTheme.titleMedium!.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+                maxLines: 2,
                 overflow: TextOverflow.ellipsis,
               ),
+            if (widget.data!.title != null && widget.data!.description != null)
+              const SizedBox(height: 2),
             if (widget.data!.description != null)
-              tiamat.Text.tiny(
+              Text(
                 widget.data!.description!,
-                maxLines: 2,
-                color: Theme.of(context).colorScheme.secondary,
+                style: textTheme.bodyMedium!.copyWith(color: secondary),
+                maxLines: 4,
                 overflow: TextOverflow.ellipsis,
               ),
             const SizedBox(height: 4),
@@ -510,18 +691,20 @@ class _UrlPreviewWidgetState extends State<UrlPreviewWidget> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Flexible(
-                      child: tiamat.Text.tiny(
+                      child: Text(
                         widget.data!.uri.toString(),
+                        style: textTheme.bodySmall!.copyWith(
+                          color: theme.colorScheme.primary,
+                        ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        color: Theme.of(context).colorScheme.primary,
                       ),
                     ),
-                    const SizedBox(width: 3),
+                    const SizedBox(width: 4),
                     Icon(
                       Icons.open_in_new_rounded,
-                      size: 12,
-                      color: Theme.of(context).colorScheme.primary,
+                      size: 14,
+                      color: theme.colorScheme.primary,
                     ),
                   ],
                 ),

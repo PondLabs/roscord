@@ -101,9 +101,15 @@ class _TimelineEventViewUrlPreviewsState
     UrlPreviewData? value;
     try {
       value = await widget.component.getPreview(widget.timeline, event);
-      final image = value?.image;
-      if (image != null && mounted) {
-        await precacheImage(image, context);
+      if (mounted) {
+        final photos = value?.images ?? const <UrlPreviewImage>[];
+        for (final photo in photos) {
+          await precacheImage(photo.image, context);
+        }
+        final image = value?.image;
+        if (image != null && photos.isEmpty) {
+          await precacheImage(image, context);
+        }
       }
     } catch (e, s) {
       Log.onError(e, s, content: 'Failed to get url preview');
