@@ -4,8 +4,8 @@ import 'package:commet/client/components/dj/dj_engine.dart';
 import 'package:commet/client/components/dj/dj_session.dart';
 import 'package:livekit_client/livekit_client.dart' as lk;
 
-import 'dj_platform_stub.dart'
-    if (dart.library.ffi) 'dj_platform_native.dart' as platform;
+import 'dj_platform_stub.dart' if (dart.library.ffi) 'dj_platform_native.dart'
+    as platform;
 
 abstract class DjPlatform {
   /// `linux`, `windows`, `web`, `android`, ...

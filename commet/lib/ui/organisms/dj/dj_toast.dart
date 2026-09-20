@@ -21,8 +21,8 @@ class DjToast {
         bottom: 24,
         child: SafeArea(
           child: Center(
-            child: _Toast(
-                message: message, isError: isError, onClose: _dismiss),
+            child:
+                _Toast(message: message, isError: isError, onClose: _dismiss),
           ),
         ),
       ),

@@ -69,99 +69,6 @@ Future<void> setDjMusicVolume(VoipSession session, double volume,
 final ValueNotifier<double?> _liveMusicVolume = ValueNotifier(null);
 ValueListenable<double?> get liveDjMusicVolume => _liveMusicVolume;
 
-/// Loudest the DJ can send the music out at. Above 1 the player's own
-/// soft clip keeps it inside full scale, so a quiet song can be lifted
-/// without the room hearing it break up.
-const double maxDjMasterVolume = 2.0;
-
-/// Sets how loud this booth sends its music to the room, for everyone.
-/// [save] as for [setDjMusicVolume]: while the slider is dragged only the
-/// sound follows.
-Future<void> setDjMasterVolume(double volume, {bool save = true}) async {
-  if (!save) {
-    _liveMasterVolume.value = volume;
-    return;
-  }
-  await preferences.djMasterVolume.set(volume);
-  _liveMasterVolume.value = null;
-}
-
-/// The master level while its slider is being dragged; null otherwise.
-final ValueNotifier<double?> _liveMasterVolume = ValueNotifier(null);
-ValueListenable<double?> get liveDjMasterVolume => _liveMasterVolume;
-
-/// How loud the booth sends its music out. Only the DJ has this: it is the
-/// one level everyone in the room hears, before each of them turns it up
-/// or down for themselves.
-class DjMasterVolume extends StatefulWidget {
-  const DjMasterVolume({this.width = 88, super.key});
-
-  final double width;
-
-  @override
-  State<DjMasterVolume> createState() => _DjMasterVolumeState();
-}
-
-class _DjMasterVolumeState extends State<DjMasterVolume> {
-  StreamSubscription? _sub;
-
-  @override
-  void initState() {
-    super.initState();
-    _sub = preferences.djMasterVolume.onChanged.listen((_) {
-      if (mounted) setState(() {});
-    });
-    _liveMasterVolume.addListener(_onLive);
-  }
-
-  void _onLive() {
-    if (mounted) setState(() {});
-  }
-
-  @override
-  void dispose() {
-    _sub?.cancel();
-    _liveMasterVolume.removeListener(_onLive);
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final volume = (_liveMasterVolume.value ?? preferences.djMasterVolume.value)
-        .clamp(0.0, maxDjMasterVolume);
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Tooltip(
-          message: volume == 0
-              ? 'Nobody hears the music'
-              : 'How loud the room hears the music (${(volume * 100).round()}%)',
-          child: Icon(
-            volume == 0 ? Icons.volume_off_rounded : Icons.campaign_outlined,
-            size: 20,
-          ),
-        ),
-        SizedBox(
-          width: widget.width,
-          child: SliderTheme(
-            data: SliderTheme.of(context).copyWith(
-              trackHeight: 3,
-              overlayShape: SliderComponentShape.noOverlay,
-              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-            ),
-            child: Slider(
-              value: volume,
-              max: maxDjMasterVolume,
-              onChanged: (v) => setDjMasterVolume(v, save: false),
-              onChangeEnd: setDjMasterVolume,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
 class DjBoothPanel extends StatelessWidget {
   const DjBoothPanel(
       {required this.session, required this.dj, this.onClose, super.key});
@@ -307,7 +214,8 @@ class _Booth extends StatelessWidget {
     return CustomScrollView(
       slivers: [
         SliverToBoxAdapter(
-          child: _DjStrip(key: const ValueKey('strip'), dj: dj, memberOf: memberOf),
+          child: _DjStrip(
+              key: const ValueKey('strip'), dj: dj, memberOf: memberOf),
         ),
         if (_handover(context) case final line?)
           SliverToBoxAdapter(key: const ValueKey('handover'), child: line),
@@ -427,9 +335,8 @@ class _DjStrip extends StatelessWidget {
     } else if (dj.isJoining) {
       line = 'Getting the decks ready…';
     } else {
-      line = you
-          ? "You're on the decks"
-          : '${member.displayName} is on the decks';
+      line =
+          you ? "You're on the decks" : '${member.displayName} is on the decks';
     }
 
     Widget? action;
@@ -447,7 +354,8 @@ class _DjStrip extends StatelessWidget {
               dimension: 18, child: CircularProgressIndicator(strokeWidth: 2)),
           if (dj.djIdentity != dj.selfIdentity)
             TextButton(
-                onPressed: () => dj.stopDjing(), child: const Text('No thanks')),
+                onPressed: () => dj.stopDjing(),
+                child: const Text('No thanks')),
         ],
       );
     } else if (dj.caps.canDj) {
@@ -520,8 +428,8 @@ class _Requests extends StatelessWidget {
               for (final identity in dj.requests)
                 Builder(builder: (context) {
                   final member = memberOf(djUserIdOf(identity));
-                  final canPass =
-                      dj.passTarget == null && dj.capsOf(identity)?.canDj == true;
+                  final canPass = dj.passTarget == null &&
+                      dj.capsOf(identity)?.canDj == true;
                   return Row(
                     spacing: 10,
                     children: [
@@ -603,7 +511,7 @@ class _NowPlayingState extends State<_NowPlaying> {
   }
 
   Widget _idle(BuildContext context) {
-    final row = Row(
+    return Row(
       spacing: 12,
       children: [
         const VinylDisc(size: 56, spinning: false),
@@ -614,11 +522,6 @@ class _NowPlayingState extends State<_NowPlaying> {
         ),
         DjMusicVolume(session: widget.session),
       ],
-    );
-    if (!dj.isDj) return row;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [row, const _MasterVolumeRow()],
     );
   }
 
@@ -701,7 +604,8 @@ class _NowPlayingState extends State<_NowPlaying> {
               IconButton(
                 tooltip: 'Back to the start',
                 icon: const Icon(Icons.replay_rounded),
-                onPressed: controls && !dj.isBuffering ? () => dj.seek(0) : null,
+                onPressed:
+                    controls && !dj.isBuffering ? () => dj.seek(0) : null,
               ),
               IconButton.filled(
                 tooltip: dj.isPlaying ? 'Pause for everyone' : 'Play',
@@ -727,30 +631,7 @@ class _NowPlayingState extends State<_NowPlaying> {
             DjMusicVolume(session: widget.session),
           ],
         ),
-        // A line of its own: the transport row has no room left, and this
-        // is a set-once control, not one to reach for mid-song.
-        if (dj.isDj) const _MasterVolumeRow(),
       ],
-    );
-  }
-}
-
-/// The DJ's own line: how loud the room hears the music.
-class _MasterVolumeRow extends StatelessWidget {
-  const _MasterVolumeRow();
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 2),
-      child: Row(
-        children: [
-          const Expanded(
-            child: tiamat.Text.labelLow('How loud the room hears the music'),
-          ),
-          const DjMasterVolume(),
-        ],
-      ),
     );
   }
 }

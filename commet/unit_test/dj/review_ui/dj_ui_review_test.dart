@@ -127,7 +127,8 @@ void main() {
     expect(dj.isDj, isTrue);
 
     dj.addLinks([
-      for (var i = 0; i < 12; i++) 'https://www.youtube.com/watch?v=abcdefghij$i'
+      for (var i = 0; i < 12; i++)
+        'https://www.youtube.com/watch?v=abcdefghij$i'
     ].join('\n'));
 
     await tester.pumpWidget(_app(DjBoothPanel(session: _Session(), dj: dj)));
@@ -138,54 +139,6 @@ void main() {
     expect(error, isNull,
         reason: 'the booth column is not scrollable: every pending link adds '
             'a row above the Expanded queue');
-  });
-
-  testWidgets('only the DJ can set how loud the room hears the music',
-      (tester) async {
-    final call = FakeCall();
-    final dj = _session(call, '@dj:x:D1');
-    final listener = _session(call, '@b:x:B1');
-    await dj.becomeDj();
-    await _drain(tester);
-
-    // The listener sends nothing, so a room-wide level is not theirs to
-    // set: they get their own volume and nothing else.
-    await tester
-        .pumpWidget(_app(DjBoothPanel(session: _Session(), dj: listener)));
-    await tester.pump();
-    expect(find.byType(DjMasterVolume), findsNothing);
-    expect(find.byType(DjMusicVolume), findsOneWidget);
-
-    await tester.pumpWidget(_app(DjBoothPanel(session: _Session(), dj: dj)));
-    await tester.pump();
-    expect(find.byType(DjMasterVolume), findsOneWidget);
-    expect(find.byType(DjMusicVolume), findsOneWidget);
-
-    await _teardown(tester, [dj, listener]);
-  });
-
-  testWidgets('the room level is heard while dragged and saved when let go',
-      (tester) async {
-    final call = FakeCall();
-    final dj = _session(call, '@dj:x:D1');
-    await dj.becomeDj();
-    await _drain(tester);
-    await tester.pumpWidget(_app(DjBoothPanel(session: _Session(), dj: dj)));
-    await tester.pump();
-
-    // Dragging: the live level is what everything listening reads, and
-    // nothing is written yet.
-    await setDjMasterVolume(0.4, save: false);
-    expect(liveDjMasterVolume.value, 0.4);
-    expect(preferences.djMasterVolume.value, 1.0);
-
-    // Letting go saves it, and the live level steps out of the way only
-    // once the saved one has caught up.
-    await setDjMasterVolume(0.4);
-    expect(preferences.djMasterVolume.value, 0.4);
-    expect(liveDjMasterVolume.value, isNull);
-
-    await _teardown(tester, [dj]);
   });
 
   for (final height in [720.0, 560.0, 480.0, 420.0]) {
@@ -265,8 +218,7 @@ void main() {
     await _drain(tester);
 
     expect(dj.hasRequestedUser('@l:x'), isTrue, reason: 'the ✋ shows');
-    final items =
-        djMemberMenuItems(dj, userId: '@l:x', displayName: 'l');
+    final items = djMemberMenuItems(dj, userId: '@l:x', displayName: 'l');
     dj.passTo('@l:x:L1'); // what the panel's "Pass the decks" button does
     final passTarget = dj.passTarget;
     await _teardown(tester, [dj, listener]);
@@ -277,7 +229,8 @@ void main() {
         reason: 'the enabled "Pass the decks" button does nothing');
   });
 
-  testWidgets('right-click on a member row inside an activity box opens the '
+  testWidgets(
+      'right-click on a member row inside an activity box opens the '
       'member menu, not the activity one', (tester) async {
     await tester.pumpWidget(_app(
       AdaptiveContextMenu(
@@ -316,7 +269,8 @@ void main() {
     await _teardown(tester, [dj, l]);
   });
 
-  testWidgets('editing a queued song does not use its text fields after '
+  testWidgets(
+      'editing a queued song does not use its text fields after '
       'disposing them', (tester) async {
     final call = FakeCall();
     final dj = _session(call, '@dj:x:D1');

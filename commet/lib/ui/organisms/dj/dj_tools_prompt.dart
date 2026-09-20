@@ -63,9 +63,8 @@ Future<bool> _ensure() async {
             crossAxisAlignment: CrossAxisAlignment.start,
             spacing: 12,
             children: [
-              tiamat.Text.labelLow(value.$1.isEmpty
-                  ? 'Starting…'
-                  : 'Downloading ${value.$1}…'),
+              tiamat.Text.labelLow(
+                  value.$1.isEmpty ? 'Starting…' : 'Downloading ${value.$1}…'),
               LinearProgressIndicator(value: value.$2),
             ],
           ),

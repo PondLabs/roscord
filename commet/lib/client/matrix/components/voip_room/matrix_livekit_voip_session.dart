@@ -1008,6 +1008,27 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
   @override
   String get sessionId => "";
 
+  /// What the microphone is already capturing with, told to keep capturing
+  /// while muted.
+  ///
+  /// Muting a track otherwise closes the microphone and unmuting opens it
+  /// again (`AudioCaptureOptions.stopAudioCaptureOnMute` defaults to true).
+  /// On desktop that is a fresh getUserMedia, a reset of WebRTC's shared
+  /// audio processing and a teardown of the DSP processor on every mute,
+  /// which is a lot of moving parts for "stop sending me". The device stays
+  /// open for the call instead, as it does in Discord; the track is only
+  /// disabled, so nothing is sent.
+  ///
+  /// Null before the microphone has ever been published, where these
+  /// options would be the ones it is *created* with: the join path owns
+  /// that choice (see MatrixLivekitBackend.join).
+  lk.AudioCaptureOptions? _micOptions() {
+    final track =
+        livekitRoom.localParticipant?.audioTrackPublications.firstOrNull?.track;
+    if (track is! lk.LocalAudioTrack) return null;
+    return track.currentOptions.copyWith(stopAudioCaptureOnMute: false);
+  }
+
   @override
   Future<void> setMicrophoneMute(bool state) async {
     // Regra do Discord: desmutar microfone enquanto ensurdecido cancela o deafen
@@ -1016,7 +1037,8 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
       return;
     }
 
-    await livekitRoom.localParticipant?.setMicrophoneEnabled(!state);
+    await livekitRoom.localParticipant
+        ?.setMicrophoneEnabled(!state, audioCaptureOptions: _micOptions());
     _publishMembershipState();
     _stateChanged.add(());
   }
@@ -1025,11 +1047,8 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
   Future<void> setDeafened(bool state) async {
     _isDeafened = state;
 
-    if (state) {
-      await livekitRoom.localParticipant?.setMicrophoneEnabled(false);
-    } else {
-      await livekitRoom.localParticipant?.setMicrophoneEnabled(true);
-    }
+    await livekitRoom.localParticipant
+        ?.setMicrophoneEnabled(!state, audioCaptureOptions: _micOptions());
 
     for (var stream in streams) {
       if (stream is MatrixLivekitVoipStream) {

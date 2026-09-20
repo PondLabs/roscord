@@ -116,7 +116,8 @@ void main() {
       final b = join('@b:x:DEV2');
       await settle();
 
-      expect(a.session.current?.source, 'https://www.youtube.com/watch?v=aaaaaaaaaaa');
+      expect(a.session.current?.source,
+          'https://www.youtube.com/watch?v=aaaaaaaaaaa');
       expect(a.session.isPlaying, isTrue);
       expect(a.engine!.played.single.$1, a.session.current!.id);
       expect(b.session.current?.id, a.session.current!.id);
@@ -224,8 +225,7 @@ void main() {
   });
 
   group('requests and passing', () {
-    test('a request shows for everyone and the DJ can pass to them',
-        () async {
+    test('a request shows for everyone and the DJ can pass to them', () async {
       final a = await djWith('@a:x:DEV1', [
         'https://youtu.be/aaaaaaaaaaa',
         'https://youtu.be/bbbbbbbbbbb',
@@ -324,8 +324,7 @@ void main() {
       expect(b.session.isPlaying, isFalse);
     });
 
-    test('a failed takeover leaves the DJ in charge and tells them',
-        () async {
+    test('a failed takeover leaves the DJ in charge and tells them', () async {
       final a = await djWith('@a:x:DEV1', ['https://youtu.be/aaaaaaaaaaa']);
       final current = a.session.current!.id;
       final b = join('@b:x:DEV2', onEngine: (e) => e.failing.add(current));
@@ -366,7 +365,8 @@ void main() {
     });
 
     test('a pass nobody takes is called off', () async {
-      final a = join('@a:x:DEV1', passTimeout: const Duration(milliseconds: 60));
+      final a =
+          join('@a:x:DEV1', passTimeout: const Duration(milliseconds: 60));
       final b = join('@b:x:DEV2');
       await settle();
       await a.session.becomeDj();
@@ -495,7 +495,8 @@ void main() {
       expect(a.session.queue.single.title, 'My edit');
     });
 
-    test('the next song starts when one ends, and the booth idles after the last',
+    test(
+        'the next song starts when one ends, and the booth idles after the last',
         () async {
       final a = await djWith('@a:x:DEV1', [
         'https://youtu.be/aaaaaaaaaaa',
@@ -519,7 +520,8 @@ void main() {
       final a = join('@a:x:DEV1', onEngine: (e) => e.failing.add('track0'));
       await settle();
       await a.session.becomeDj();
-      a.session.addLinks('https://youtu.be/aaaaaaaaaaa https://youtu.be/bbbbbbbbbbb');
+      a.session.addLinks(
+          'https://youtu.be/aaaaaaaaaaa https://youtu.be/bbbbbbbbbbb');
       await settle();
       expect(a.session.current!.id, 'track1');
       expect(a.notices.single.message, contains("Couldn't play"));
@@ -551,24 +553,6 @@ void main() {
       await settle();
       expect(a.engine!.isPaused, isFalse);
       expect(b.session.isPlaying, isTrue);
-    });
-
-    test('the room level reaches the player, a listener has nowhere to put it',
-        () async {
-      final a = await djWith('@a:x:DEV1', ['https://youtu.be/aaaaaaaaaaa']);
-      final b = join('@b:x:DEV2');
-      await settle();
-
-      // The DJ's booth sends the music, so the level lands on the player
-      // and everyone in the room hears it.
-      a.session.masterVolume = 0.25;
-      expect(a.engine!.master, 0.25);
-
-      // A listener has no engine: setting it changes nothing and, above
-      // all, does not throw.
-      expect(b.engine, isNull);
-      b.session.masterVolume = 0.25;
-      expect(b.session.isDj, isFalse);
     });
 
     test('a long queue reaches everyone in one piece', () async {

@@ -67,8 +67,8 @@ class FakeDjTransport implements DjTransport {
       scheduleMicrotask(() {
         if (member._incoming.isClosed) return;
         if (member.deafTo.contains(selfIdentity)) return;
-        member._incoming.add(DjIncoming(
-            selfIdentity, jsonDecode(wire) as Map<String, Object?>));
+        member._incoming.add(
+            DjIncoming(selfIdentity, jsonDecode(wire) as Map<String, Object?>));
       });
     }
   }
@@ -193,11 +193,6 @@ class FakeEngine implements DjPlaybackEngine {
 
   @override
   set monitorVolume(double volume) => monitor = volume;
-
-  double master = 1.0;
-
-  @override
-  set masterVolume(double volume) => master = volume;
 }
 
 /// Turns any link into [count] tracks titled after it.

@@ -28,7 +28,9 @@ class DjLink {
   const DjLink(this.type, this.url, {this.id});
 
   DjSource get source => switch (type) {
-        DjLinkType.youtubeVideo || DjLinkType.youtubePlaylist => DjSource.youtube,
+        DjLinkType.youtubeVideo ||
+        DjLinkType.youtubePlaylist =>
+          DjSource.youtube,
         DjLinkType.soundcloudTrack ||
         DjLinkType.soundcloudSet =>
           DjSource.soundcloud,
@@ -63,7 +65,8 @@ class DjLinks {
     final found = <DjLink>[];
     final seen = <String>{};
     final withScheme = text.replaceAllMapped(
-        RegExp(r'(^|\s)((?:www\.|m\.|music\.)?(?:youtube\.com|youtu\.be|soundcloud\.com|open\.spotify\.com|on\.soundcloud\.com)/)'),
+        RegExp(
+            r'(^|\s)((?:www\.|m\.|music\.)?(?:youtube\.com|youtu\.be|soundcloud\.com|open\.spotify\.com|on\.soundcloud\.com)/)'),
         (m) => '${m[1]}https://${m[2]}');
     for (final match in _urlPattern.allMatches(withScheme)) {
       final link = parse(_trimPunctuation(match[0]!));
@@ -164,9 +167,9 @@ class DjLinks {
     return DjLink(DjLinkType.other, _clean(uri).toString());
   }
 
-  static DjLink _youtubeVideo(String id) => DjLink(
-      DjLinkType.youtubeVideo, 'https://www.youtube.com/watch?v=$id',
-      id: id);
+  static DjLink _youtubeVideo(String id) =>
+      DjLink(DjLinkType.youtubeVideo, 'https://www.youtube.com/watch?v=$id',
+          id: id);
 
   static Uri _clean(Uri uri) {
     final query = Map.of(uri.queryParameters)

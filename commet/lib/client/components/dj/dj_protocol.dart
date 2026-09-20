@@ -92,7 +92,10 @@ class DjPartAssembler {
     final data = part['d'];
     if (id is! String || id.length > 16) return null;
     if (index is! int || count is! int || data is! String) return null;
-    if (count < 1 || count > DjProtocol.maxParts || index < 0 || index >= count) {
+    if (count < 1 ||
+        count > DjProtocol.maxParts ||
+        index < 0 ||
+        index >= count) {
       return null;
     }
     if (data.length > DjProtocol.partChars) return null;
@@ -104,7 +107,8 @@ class DjPartAssembler {
           .where((e) => e.key.startsWith('$sender\n'))
           .toList()
         ..sort((a, b) => a.value.started.compareTo(b.value.started));
-      for (final old in mine.take(max(0, mine.length - maxPendingPerSender + 1))) {
+      for (final old
+          in mine.take(max(0, mine.length - maxPendingPerSender + 1))) {
         _pending.remove(old.key);
       }
       pending = _pending[key] = _Pending(count, now);

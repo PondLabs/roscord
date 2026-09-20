@@ -313,8 +313,8 @@ void main() {
     late GatedEngine engine;
     final a = make(call.join('@a:x:A'),
         resolver: FakeResolver(count: 2),
-        engine: () => engine = GatedEngine('@a:x:A')
-          ..playGates['track0'] = gate);
+        engine: () =>
+            engine = GatedEngine('@a:x:A')..playGates['track0'] = gate);
     await settle();
     await a.becomeDj();
     a.addLinks('https://www.youtube.com/playlist?list=PL2');
@@ -330,13 +330,13 @@ void main() {
     gate.complete(); // track0's download finishes late
     await settle();
     expect(engine.loadedId, a.current?.id,
-        reason: 'engine plays ${engine.loadedId}, booth shows ${a.current?.id}');
+        reason:
+            'engine plays ${engine.loadedId}, booth shows ${a.current?.id}');
   });
 
   test('R8: part assembler inflates without a size limit (gzip bomb)', () {
     final json = '{"t":"x","pad":"${'0' * (40 * 1024 * 1024)}"}';
-    final packed =
-        base64.encode(GZipEncoder().encode(utf8.encode(json))!);
+    final packed = base64.encode(GZipEncoder().encode(utf8.encode(json))!);
     final n = (packed.length / DjProtocol.partChars).ceil();
     expect(n, lessThanOrEqualTo(DjProtocol.maxParts));
     final assembler = DjPartAssembler();
@@ -347,7 +347,8 @@ void main() {
         'id': 'z',
         'i': i,
         'n': n,
-        'd': packed.substring(i * DjProtocol.partChars,
+        'd': packed.substring(
+            i * DjProtocol.partChars,
             (i + 1) * DjProtocol.partChars > packed.length
                 ? packed.length
                 : (i + 1) * DjProtocol.partChars),

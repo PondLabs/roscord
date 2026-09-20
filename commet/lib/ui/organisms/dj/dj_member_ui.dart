@@ -224,7 +224,8 @@ List<tiamat.ContextMenuItem> _actions(
   }
 
   if (dj.isDjUser(userId) && !isSelf) {
-    if (!canDj) return [_note('DJing needs the desktop app (Windows or Linux)')];
+    if (!canDj)
+      return [_note('DJing needs the desktop app (Windows or Linux)')];
     if (dj.isJoining) return const [];
     return [
       dj.hasRequested
@@ -240,7 +241,8 @@ List<tiamat.ContextMenuItem> _actions(
   }
 
   if (isSelf && dj.isVacant && dj.role == DjRole.listener) {
-    if (!canDj) return [_note('DJing needs the desktop app (Windows or Linux)')];
+    if (!canDj)
+      return [_note('DJing needs the desktop app (Windows or Linux)')];
     return [
       tiamat.ContextMenuItem(
           text: 'Become the DJ',

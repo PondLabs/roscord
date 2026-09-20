@@ -51,9 +51,10 @@ class _VinylDiscState extends State<VinylDisc>
     } else {
       // Coast to a stop over about a quarter turn instead of freezing.
       final velocity = 1 / (_turn.inMilliseconds / 1000);
-      _controller.animateWith(FrictionSimulation(0.05, _controller.value,
-          velocity, constantDeceleration: velocity * 3)).whenCompleteOrCancel(
-          () {
+      _controller
+          .animateWith(FrictionSimulation(0.05, _controller.value, velocity,
+              constantDeceleration: velocity * 3))
+          .whenCompleteOrCancel(() {
         if (mounted && !widget.spinning) _controller.stop();
       });
     }

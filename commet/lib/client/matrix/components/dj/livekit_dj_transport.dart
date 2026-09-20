@@ -71,8 +71,7 @@ class LivekitDjTransport implements DjTransport {
 
   @override
   bool isPresent(String identity) =>
-      identity == selfIdentity ||
-      room.remoteParticipants.containsKey(identity);
+      identity == selfIdentity || room.remoteParticipants.containsKey(identity);
 
   @override
   Future<void> dispose() async {

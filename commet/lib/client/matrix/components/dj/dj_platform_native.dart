@@ -27,8 +27,7 @@ class _NativeDjPlatform implements DjPlatform {
     final bindings = canDj ? DjMusicBindings.load() : null;
     if (bindings == null) return null;
     return () => NativeDjEngine(room, bindings,
-        monitorVolume: preferences.djMusicVolume.value,
-        masterVolume: preferences.djMasterVolume.value);
+        monitorVolume: preferences.djMusicVolume.value);
   }
 
   @override

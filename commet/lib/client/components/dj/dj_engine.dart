@@ -120,10 +120,6 @@ abstract class DjPlaybackEngine {
 
   /// How loud the DJ hears their own music, 0..1.
   set monitorVolume(double volume);
-
-  /// How loud the music goes out to the room, 0..2. Applied to the track
-  /// itself, so the DJ's monitor follows it too.
-  set masterVolume(double volume);
 }
 
 /// Turns pasted links into tracks.

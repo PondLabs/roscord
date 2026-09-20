@@ -347,8 +347,8 @@ class _VoipStreamViewState extends State<VoipStreamView> {
               Positioned(
                 left: 4,
                 top: 4,
-                child: DjMemberBadges(
-                    dj: _dj, userId: user.identifier, size: 28),
+                child:
+                    DjMemberBadges(dj: _dj, userId: user.identifier, size: 28),
               ),
               AnimatedScale(
                 scale: showBadge ? 1.0 : 0.0,
