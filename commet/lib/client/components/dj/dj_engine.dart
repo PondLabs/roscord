@@ -64,11 +64,15 @@ class DjEngineStatus {
   /// 0 when unknown.
   final int durationMs;
 
+  /// Why the track stopped, when [state] is [DjEngineState.error].
+  final String? error;
+
   const DjEngineStatus(
       {required this.state,
       this.trackId,
       this.positionMs = 0,
-      this.durationMs = 0});
+      this.durationMs = 0,
+      this.error});
 
   static const idle = DjEngineStatus(state: DjEngineState.idle);
 }
@@ -92,12 +96,15 @@ abstract class DjPlaybackEngine {
   /// Stops the music, unpublishes the track and releases everything.
   Future<void> shutdown();
 
-  /// Fetches [track] so [load] can start it. Safe to call again for a track
-  /// that is already here, and for several tracks at once. The slow part.
-  Future<DjTrackInfo> prepare(DjTrack track);
+  /// Fetches [track] so [load] can start it: far enough to start playing
+  /// while the rest arrives, or all of it with [whole]. Safe to call again
+  /// for a track that is already here, and for several tracks at once. The
+  /// slow part.
+  Future<DjTrackInfo> prepare(DjTrack track, {bool whole = false});
 
   /// Plays a [prepare]d [track] from [positionMs], replacing whatever was
-  /// loaded. Quick; throws when the file can't be played. Kept apart from
+  /// loaded. Quick; throws when the file can't be played, or, for a song
+  /// still arriving, reports it in [status] later. Kept apart from
   /// [prepare] so a download that finishes late can never start a song the
   /// booth has moved past.
   void load(DjTrack track, {required int positionMs, required bool paused});
@@ -113,6 +120,10 @@ abstract class DjPlaybackEngine {
 
   /// How loud the DJ hears their own music, 0..1.
   set monitorVolume(double volume);
+
+  /// How loud the music goes out to the room, 0..2. Applied to the track
+  /// itself, so the DJ's monitor follows it too.
+  set masterVolume(double volume);
 }
 
 /// Turns pasted links into tracks.

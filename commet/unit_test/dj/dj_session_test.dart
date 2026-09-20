@@ -295,6 +295,20 @@ void main() {
       expect(a.engine!.shutDown, isTrue);
     });
 
+    test('the new DJ has the whole song before picking it up mid-way',
+        () async {
+      final a = await djWith('@a:x:DEV1', ['https://youtu.be/aaaaaaaaaaa']);
+      final b = join('@b:x:DEV2');
+      await settle();
+      // The DJ itself starts songs while they download.
+      expect(a.engine!.preparedWhole, isEmpty);
+
+      a.session.passTo('@b:x:DEV2');
+      await settle();
+      expect(b.session.isDj, isTrue);
+      expect(b.engine!.preparedWhole, [a.session.current!.id]);
+    });
+
     test('a paused booth is handed over paused', () async {
       final a = await djWith('@a:x:DEV1', ['https://youtu.be/aaaaaaaaaaa']);
       final b = join('@b:x:DEV2');
@@ -511,6 +525,20 @@ void main() {
       expect(a.notices.single.message, contains("Couldn't play"));
     });
 
+    test('a song whose download breaks off is skipped with the reason',
+        () async {
+      final a = await djWith('@a:x:DEV1', [
+        'https://youtu.be/aaaaaaaaaaa',
+        'https://youtu.be/bbbbbbbbbbb',
+      ]);
+      final first = a.session.current!.id;
+      a.engine!.fail('HTTP Error 403: Forbidden');
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      await settle();
+      expect(a.session.current!.id, isNot(first));
+      expect(a.notices.single.message, contains('HTTP Error 403: Forbidden'));
+    });
+
     test('pause and resume reach the engine and the room', () async {
       final a = await djWith('@a:x:DEV1', ['https://youtu.be/aaaaaaaaaaa']);
       final b = join('@b:x:DEV2');
@@ -523,6 +551,24 @@ void main() {
       await settle();
       expect(a.engine!.isPaused, isFalse);
       expect(b.session.isPlaying, isTrue);
+    });
+
+    test('the room level reaches the player, a listener has nowhere to put it',
+        () async {
+      final a = await djWith('@a:x:DEV1', ['https://youtu.be/aaaaaaaaaaa']);
+      final b = join('@b:x:DEV2');
+      await settle();
+
+      // The DJ's booth sends the music, so the level lands on the player
+      // and everyone in the room hears it.
+      a.session.masterVolume = 0.25;
+      expect(a.engine!.master, 0.25);
+
+      // A listener has no engine: setting it changes nothing and, above
+      // all, does not throw.
+      expect(b.engine, isNull);
+      b.session.masterVolume = 0.25;
+      expect(b.session.isDj, isFalse);
     });
 
     test('a long queue reaches everyone in one piece', () async {

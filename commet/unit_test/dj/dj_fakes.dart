@@ -97,6 +97,9 @@ class FakeEngine implements DjPlaybackEngine {
   bool started = false;
   bool shutDown = false;
   final List<String> prepared = [];
+
+  /// Tracks fetched to the end before playing (`prepare(whole: true)`).
+  final List<String> preparedWhole = [];
   final List<(String id, int position, bool paused)> played = [];
 
   /// Tracks whose fetch fails.
@@ -109,6 +112,7 @@ class FakeEngine implements DjPlaybackEngine {
   int _position = 0;
   bool _paused = false;
   DjEngineState _state = DjEngineState.idle;
+  String? _error;
   double monitor = 1;
 
   FakeEngine(this.name);
@@ -126,8 +130,9 @@ class FakeEngine implements DjPlaybackEngine {
   }
 
   @override
-  Future<DjTrackInfo> prepare(DjTrack track) async {
+  Future<DjTrackInfo> prepare(DjTrack track, {bool whole = false}) async {
     prepared.add(track.id);
+    if (whole) preparedWhole.add(track.id);
     if (gate != null) await gate!.future;
     if (failing.contains(track.id)) throw Exception('no such video');
     return DjTrackInfo(durationMs: 180000, title: 'Fetched ${track.title}');
@@ -169,6 +174,12 @@ class FakeEngine implements DjPlaybackEngine {
 
   void finish() => _state = DjEngineState.ended;
 
+  /// The loaded track stops for [why] (a download that broke off).
+  void fail(String why) {
+    _state = DjEngineState.error;
+    _error = why;
+  }
+
   bool get isPaused => _paused;
   String? get loadedId => _loaded?.id;
 
@@ -177,10 +188,16 @@ class FakeEngine implements DjPlaybackEngine {
       state: _state,
       trackId: _loaded?.id,
       positionMs: _position,
-      durationMs: 180000);
+      durationMs: 180000,
+      error: _state == DjEngineState.error ? _error : null);
 
   @override
   set monitorVolume(double volume) => monitor = volume;
+
+  double master = 1.0;
+
+  @override
+  set masterVolume(double volume) => master = volume;
 }
 
 /// Turns any link into [count] tracks titled after it.

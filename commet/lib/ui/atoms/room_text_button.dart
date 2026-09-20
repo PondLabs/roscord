@@ -390,10 +390,43 @@ class _RoomTextButtonState extends State<RoomTextButton> {
                       showActivityIcons: activity.thirdparty == false,
                       liveMedia: activity.liveMedia[participant] ?? const {},
                       voiceState: activity.voiceState[participant] ?? const {}),
+                if (!activity.thirdparty) buildDj(),
               ],
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  /// The DJ, under the people in the call. Only in our own call: the booth
+  /// is heard over its data channel.
+  Widget buildDj() {
+    final session = voiceSession;
+    final dj = DjBooths.of(session);
+    if (session == null || dj == null) return const SizedBox.shrink();
+    String nameOf(String userId) =>
+        widget.room.getMemberOrFallback(userId).displayName;
+    return ListenableBuilder(
+      listenable: dj,
+      // Built when the menu opens, so it matches the booth at that moment.
+      builder: (context, child) => AdaptiveContextMenu(
+        items: dj.djUserId == null
+            ? const []
+            : djMemberMenuItems(dj,
+                userId: dj.djUserId!,
+                displayName: nameOf(dj.djUserId!),
+                musicVolume: DjMusicVolume(session: session)),
+        child: child!,
+      ),
+      child: DjSidebarRow(
+        dj: dj,
+        nameOf: nameOf,
+        height: height,
+        onTap: () {
+          DjBooths.showPanel(session);
+          widget.onTap?.call(widget.room);
+        },
       ),
     );
   }

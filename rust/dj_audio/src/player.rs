@@ -6,6 +6,10 @@
 //! seek never has to flush a ring the consumer is reading. `pull` fades the
 //! old session out before switching. Control keeps every session `pull`
 //! might still hold alive in `live`, so the pacing thread never frees one.
+//!
+//! A file that is still downloading (see [`crate::growing`]) is opened on
+//! the session's thread instead, since that waits for the network: until it
+//! has audio the session reads as buffering, and a failure shows in status.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
@@ -13,6 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use crate::growing;
 use crate::resample::Resampler;
 use crate::ring::{Frame, Ring};
 use crate::source::{self, Source};
@@ -54,14 +59,16 @@ struct Session {
     track_id: u64,
     path: PathBuf,
     start_ms: u64,
-    duration_ms: u64,
+    /// Set by the session's thread when it opens the file itself.
+    duration_ms: AtomicU64,
     ring: Ring,
     /// Frames `pull` has taken from `ring`.
     consumed: AtomicU64,
     /// Decoder thread finished (end of file, error or stopped).
     done: AtomicBool,
     error: AtomicI32,
-    stop: AtomicBool,
+    /// Shared with the file reader, so waiting for a download ends too.
+    stop: Arc<AtomicBool>,
 }
 
 impl Session {
@@ -76,14 +83,54 @@ impl Session {
             track_id,
             path,
             start_ms,
-            duration_ms,
+            duration_ms: AtomicU64::new(duration_ms),
             ring: Ring::new(ring_frames),
             consumed: AtomicU64::new(0),
             done: AtomicBool::new(false),
             error: AtomicI32::new(0),
-            stop: AtomicBool::new(false),
+            stop: Arc::new(AtomicBool::new(false)),
         }
     }
+}
+
+/// What a new session's thread starts from.
+enum Work {
+    /// Opened and positioned already.
+    Decode(Source),
+    /// Open the session's file at its start (a download still under way),
+    /// with the length if a previous session found it.
+    Open(Option<u64>),
+}
+
+fn run_session(session: &Session, work: Work) -> Result<(), i32> {
+    let src = match work {
+        Work::Decode(src) => src,
+        Work::Open(known_duration_ms) => {
+            let opened = source::open(
+                &session.path,
+                session.start_ms,
+                known_duration_ms,
+                &session.stop,
+            );
+            if session.stop.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            let opened = opened?;
+            session
+                .duration_ms
+                .store(opened.duration_ms, Ordering::Release);
+            match opened.source {
+                Some(src) => src,
+                None => return Ok(()),
+            }
+        }
+    };
+    decode_thread(session, src)
+}
+
+/// For opens that never wait (complete files).
+fn never_stop() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
 }
 
 struct Worker {
@@ -252,32 +299,38 @@ impl Player {
         ctrl.live.retain(|s| Arc::strong_count(s) > 1);
     }
 
-    /// Replaces the current session with one built from `opened`.
+    /// Replaces the current session with one that plays `opened`, or, given
+    /// `Err(known duration)`, opens the file on its own thread (a download
+    /// under way).
     fn start(
         &self,
         ctrl: &mut Control,
         track_id: u64,
         path: PathBuf,
         start_ms: u64,
-        opened: source::Opened,
+        opened: Result<source::Opened, Option<u64>>,
     ) -> i32 {
         Self::stop_worker(ctrl);
+        let (duration_ms, work) = match opened {
+            Ok(o) => (o.duration_ms, o.source.map(Work::Decode)),
+            Err(known) => (known.unwrap_or(0), Some(Work::Open(known))),
+        };
         let session = Arc::new(Session::new(
             track_id,
             path,
             start_ms,
-            opened.duration_ms,
+            duration_ms,
             RING_FRAMES,
         ));
-        match opened.source {
+        match work {
             None => session.done.store(true, Ordering::Release),
-            Some(src) => {
+            Some(work) => {
                 let s = session.clone();
                 let spawned = thread::Builder::new()
                     .name("commet-dj-decode".into())
                     .spawn(move || {
                         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            decode_thread(&s, src)
+                            run_session(&s, work)
                         }));
                         let code = match r {
                             Ok(Ok(())) => 0,
@@ -310,17 +363,28 @@ impl Player {
     }
 
     /// Stops whatever is loaded and opens `path` at `start_ms`. The paused
-    /// flag is kept. Returns 0 or a negative error code.
+    /// flag is kept. Returns 0 or a negative error code. A file still
+    /// downloading is opened in the background: its errors show in status.
     pub fn open(&self, path: &Path, start_ms: u64, track_id: u64) -> i32 {
         let mut ctrl = lock(&self.ctrl);
+        if growing::lookup(path).is_some() {
+            self.underruns.store(0, Ordering::Relaxed);
+            return self.start(&mut ctrl, track_id, path.to_path_buf(), start_ms, Err(None));
+        }
         let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            source::open(path, start_ms, None)
+            source::open(path, start_ms, None, &never_stop())
         }))
         .unwrap_or(Err(ERR_UNSUPPORTED));
         match opened {
             Ok(opened) => {
                 self.underruns.store(0, Ordering::Relaxed);
-                self.start(&mut ctrl, track_id, path.to_path_buf(), start_ms, opened)
+                self.start(
+                    &mut ctrl,
+                    track_id,
+                    path.to_path_buf(),
+                    start_ms,
+                    Ok(opened),
+                )
             }
             Err(code) => {
                 Self::stop_worker(&mut ctrl);
@@ -333,18 +397,24 @@ impl Player {
     }
 
     /// Restarts the loaded track at `ms`. On failure the current playback
-    /// carries on untouched.
+    /// carries on untouched, except in a file still downloading, which is
+    /// opened in the background as [`Player::open`] does.
     pub fn seek(&self, ms: u64) -> i32 {
         let mut ctrl = lock(&self.ctrl);
         let Some(cur) = ctrl.current.clone() else {
             return ERR_ARGS;
         };
+        let duration_ms = cur.duration_ms.load(Ordering::Acquire);
+        if growing::lookup(&cur.path).is_some() {
+            let known = (duration_ms > 0).then_some(duration_ms);
+            return self.start(&mut ctrl, cur.track_id, cur.path.clone(), ms, Err(known));
+        }
         let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            source::open(&cur.path, ms, Some(cur.duration_ms))
+            source::open(&cur.path, ms, Some(duration_ms), &never_stop())
         }))
         .unwrap_or(Err(ERR_DECODER));
         match opened {
-            Ok(opened) => self.start(&mut ctrl, cur.track_id, cur.path.clone(), ms, opened),
+            Ok(opened) => self.start(&mut ctrl, cur.track_id, cur.path.clone(), ms, Ok(opened)),
             Err(code) => code,
         }
     }
@@ -407,7 +477,7 @@ impl Player {
             underruns,
             track_id: s.track_id,
             position_ms: s.start_ms + consumed * 1000 / OUTPUT_RATE as u64,
-            duration_ms: s.duration_ms,
+            duration_ms: s.duration_ms.load(Ordering::Acquire),
             error: if err != 0 { err } else { ctrl.error },
         }
     }

@@ -11,3 +11,6 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 symphonia = { version = "0.6", default-features = false, features = ["aac", "isomp4", "mp3", "ogg", "vorbis", "flac", "wav", "pcm", "mkv"] }
+# Opus, which symphonia has no decoder for. Pure Rust; see src/opus.rs
+# for what this crate is and is not trusted with.
+opus-rs = "0.1.33"

@@ -51,20 +51,116 @@ Future<void> setDjMusicVolume(VoipSession session, double volume,
     _liveMusicVolume.value = volume;
     return;
   }
-  _liveMusicVolume.value = null;
   if (streams.isEmpty) {
     await preferences.djMusicVolume.set(volume);
-    return;
+  } else {
+    for (final stream in streams) {
+      await stream.setVolume(volume);
+    }
   }
-  for (final stream in streams) {
-    await stream.setVolume(volume);
-  }
+  // Cleared last: everything reading it falls back to the saved level, and
+  // clearing it first makes the DJ's own music jump back to the old one for
+  // as long as it takes to write the new one.
+  _liveMusicVolume.value = null;
 }
 
 /// The level while a music slider is being dragged, for the DJ's monitor
 /// and the other sliders; null otherwise.
 final ValueNotifier<double?> _liveMusicVolume = ValueNotifier(null);
 ValueListenable<double?> get liveDjMusicVolume => _liveMusicVolume;
+
+/// Loudest the DJ can send the music out at. Above 1 the player's own
+/// soft clip keeps it inside full scale, so a quiet song can be lifted
+/// without the room hearing it break up.
+const double maxDjMasterVolume = 2.0;
+
+/// Sets how loud this booth sends its music to the room, for everyone.
+/// [save] as for [setDjMusicVolume]: while the slider is dragged only the
+/// sound follows.
+Future<void> setDjMasterVolume(double volume, {bool save = true}) async {
+  if (!save) {
+    _liveMasterVolume.value = volume;
+    return;
+  }
+  await preferences.djMasterVolume.set(volume);
+  _liveMasterVolume.value = null;
+}
+
+/// The master level while its slider is being dragged; null otherwise.
+final ValueNotifier<double?> _liveMasterVolume = ValueNotifier(null);
+ValueListenable<double?> get liveDjMasterVolume => _liveMasterVolume;
+
+/// How loud the booth sends its music out. Only the DJ has this: it is the
+/// one level everyone in the room hears, before each of them turns it up
+/// or down for themselves.
+class DjMasterVolume extends StatefulWidget {
+  const DjMasterVolume({this.width = 88, super.key});
+
+  final double width;
+
+  @override
+  State<DjMasterVolume> createState() => _DjMasterVolumeState();
+}
+
+class _DjMasterVolumeState extends State<DjMasterVolume> {
+  StreamSubscription? _sub;
+
+  @override
+  void initState() {
+    super.initState();
+    _sub = preferences.djMasterVolume.onChanged.listen((_) {
+      if (mounted) setState(() {});
+    });
+    _liveMasterVolume.addListener(_onLive);
+  }
+
+  void _onLive() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    _liveMasterVolume.removeListener(_onLive);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final volume = (_liveMasterVolume.value ?? preferences.djMasterVolume.value)
+        .clamp(0.0, maxDjMasterVolume);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Tooltip(
+          message: volume == 0
+              ? 'Nobody hears the music'
+              : 'How loud the room hears the music (${(volume * 100).round()}%)',
+          child: Icon(
+            volume == 0 ? Icons.volume_off_rounded : Icons.campaign_outlined,
+            size: 20,
+          ),
+        ),
+        SizedBox(
+          width: widget.width,
+          child: SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 3,
+              overlayShape: SliderComponentShape.noOverlay,
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+            ),
+            child: Slider(
+              value: volume,
+              max: maxDjMasterVolume,
+              onChanged: (v) => setDjMasterVolume(v, save: false),
+              onChangeEnd: setDjMasterVolume,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
 
 class DjBoothPanel extends StatelessWidget {
   const DjBoothPanel(
@@ -507,7 +603,7 @@ class _NowPlayingState extends State<_NowPlaying> {
   }
 
   Widget _idle(BuildContext context) {
-    return Row(
+    final row = Row(
       spacing: 12,
       children: [
         const VinylDisc(size: 56, spinning: false),
@@ -518,6 +614,11 @@ class _NowPlayingState extends State<_NowPlaying> {
         ),
         DjMusicVolume(session: widget.session),
       ],
+    );
+    if (!dj.isDj) return row;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [row, const _MasterVolumeRow()],
     );
   }
 
@@ -626,7 +727,30 @@ class _NowPlayingState extends State<_NowPlaying> {
             DjMusicVolume(session: widget.session),
           ],
         ),
+        // A line of its own: the transport row has no room left, and this
+        // is a set-once control, not one to reach for mid-song.
+        if (dj.isDj) const _MasterVolumeRow(),
       ],
+    );
+  }
+}
+
+/// The DJ's own line: how loud the room hears the music.
+class _MasterVolumeRow extends StatelessWidget {
+  const _MasterVolumeRow();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Row(
+        children: [
+          const Expanded(
+            child: tiamat.Text.labelLow('How loud the room hears the music'),
+          ),
+          const DjMasterVolume(),
+        ],
+      ),
     );
   }
 }
@@ -1258,10 +1382,17 @@ class _EditTrackDialogState extends State<_EditTrackDialog> {
 
 /// Compact "now playing" line for the top of the call, opening the booth.
 class DjNowPlayingPill extends StatelessWidget {
-  const DjNowPlayingPill({required this.dj, required this.onTap, super.key});
+  const DjNowPlayingPill(
+      {required this.dj,
+      required this.onTap,
+      this.padding = EdgeInsets.zero,
+      super.key});
 
   final DjSession dj;
   final VoidCallback onTap;
+
+  /// Around the pill, only while it shows.
+  final EdgeInsets padding;
 
   @override
   Widget build(BuildContext context) {
@@ -1279,39 +1410,42 @@ class DjNowPlayingPill extends StatelessWidget {
             : track.artist == null
                 ? track.title
                 : '${track.title} · ${track.artist}';
-        return Material(
-          color: Colors.black.withValues(alpha: 0.55),
-          borderRadius: BorderRadius.circular(24),
-          child: InkWell(
+        return Padding(
+          padding: padding,
+          child: Material(
+            color: Colors.black.withValues(alpha: 0.55),
             borderRadius: BorderRadius.circular(24),
-            onTap: onTap,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(6, 6, 14, 6),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 360),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  spacing: 8,
-                  children: [
-                    VinylDisc(
-                        size: 22,
-                        spinning: dj.isPlaying && !dj.isBuffering,
-                        label: track?.thumbnail == null
-                            ? null
-                            : NetworkImage(track!.thumbnail!)),
-                    Flexible(
-                      child: Text(
-                        line,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style:
-                            const TextStyle(color: Colors.white, fontSize: 13),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(24),
+              onTap: onTap,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(6, 6, 14, 6),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 360),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    spacing: 8,
+                    children: [
+                      VinylDisc(
+                          size: 22,
+                          spinning: dj.isPlaying && !dj.isBuffering,
+                          label: track?.thumbnail == null
+                              ? null
+                              : NetworkImage(track!.thumbnail!)),
+                      Flexible(
+                        child: Text(
+                          line,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 13),
+                        ),
                       ),
-                    ),
-                    if (track != null && !dj.isPlaying)
-                      const Icon(Icons.pause_rounded,
-                          size: 16, color: Colors.white70),
-                  ],
+                      if (track != null && !dj.isPlaying)
+                        const Icon(Icons.pause_rounded,
+                            size: 16, color: Colors.white70),
+                    ],
+                  ),
                 ),
               ),
             ),

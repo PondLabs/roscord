@@ -8,6 +8,12 @@
 //! plain MP4 with an edit list, `tone_gap_frag_elst.m4a` fragmented with an
 //! edit list, and `tone_gap_frag.m4a` fragmented (`empty_moov`) without one,
 //! so its timeline, for ffmpeg too, starts 1024 samples (23.2 ms) early.
+//!
+//! The Opus fixtures are the same four seconds, 48 kHz throughout:
+//! `tone_gap.webm` in WebM, `tone_gap.opus` in Ogg. They say where the
+//! encoder's 312 leading samples went in different ways, so both are here.
+//! `tone_hybrid.webm` is the same signal encoded for speech, which comes
+//! out hybrid rather than CELT: the booth refuses to play it.
 
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
@@ -21,11 +27,13 @@ const RATE: usize = 48_000;
 const BLOCK: usize = 480;
 
 /// Fixture and how late (ms) its content sits on its own timeline.
-const COMPRESSED: [(&str, f64); 4] = [
+const COMPRESSED: [(&str, f64); 6] = [
     ("tone_gap.m4a", 0.0),
     ("tone_gap_frag_elst.m4a", 0.0),
     ("tone_gap_frag.m4a", 1024.0 * 1000.0 / 44_100.0),
     ("tone_gap.mp3", 0.0),
+    ("tone_gap.webm", 0.0),
+    ("tone_gap.opus", 0.0),
 ];
 
 fn fixture(name: &str) -> PathBuf {
@@ -497,6 +505,36 @@ fn concatenated_mp3_plays_through() {
 }
 
 #[test]
+fn opus_that_is_not_celt_is_refused() {
+    // The decoder behind Opus here plays CELT well and SILK badly, so a
+    // stream that is not CELT throughout is turned down rather than played
+    // wrong (see src/opus.rs). It opens: only the packets give it away.
+    let p = Player::new();
+    open(&p, &fixture("tone_hybrid.webm"), 0, 4);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut buf = [0i16; BLOCK * 2];
+    loop {
+        p.pull(&mut buf, 2, RATE as i32);
+        let s = p.status();
+        if s.state == State::Error {
+            assert_eq!(
+                (s.error, s.track_id),
+                (dj_audio::ERR_UNSUPPORTED, 4),
+                "unsupported, not a decoder failure"
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline && s.state != State::Ended,
+            "played on: state {:?}, error {}",
+            s.state,
+            s.error
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
 fn open_errors() {
     let p = Player::new();
     assert_eq!(
@@ -666,7 +704,7 @@ fn switching_tracks_is_click_free() {
 
 #[test]
 fn ffi_round_trip() {
-    assert_eq!(commet_music_abi_version(), 1);
+    assert_eq!(commet_music_abi_version(), 2);
     let path = gap_wav(44_100);
     let c_path = CString::new(path.to_str().unwrap()).unwrap();
     unsafe {

@@ -62,6 +62,7 @@ class _CallViewState extends State<CallView> {
   /// The DJ booth panel is open next to the call.
   bool _boothOpen = false;
   StreamSubscription? _boothSub;
+  StreamSubscription? _boothPanelSub;
   DjSession? get _dj => DjBooths.of(widget.currentSession);
 
   @override
@@ -72,6 +73,14 @@ class _CallViewState extends State<CallView> {
     });
     _boothSub = DjBooths.onChanged.listen((_) {
       if (mounted) setState(() {});
+    });
+    // The DJ row in the sidebar opens the booth, before or after this view
+    // is up.
+    _boothOpen = DjBooths.takePanelRequest(widget.currentSession);
+    _boothPanelSub = DjBooths.onPanelRequested.listen((session) {
+      if (!mounted || session != widget.currentSession) return;
+      DjBooths.takePanelRequest(session);
+      setState(() => _boothOpen = true);
     });
 
     room = widget.currentSession.client.getRoom(widget.currentSession.roomId)!;
@@ -86,6 +95,7 @@ class _CallViewState extends State<CallView> {
     statTimer?.cancel();
     sub?.cancel();
     _boothSub?.cancel();
+    _boothPanelSub?.cancel();
     _soundboard?.release();
     _soundboard = null;
     super.dispose();
@@ -280,28 +290,29 @@ class _CallViewState extends State<CallView> {
         canHangUp: true,
         canScreenshare: true,
         canToggleCamera: true,
-        child: Stack(
+        // The now playing pill has a strip of its own above the tiles: over
+        // them it hid the corner buttons (fullscreen) of a focused stream.
+        child: Column(
           children: [
-            LayoutBuilder(
-              builder: (context, constraints) {
-                var ratio = constraints.maxWidth / constraints.maxHeight;
+            dj != null && !_boothOpen
+                ? DjNowPlayingPill(
+                    dj: dj,
+                    padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
+                    onTap: () => setState(() => _boothOpen = true))
+                : const SizedBox.shrink(),
+            Expanded(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  var ratio = constraints.maxWidth / constraints.maxHeight;
 
-                if (ratio > 1) {
-                  return Row(children: generateLayout());
-                } else {
-                  return Column(children: generateLayout());
-                }
-              },
-            ),
-            if (dj != null && !_boothOpen)
-              Align(
-                alignment: Alignment.topCenter,
-                child: Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: DjNowPlayingPill(
-                      dj: dj, onTap: () => setState(() => _boothOpen = true)),
-                ),
+                  if (ratio > 1) {
+                    return Row(children: generateLayout());
+                  } else {
+                    return Column(children: generateLayout());
+                  }
+                },
               ),
+            ),
           ],
         ));
     // One tree whether the booth is open or not, wide or narrow: the call's

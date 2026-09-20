@@ -13,7 +13,8 @@ import 'package:commet/client/matrix/components/dj/livekit_dj_transport.dart';
 import 'package:commet/client/matrix/components/voip_room/matrix_livekit_voip_stream.dart';
 import 'package:commet/debug/log.dart';
 import 'package:commet/main.dart';
-import 'package:commet/ui/organisms/dj/dj_booth_panel.dart' show liveDjMusicVolume;
+import 'package:commet/ui/organisms/dj/dj_booth_panel.dart'
+    show liveDjMasterVolume, liveDjMusicVolume;
 import 'package:commet/ui/organisms/dj/dj_toast.dart';
 import 'package:commet/ui/organisms/dj/dj_tools_prompt.dart';
 import 'package:flutter/foundation.dart';
@@ -23,6 +24,7 @@ class DjBooths {
   static final Map<VoipSession, DjSession> _booths = {};
   static final Map<VoipSession, List<StreamSubscription>> _subs = {};
   static final Map<VoipSession, VoidCallback> _monitorListeners = {};
+  static final Map<VoipSession, VoidCallback> _masterListeners = {};
 
   /// Fires when a booth opens or closes.
   static final StreamController<void> _changed = StreamController.broadcast();
@@ -30,6 +32,24 @@ class DjBooths {
 
   static DjSession? of(VoipSession? session) =>
       session == null ? null : _booths[session];
+
+  /// Calls whose booth panel someone asked to see (the DJ row in the
+  /// sidebar), until the call view takes the request. Kept, not only
+  /// broadcast: the call view may not be showing yet.
+  static final Set<VoipSession> _panelWanted = {};
+  static final StreamController<VoipSession> _panelRequests =
+      StreamController.broadcast();
+  static Stream<VoipSession> get onPanelRequested => _panelRequests.stream;
+
+  /// Asks the call view of [session] to open its booth panel.
+  static void showPanel(VoipSession session) {
+    _panelWanted.add(session);
+    _panelRequests.add(session);
+  }
+
+  /// Whether the booth panel of [session] was asked for, clearing the ask.
+  static bool takePanelRequest(VoipSession session) =>
+      _panelWanted.remove(session);
 
   static DjSession open(VoipSession session, lk.Room room) {
     final existing = _booths[session];
@@ -71,15 +91,25 @@ class DjBooths {
       }
     }
 
+    // How loud this booth sends its music out, when it is ours to send.
+    // Re-applied on every change of state because the engine only exists
+    // once the decks have been taken.
+    void applyMaster() => dj.masterVolume =
+        liveDjMasterVolume.value ?? preferences.djMasterVolume.value;
+    liveDjMasterVolume.addListener(applyMaster);
+    _masterListeners[session] = applyMaster;
+
     _subs[session] = [
       preferences.djMusicVolume.onChanged.listen((_) {
         applyMonitor();
         applyListening();
       }),
+      preferences.djMasterVolume.onChanged.listen((_) => applyMaster()),
       session.onStateChanged.listen((_) => applyMonitor()),
       dj.notices.listen(_showNotice),
     ];
     dj.addListener(applyMonitor);
+    dj.addListener(applyMaster);
     _changed.add(null);
     return dj;
   }
@@ -100,6 +130,11 @@ class DjBooths {
     if (monitor != null) {
       liveDjMusicVolume.removeListener(monitor);
       dj?.removeListener(monitor);
+    }
+    final master = _masterListeners.remove(session);
+    if (master != null) {
+      liveDjMasterVolume.removeListener(master);
+      dj?.removeListener(master);
     }
     if (dj == null) return;
     _changed.add(null);

@@ -5,6 +5,7 @@ import 'package:commet/client/client_manager.dart';
 import 'package:commet/client/components/component.dart';
 import 'package:commet/client/components/push_notification/android/unified_push_notifier.dart';
 import 'package:commet/client/components/push_notification/notification_manager.dart';
+import 'package:commet/client/components/voip/webrtc_default_devices.dart';
 import 'package:commet/config/build_config.dart';
 import 'package:commet/config/global_config.dart';
 import 'package:commet/config/layout_config.dart';
@@ -265,6 +266,15 @@ Future<void> startGui() async {
 
   initGuiRequirements();
   AppRefresh.init();
+
+  // The picked microphone and speakers, before anything plays: WebRTC only
+  // moves to a new output device when playout next starts, so setting it
+  // once a call is already running is too late. Not awaited — nothing here
+  // waits on the audio devices to draw a window — but joining a call waits
+  // on its own call to this.
+  unawaited(WebrtcDefaultDevices.apply().catchError((Object e, StackTrace s) {
+    Log.onError(e, s, content: "Could not apply the saved audio devices");
+  }));
 
   if (PlatformUtils.isAndroid) {
     enableEdgeToEdge();

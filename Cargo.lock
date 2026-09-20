@@ -1017,6 +1017,7 @@ dependencies = [
 name = "dj_audio"
 version = "0.1.0"
 dependencies = [
+ "opus-rs",
  "symphonia",
 ]
 
@@ -2736,6 +2737,12 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
+name = "opus-rs"
+version = "0.1.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8380ecc3f3861651992dad78a8c135b3dcd94a3bcd279a733b5a078174742f6"
 
 [[package]]
 name = "oslog"

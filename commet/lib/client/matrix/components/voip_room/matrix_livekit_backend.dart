@@ -108,7 +108,9 @@ class MatrixLivekitBackend {
   }
 
   Future<VoipSession?> join() async {
-    WebrtcDefaultDevices.selectOutputDevice();
+    // Awaited: joining while this is still running leaves the call on
+    // whatever device the system chose.
+    await WebrtcDefaultDevices.selectOutputDevice();
 
     final fociUrl = await getFociUrl();
 

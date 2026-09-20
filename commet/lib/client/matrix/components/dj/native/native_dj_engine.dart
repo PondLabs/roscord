@@ -1,6 +1,7 @@
-// The DJ's player on desktop: songs are downloaded with yt-dlp, decoded by
-// the Rust player, and published as a stereo LiveKit track named
-// MatrixLivekitVoipStream.musicTrackName, apart from the DJ's microphone.
+// The DJ's player on desktop: songs are downloaded with yt-dlp and played
+// as they arrive, decoded by the Rust player, and published as a stereo
+// LiveKit track named MatrixLivekitVoipStream.musicTrackName, apart from the
+// DJ's microphone.
 //
 // The DJ hears their own music through a second, in-process WebRTC
 // connection that receives the same track (_LocalMonitor). Playing it
@@ -13,7 +14,6 @@ import 'dart:io';
 
 import 'package:commet/client/components/dj/dj_engine.dart';
 import 'package:commet/client/components/dj/dj_models.dart';
-import 'package:commet/client/components/dj/in_flight.dart';
 import 'package:commet/client/matrix/components/dj/native/dj_music_player.dart';
 import 'package:commet/client/matrix/components/dj/native/dj_tools.dart';
 import 'package:commet/client/matrix/components/dj/native/yt_dlp.dart';
@@ -29,6 +29,24 @@ import 'package:livekit_client/livekit_client.dart' as lk;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+/// A song's audio file, whole or still arriving.
+class DjSong {
+  final String path;
+  final Map<String, Object?> info;
+
+  /// Completes once the whole file is on disk (at once for a cached song);
+  /// fails if the download does.
+  final Future<void> complete;
+
+  /// Why the download broke off, set before the player hears of it: the
+  /// player just runs out of the song, and this says what happened.
+  String? failure;
+
+  DjSong(this.path, this.info, this.complete) {
+    complete.ignore();
+  }
+}
+
 /// Downloaded songs, shared by every booth this app runs.
 class DjSongCache {
   DjSongCache._();
@@ -38,7 +56,11 @@ class DjSongCache {
   static const maxBytes = 1500 * 1024 * 1024;
 
   Directory? _dir;
-  final InFlight<YtDlpDownload> _inFlight = InFlight();
+
+  /// Songs being fetched, until their download ends. Not an [InFlight]: a
+  /// song plays while it downloads, so the entry has to outlive the future
+  /// [fetch] returns.
+  final Map<String, Future<DjSong>> _inFlight = {};
 
   /// Songs used since the app started: never trimmed, one may be playing.
   final Set<String> _used = {};
@@ -106,20 +128,38 @@ class DjSongCache {
         isPrivateAddress(InternetAddress.fromRawAddress(b.sublist(12)));
   }
 
-  /// The song's audio file, downloading it once however many ask.
+  /// The song's audio file, downloading it once however many ask. Ready as
+  /// soon as it can start playing: the download may still be under way
+  /// ([DjSong.complete]), and the player reads the file as it grows.
   /// [trusted] sources (queued by this user) may use yt-dlp's generic
   /// extractor, which fetches any web page; others, which came from another
   /// client's state, only reach the sites yt-dlp knows.
-  Future<YtDlpDownload> fetch(String source, {bool trusted = false}) {
+  Future<DjSong> fetch(String source, {bool trusted = false}) {
     if (!isFetchable(source)) {
       return Future.error(StateError("that link can't be played"));
     }
     final key = _keyOf(source);
     _used.add(key);
-    return _inFlight.run(key, () => _fetch(source, key, trusted: trusted));
+    final existing = _inFlight[key];
+    if (existing != null) return existing;
+    final song = _inFlight[key] = _fetch(source, key, trusted: trusted);
+    // Dropped once the download ends, not once the song starts playing.
+    // The callback must not return a future: while it runs the map still
+    // holds this chain, and awaiting what `remove` gives back would be
+    // waiting on ourselves. A void body cannot.
+    unawaited(song
+        .then((s) => s.complete)
+        .catchError((Object _) {})
+        .then<void>((_) {
+      _inFlight.remove(key);
+    }));
+    return song;
   }
 
-  Future<YtDlpDownload> _fetch(String source, String key,
+  static int _positiveInt(Object? value) =>
+      value is num && value.isFinite && value > 0 ? value.round() : 0;
+
+  Future<DjSong> _fetch(String source, String key,
       {required bool trusted}) async {
     final dir = await directory;
     final infoFile = File(p.join(dir.path, '$key.json'));
@@ -128,11 +168,14 @@ class DjSongCache {
         final info = jsonDecode(await infoFile.readAsString());
         final path = info is Map ? info['filepath'] : null;
         if (path is String && await File(path).exists()) {
+          Log.i('DJ booth: playing a cached '
+              '${describeDownloadedAudio(Map<String, Object?>.from(info))}');
           // Touched, so trimming keeps what is played often.
           final now = DateTime.now();
           await infoFile.setLastModified(now);
           await File(path).setLastModified(now);
-          return YtDlpDownload(path, Map<String, Object?>.from(info));
+          return DjSong(
+              path, Map<String, Object?>.from(info), Future<void>.value());
         }
       } catch (_) {}
     }
@@ -140,8 +183,7 @@ class DjSongCache {
     // No record of a finished download: whatever is there under this key
     // is left from one that was cut short, and yt-dlp would take it as done.
     await for (final entry in dir.list()) {
-      final name = p.basename(entry.path);
-      if (entry is File && name.startsWith('$key.') && !name.endsWith('.part')) {
+      if (entry is File && p.basename(entry.path).startsWith('$key.')) {
         await entry.delete().catchError((_) => entry);
       }
     }
@@ -155,11 +197,36 @@ class DjSongCache {
 
     final tools = await DjTools.instance.locate();
     if (tools == null) throw StateError('The DJ tools are not set up');
-    final download = await YtDlp(tools).download(source,
+    final fetch = YtDlp(tools).fetch(source,
         directory: dir.path, name: key, knownSitesOnly: !trusted);
-    await infoFile.writeAsString(jsonEncode(download.info));
-    unawaited(_trim(dir));
-    return download;
+    final started = await fetch.started;
+    final path = started.path;
+    Log.i('DJ booth: downloading ${describeDownloadedAudio(started.info)}');
+
+    // The player reads the file as yt-dlp writes it, until told it is done.
+    final bindings = DjMusicBindings.load();
+    bindings?.markGrowing(path,
+        totalBytes: _positiveInt(started.info['filesize']),
+        durationMs: _positiveInt(started.info['duration']) * 1000);
+    late final DjSong song;
+    final complete = fetch.finished.then((download) async {
+      bindings?.markDone(path, ok: p.equals(download.path, path));
+      try {
+        await infoFile.writeAsString(jsonEncode(download.info));
+      } catch (e, s) {
+        Log.onError(e, s, content: 'DJ booth: could not record a song');
+      }
+      unawaited(_trim(dir));
+    }, onError: (Object e, StackTrace s) async {
+      song.failure = e.toString().replaceFirst('Bad state: ', '');
+      bindings?.markDone(path, ok: false);
+      await File(path).delete().catchError((_) => File(path));
+      Error.throwWithStackTrace(e, s);
+    });
+    song = DjSong(path, started.info, complete);
+    // Nothing here reads a file while it grows.
+    if (bindings == null) await complete;
+    return song;
   }
 
   bool _trimming = false;
@@ -181,7 +248,7 @@ class DjSongCache {
           0, (sum, s) => sum + s.value.fold<int>(0, (t, f) => t + f.$2.size));
       for (final song in songs) {
         if (total <= maxBytes) break;
-        if (_used.contains(song.key) || _inFlight.isRunning(song.key)) {
+        if (_used.contains(song.key) || _inFlight.containsKey(song.key)) {
           continue;
         }
         for (final (file, stat) in song.value) {
@@ -205,22 +272,25 @@ class NativeDjEngine implements DjPlaybackEngine {
   final lk.Room room;
   final DjMusicBindings bindings;
 
-  NativeDjEngine(this.room, this.bindings, {double monitorVolume = 1})
-      : _monitorVolume = monitorVolume;
+  NativeDjEngine(this.room, this.bindings,
+      {double monitorVolume = 1, double masterVolume = 1})
+      : _monitorVolume = monitorVolume,
+        _masterVolume = masterVolume;
 
   DjMusicPlayer? _player;
   rtc.MediaStream? _stream;
   lk.LocalAudioTrack? _lkTrack;
   final _LocalMonitor _monitor = _LocalMonitor();
   double _monitorVolume;
+  double _masterVolume;
 
   /// Tracks ids for the Rust player, which counts them in integers.
   final Map<String, int> _numbers = {};
   int _nextNumber = 1;
   String? _loadedId;
 
-  /// Files [prepare] fetched, by track id.
-  final Map<String, YtDlpDownload> _downloads = {};
+  /// Songs [prepare] fetched, by track id.
+  final Map<String, DjSong> _songs = {};
 
   Future<void>? _starting;
   bool _shutDown = false;
@@ -237,6 +307,9 @@ class NativeDjEngine implements DjPlaybackEngine {
     final participant = room.localParticipant;
     if (participant == null) throw StateError('Not connected to the call');
     final player = _player = DjMusicPlayer(bindings);
+    // Before a single block is pulled, so the room never hears the song
+    // at full volume for an instant first.
+    player.setGain(_masterVolume);
 
     final response = await rtc.WebRTC.invokeMethod(
         'commetCreateMusicTrack', <String, dynamic>{
@@ -338,12 +411,13 @@ class NativeDjEngine implements DjPlaybackEngine {
   }
 
   @override
-  Future<DjTrackInfo> prepare(DjTrack track) async {
+  Future<DjTrackInfo> prepare(DjTrack track, {bool whole = false}) async {
     final self = room.localParticipant?.identity;
-    final download = await DjSongCache.instance.fetch(track.source,
+    final song = await DjSongCache.instance.fetch(track.source,
         trusted: self != null && track.addedBy == djUserIdOf(self));
-    _downloads[track.id] = download;
-    return _infoOf(download.info);
+    _songs[track.id] = song;
+    if (whole) await song.complete;
+    return _infoOf(song.info);
   }
 
   static DjTrackInfo _infoOf(Map<String, Object?> info) {
@@ -369,13 +443,13 @@ class NativeDjEngine implements DjPlaybackEngine {
 
   @override
   void load(DjTrack track, {required int positionMs, required bool paused}) {
-    final download = _downloads[track.id];
+    final song = _songs[track.id];
     final player = _player;
-    if (download == null) throw StateError('the song was not fetched');
+    if (song == null) throw StateError('the song was not fetched');
     if (player == null || _shutDown) throw StateError('the booth is closed');
     final number = _numbers.putIfAbsent(track.id, () => _nextNumber++);
     player.setPaused(paused);
-    player.open(download.path, positionMs: positionMs, trackId: number);
+    player.open(song.path, positionMs: positionMs, trackId: number);
     _loadedId = track.id;
   }
 
@@ -398,18 +472,26 @@ class NativeDjEngine implements DjPlaybackEngine {
     final s = player.status;
     final loaded = _loadedId;
     final sameTrack = loaded != null && _numbers[loaded] == s.trackId;
+    // A download that broke off plays what arrived, then fails for its
+    // own reason instead of ending.
+    final broken = sameTrack ? _songs[loaded]?.failure : null;
+    final stopped = s.state == MusicState.ended || s.state == MusicState.error;
     return DjEngineStatus(
-      state: switch (s.state) {
-        MusicState.idle => DjEngineState.idle,
-        MusicState.playing => DjEngineState.playing,
-        MusicState.paused => DjEngineState.paused,
-        MusicState.ended => DjEngineState.ended,
-        MusicState.error => DjEngineState.error,
-        MusicState.buffering => DjEngineState.buffering,
-      },
+      state: broken != null && stopped
+          ? DjEngineState.error
+          : switch (s.state) {
+              MusicState.idle => DjEngineState.idle,
+              MusicState.playing => DjEngineState.playing,
+              MusicState.paused => DjEngineState.paused,
+              MusicState.ended => DjEngineState.ended,
+              MusicState.error => DjEngineState.error,
+              MusicState.buffering => DjEngineState.buffering,
+            },
       trackId: sameTrack ? loaded : null,
       positionMs: s.positionMs,
       durationMs: s.durationMs,
+      error: broken ??
+          (s.state == MusicState.error ? describeMusicError(s.error) : null),
     );
   }
 
@@ -417,6 +499,14 @@ class NativeDjEngine implements DjPlaybackEngine {
   set monitorVolume(double volume) {
     _monitorVolume = volume;
     _monitor.setVolume(volume);
+  }
+
+  @override
+  set masterVolume(double volume) {
+    _masterVolume = volume;
+    // The player ramps to it, so this is click-free mid-song. The monitor
+    // hears it too: it receives the very track this gain shapes.
+    _player?.setGain(volume);
   }
 }
 

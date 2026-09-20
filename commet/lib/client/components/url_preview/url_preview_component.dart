@@ -31,6 +31,15 @@ enum UrlDestinationType {
   image,
 }
 
+/// One photo attached to a preview that has more than one (an X post with
+/// 2-4 images). Rendered as a grid; [image] alone covers single-photo cases.
+class UrlPreviewImage {
+  const UrlPreviewImage(this.image, {this.aspectRatio});
+
+  final ImageProvider image;
+  final double? aspectRatio;
+}
+
 class UrlPreviewData {
   final Uri uri;
   final String? siteName;
@@ -41,6 +50,10 @@ class UrlPreviewData {
   final UrlDestinationType? type;
   final VideoEmbedInfo? videoEmbedInfo;
 
+  /// Every photo of a multi-photo post, in post order. Empty for previews
+  /// with a single image; [image] stays the primary/first one either way.
+  final List<UrlPreviewImage> images;
+
   const UrlPreviewData(
     this.uri, {
     this.siteName,
@@ -50,5 +63,6 @@ class UrlPreviewData {
     this.image,
     this.video,
     this.videoEmbedInfo,
+    this.images = const [],
   });
 }

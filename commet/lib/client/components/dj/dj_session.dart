@@ -772,7 +772,9 @@ class DjSession extends ChangeNotifier {
       for (var attempt = 0; attempt < 3; attempt++) {
         final track = _snap.current;
         if (track == null || !stillOurs()) break;
-        info = await engine.prepare(track);
+        // All of it: we start mid-song, where a download still under way
+        // may not have got to yet.
+        info = await engine.prepare(track, whole: true);
         fetched = track;
         if (_snap.current?.id == track.id) break;
       }
@@ -1339,7 +1341,7 @@ class DjSession extends ChangeNotifier {
       case DjEngineState.ended:
         _advance();
       case DjEngineState.error:
-        _failed(_snap.current!, 'the decoder failed');
+        _failed(_snap.current!, status.error ?? 'the decoder failed');
       case DjEngineState.buffering:
       case DjEngineState.playing:
         final buffering = state == DjEngineState.buffering;
@@ -1389,4 +1391,8 @@ class DjSession extends ChangeNotifier {
   /// How loud the DJ hears their own music. Listeners set theirs on the
   /// music stream instead.
   set monitorVolume(double volume) => _engine?.monitorVolume = volume;
+
+  /// How loud this booth sends its music out, for everyone. Only the DJ
+  /// has an engine to set it on.
+  set masterVolume(double volume) => _engine?.masterVolume = volume;
 }

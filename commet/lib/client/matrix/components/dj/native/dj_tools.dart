@@ -9,33 +9,69 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:archive/archive_io.dart';
+import 'package:commet/client/matrix/components/dj/native/windows_hidden_process.dart';
 import 'package:commet/debug/log.dart';
 import 'package:commet/main.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
-/// Runs a program without flashing a console window on Windows.
-///
-/// A GUI app on Windows gives every console child its own visible console
-/// unless it is detached; `detachedWithStdio` keeps the pipes but has no exit
-/// code, so it is read from nothing but the output.
-Future<Process> startQuietly(String executable, List<String> arguments,
-    {String? workingDirectory}) {
-  return Process.start(executable, arguments,
-      workingDirectory: workingDirectory,
-      mode: Platform.isWindows
-          ? ProcessStartMode.detachedWithStdio
-          : ProcessStartMode.normal);
+/// A program the booth is running, however it was started.
+abstract class QuietProcess {
+  Stream<List<int>> get stdout;
+  Stream<List<int>> get stderr;
+  Future<int> get exitCode;
+  void kill();
+}
+
+/// Runs a program without a console window flashing up on Windows, where a
+/// child of a GUI app gets one of its own unless it is told otherwise
+/// ([startWindowsHidden]). Elsewhere a child is just a child.
+Future<QuietProcess> startQuietly(String executable, List<String> arguments,
+    {String? workingDirectory}) async {
+  if (Platform.isWindows) {
+    return _HiddenQuietProcess(await startWindowsHidden(executable, arguments,
+        workingDirectory: workingDirectory));
+  }
+  return _DartQuietProcess(await Process.start(executable, arguments,
+      workingDirectory: workingDirectory));
+}
+
+class _DartQuietProcess implements QuietProcess {
+  _DartQuietProcess(this._process);
+
+  final Process _process;
+
+  @override
+  Stream<List<int>> get stdout => _process.stdout;
+  @override
+  Stream<List<int>> get stderr => _process.stderr;
+  @override
+  Future<int> get exitCode => _process.exitCode;
+  @override
+  void kill() => _process.kill();
+}
+
+class _HiddenQuietProcess implements QuietProcess {
+  _HiddenQuietProcess(this._process);
+
+  final WindowsHiddenProcess _process;
+
+  @override
+  Stream<List<int>> get stdout => _process.stdout;
+  @override
+  Stream<List<int>> get stderr => _process.stderr;
+  @override
+  Future<int> get exitCode => _process.exitCode;
+  @override
+  void kill() => _process.kill();
 }
 
 /// Output of a finished program.
 class QuietResult {
   final String stdout;
   final String stderr;
-
-  /// Null on Windows, where the program runs detached (see [startQuietly]).
-  final int? exitCode;
+  final int exitCode;
 
   const QuietResult(this.stdout, this.stderr, this.exitCode);
 }
@@ -58,10 +94,8 @@ Future<QuietResult> runQuietly(String executable, List<String> arguments,
     process.kill();
     throw TimeoutException('$executable took too long', timeout);
   }
-  final exitCode = Platform.isWindows
-      ? null
-      : await process.exitCode.timeout(const Duration(seconds: 5),
-          onTimeout: () => -1);
+  final exitCode = await process.exitCode
+      .timeout(const Duration(seconds: 5), onTimeout: () => -1);
   return QuietResult(out.toString(), err.toString(), exitCode);
 }
 
@@ -190,7 +224,7 @@ class DjTools {
       final result = await runQuietly(program, args,
           timeout: const Duration(seconds: 10));
       final out = result.stdout.trim();
-      if (result.exitCode != null && result.exitCode != 0) return null;
+      if (result.exitCode != 0) return null;
       return out.isEmpty ? null : out;
     } catch (_) {
       return null;
