@@ -9,7 +9,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:archive/archive_io.dart';
-import 'package:commet/client/matrix/components/dj/native/windows_hidden_process.dart';
+import 'package:commet/utils/windows_hidden_process.dart';
 import 'package:commet/debug/log.dart';
 import 'package:commet/main.dart';
 import 'package:http/http.dart' as http;

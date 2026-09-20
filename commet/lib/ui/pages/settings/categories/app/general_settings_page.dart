@@ -3,6 +3,7 @@ import 'package:commet/main.dart';
 import 'package:commet/ui/pages/settings/categories/app/boolean_preference_toggle.dart';
 import 'package:commet/ui/pages/setup/menus/check_for_updates.dart';
 import 'package:commet/utils/app_refresh/app_refresh.dart';
+import 'package:commet/ui/organisms/update_button.dart';
 import 'package:commet/utils/update_checker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
@@ -154,6 +155,12 @@ class GeneralSettingsPageState extends State<GeneralSettingsPage> {
                 padding: const EdgeInsets.fromLTRB(8, 0, 8, 0),
                 child: CheckForUpdatesSettingWidget(),
               ),
+            // Always here, even with the automatic check turned off: asking
+            // is not the same as being asked.
+            const Padding(
+              padding: EdgeInsets.fromLTRB(8, 8, 8, 0),
+              child: UpdateButton(),
+            ),
           ]),
         ),
         const SizedBox(
