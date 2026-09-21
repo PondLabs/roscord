@@ -85,6 +85,22 @@ RELEASE_WORKFLOW = (ROOT / ".github" / "workflows" / "release.yml").read_text(
 BUILD_WORKFLOW = (ROOT / ".github" / "workflows" / "build.yml").read_text(
     encoding="utf-8"
 )
+LINUX_EMBEDDED_DART = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "linux_embedded_presenter.dart"
+).read_text(encoding="utf-8")
+LINUX_EMBEDDED_RUST = (
+    ROOT / "rust" / "rust" / "src" / "browser_linux_embedded.rs"
+).read_text(encoding="utf-8")
+LINUX_EMBEDDED_DOC = (
+    ROOT / "docs" / "cef-browser-runtime-linux-embedded.md"
+).read_text(encoding="utf-8")
+RUST_LIB = (ROOT / "rust" / "rust" / "src" / "lib.rs").read_text(encoding="utf-8")
+DART_BARREL = (ROOT / "commet" / "lib" / "browser_runtime.dart").read_text(
+    encoding="utf-8"
+)
+LINUX_EMBEDDED_TEST = (
+    ROOT / "commet" / "unit_test" / "linux_embedded_presenter_test.dart"
+).read_text(encoding="utf-8")
 
 
 class CefHostContractTests(unittest.TestCase):
@@ -494,6 +510,114 @@ class CefHostContractTests(unittest.TestCase):
                 self.assertNotIn(token, source)
         self.assertNotIn("URLDownloadToFile", SOURCE)
         self.assertNotIn("getDisplayMedia", SOURCE)
+
+    def test_linux_embedded_cells_use_osr_cpu_flutter_texture(self) -> None:
+        for token in (
+            "LinuxCompositor",
+            "parseLinuxCompositor",
+            "linuxEmbeddedPresentationPath",
+            "osr-cpu-flutter-texture",
+            "linuxEmbeddedUsesOsrCpuFrames",
+            "linuxEmbeddedUsesFlutterTexture",
+            "linuxEmbeddedUsesNativeChildEmbedding",
+            "LinuxEmbeddedPresenter",
+            "validateLinuxEmbeddedFrame",
+            "presentationPath",
+            "takeFrame",
+        ):
+            self.assertIn(token, LINUX_EMBEDDED_DART)
+        for token in (
+            "LinuxCompositor",
+            "parse_linux_compositor",
+            "EMBEDDED_PRESENTATION_PATH",
+            "osr-cpu-flutter-texture",
+            "uses_osr_cpu_frames",
+            "uses_flutter_texture",
+            "uses_native_child_embedding",
+            "validate_embedded_frame",
+            "resolve_embedded_backend",
+        ):
+            self.assertIn(token, LINUX_EMBEDDED_RUST)
+        self.assertIn("browser_linux_embedded", RUST_LIB)
+        self.assertIn("linux_embedded_presenter", DART_BARREL)
+        for token in (
+            "osr-cpu-flutter-texture",
+            "forced cpu",
+            "no fallback",
+            "webkitgtk",
+        ):
+            self.assertIn(token, LINUX_EMBEDDED_DOC.lower())
+
+    def test_linux_embedded_matches_windows_contract_without_child_embedding(
+        self,
+    ) -> None:
+        for token in (
+            "ResizeCommand",
+            "FocusCommand",
+            "InputCommand",
+            "ReleaseFrameCommand",
+            "runtime.close",
+            "stale surface",
+        ):
+            self.assertIn(token, LINUX_EMBEDDED_DART)
+        # The presenter is runtime-agnostic, so the embedded Matrix contract
+        # is pinned in its fixture: same embedded spec, profile, navigation,
+        # input/IME/focus/resize/DPI/close vocabulary as Windows.
+        for token in (
+            "PresentationMode.embedded",
+            "Matrix launch builds the same embedded surface spec",
+            "input, IME, focus, resize, DPI, and close round-trip",
+            "profiles, navigation, and command ordering match Windows",
+            "profileMismatch",
+            "sequenceViolation",
+            "navigationDecision",
+        ):
+            self.assertIn(token, LINUX_EMBEDDED_TEST)
+        self.assertIn("cpuOsr", LINUX_EMBEDDED_DART)
+        self.assertIn("CpuOsr", LINUX_EMBEDDED_RUST)
+        self.assertIn("forced_cpu_rendering", LINUX_EMBEDDED_RUST)
+        # Both presenters document that native child embedding is absent;
+        # only embedding *APIs* are forbidden in the sources.
+        for source in (LINUX_EMBEDDED_DART, LINUX_EMBEDDED_RUST):
+            self.assertIn("native child embedding", source.lower().replace("_", " "))
+            for token in ("GDK_BACKEND", "gtk_window", "GtkWidget"):
+                self.assertNotIn(token, source)
+
+    def test_linux_embedded_has_no_fallback_engine(self) -> None:
+        for token in (
+            "isForbiddenEmbeddedBackend",
+            "assertNoFallbackEngine",
+            "resolveLinuxEmbeddedBackend",
+            "cef-osr-cpu",
+            "webkit",
+            "wry",
+            "system cef",
+            "external chromium",
+            "WebView2",
+            "unowned browser",
+        ):
+            self.assertIn(token.lower(), LINUX_EMBEDDED_DART.lower())
+        for token in (
+            "is_forbidden_backend",
+            "assert_no_fallback_engine",
+            "resolve_embedded_backend",
+            "cef-osr-cpu",
+            "webkit",
+            "wry",
+            "system cef",
+            "external chromium",
+            "webview2",
+            "unowned browser",
+        ):
+            self.assertIn(token.lower(), LINUX_EMBEDDED_RUST.lower())
+        for source in (LINUX_EMBEDDED_DART, LINUX_EMBEDDED_RUST):
+            lowered = source.lower()
+            # The forbidden list itself names the engines only to deny them;
+            # no fallback may be imported, instantiated, or registered.
+            self.assertNotIn("import 'package:webview", lowered)
+            self.assertNotIn("desktop_webview_window", lowered)
+            self.assertNotIn("system cef lookup", lowered)
+            self.assertNotIn("external cef download", lowered)
 
 
 if __name__ == "__main__":
