@@ -32,11 +32,13 @@ class WindowsBrowserRuntime implements BrowserRuntime {
     this.maxFrameBytes = defaultBrowserRuntimeMaxFrameBytes,
     this.validationBuild = false,
     this.faultPoint,
+    String? profileRoot,
   })  : _hostExecutable = hostExecutable,
         _connector = connector ?? ipc.connect,
         _starter = starter ?? _startProcess,
         _parentProcessId = parentProcessId ?? pid,
         _random = random ?? Random.secure(),
+        _profileRoot = profileRoot,
         _events = StreamController<SurfaceEvent>.broadcast() {
     if (maxFrameBytes <= 0 || maxFrameBytes > 0xffffffff) {
       throw ArgumentError.value(maxFrameBytes, 'maxFrameBytes');
@@ -59,6 +61,7 @@ class WindowsBrowserRuntime implements BrowserRuntime {
   final BrowserHostStarter _starter;
   final int _parentProcessId;
   final Random _random;
+  final String? _profileRoot;
   final StreamController<SurfaceEvent> _events;
   final StreamController<RuntimeEvent> _runtimeEvents =
       StreamController<RuntimeEvent>.broadcast();
@@ -363,11 +366,13 @@ class WindowsBrowserRuntime implements BrowserRuntime {
     final nonce = _newNonce();
     final pipeName = r'\\.\pipe\roscord-browser-' + '$_parentProcessId-$nonce';
     final executable = _resolveHostExecutable();
+    final profileRoot = _resolveProfileRoot();
     final hostArguments = <String>[
       '--module=client.dll',
       '--pipe=$pipeName',
       '--nonce=$nonce',
       '--parent-pid=$_parentProcessId',
+      '--profile-root=$profileRoot',
       if (validationBuild) '--cef-validation',
       if (faultPoint != null) '--cef-fault=${_faultName(faultPoint!)}',
     ];
@@ -1037,6 +1042,10 @@ class WindowsBrowserRuntime implements BrowserRuntime {
         'stale_surface' => BrowserRuntimeErrorCode.staleSurface,
         'sequence_violation' => BrowserRuntimeErrorCode.sequenceViolation,
         'profile_mismatch' => BrowserRuntimeErrorCode.profileMismatch,
+        'profile_busy' => BrowserRuntimeErrorCode.profileBusy,
+        'profile_corrupt' => BrowserRuntimeErrorCode.profileCorrupt,
+        'profile_unavailable' => BrowserRuntimeErrorCode.profileUnavailable,
+        'migration_failed' => BrowserRuntimeErrorCode.migrationFailed,
         _ => BrowserRuntimeErrorCode.protocol,
       };
 
@@ -1066,10 +1075,25 @@ class WindowsBrowserRuntime implements BrowserRuntime {
         'network_service_failure' => FailureClass.networkServiceFailure,
         'utility_launch_failed' => FailureClass.utilityLaunchFailed,
         'profile_locked' => FailureClass.profileLocked,
-        'profile_corrupt' => FailureClass.profileCorrupt,
-        'profile_unavailable' => FailureClass.profileUnavailable,
+        'profile_corrupt' || 'migration_failed' => FailureClass.profileCorrupt,
+        'profile_unavailable' || 'profile_busy' =>
+          FailureClass.profileUnavailable,
         _ => null,
       };
+
+  String _resolveProfileRoot() {
+    final configured = _profileRoot;
+    if (configured != null && configured.isNotEmpty) return configured;
+    final base = Platform.environment['LOCALAPPDATA'] ??
+        Platform.environment['APPDATA'];
+    if (base == null || base.isEmpty) {
+      throw const BrowserRuntimeException(
+        BrowserRuntimeErrorCode.profileUnavailable,
+        'Windows profile root is unavailable',
+      );
+    }
+    return path.join(base, 'roscord', 'cef', 'profiles');
+  }
 
   String _faultName(FaultPoint point) => point.name.replaceAllMapped(
         RegExp(r'[A-Z]'),

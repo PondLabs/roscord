@@ -23,6 +23,12 @@ WINDOWS_CMAKE = (ROOT / "commet" / "windows" / "CMakeLists.txt").read_text(
 DART_RUNTIME = (
     ROOT / "commet" / "lib" / "browser_runtime" / "windows_browser_runtime.dart"
 ).read_text(encoding="utf-8")
+PROFILE_RUNTIME = (ROOT / "rust" / "rust" / "src" / "browser_profile.rs").read_text(
+    encoding="utf-8"
+)
+PROFILE_DOC = (ROOT / "docs" / "cef-browser-runtime-profiles.md").read_text(
+    encoding="utf-8"
+)
 LIFECYCLE_RUST = (
     ROOT / "rust" / "rust" / "src" / "browser_runtime_lifecycle.rs"
 ).read_text(encoding="utf-8")
@@ -166,6 +172,32 @@ class CefHostContractTests(unittest.TestCase):
         self.assertNotIn("webkit", SOURCE.lower())
         self.assertNotIn("wry", SOURCE.lower())
         self.assertNotIn("browser_subprocess_path", SOURCE)
+
+    def test_account_profiles_private_contexts_and_data_transition_are_bound(self) -> None:
+        self.assertIn("--profile-root", SOURCE)
+        self.assertIn("ProfileManager", SOURCE)
+        self.assertIn("CefRequestContext::CreateContext", SOURCE)
+        self.assertIn("settings.cache_path", SOURCE)
+        self.assertIn("persist_session_cookies", SOURCE)
+        self.assertIn("persist_user_preferences", SOURCE)
+        self.assertIn("FILE_ATTRIBUTE_REPARSE_POINT", SOURCE)
+        self.assertIn("profile.manifest", SOURCE)
+        self.assertIn("MoveFileExW", SOURCE)
+        self.assertIn("ClearData", SOURCE)
+        self.assertIn("FlushStore", SOURCE)
+        self.assertIn("CloseAllConnections", SOURCE)
+        self.assertIn("ClearCertificateExceptions", SOURCE)
+        self.assertIn("ClearHttpAuthCredentials", SOURCE)
+        self.assertIn("RejectReparseBelow", SOURCE)
+        self.assertIn("SetAsPopup", SOURCE)
+        self.assertIn("--profile-root=$profileRoot", DART_RUNTIME)
+
+        self.assertIn("same_account_shares_persistent_context", PROFILE_RUNTIME)
+        self.assertIn("private_contexts_are_distinct", PROFILE_RUNTIME)
+        self.assertIn("missing_or_mismatched_manifests_are_quarantined", PROFILE_RUNTIME)
+        self.assertIn("clear_data_requires_quiescence", PROFILE_RUNTIME)
+        self.assertIn("legacy", PROFILE_DOC.lower())
+        self.assertIn("quarantine", PROFILE_DOC.lower())
 
 
 if __name__ == "__main__":

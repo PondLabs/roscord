@@ -14,6 +14,10 @@ enum BrowserRuntimeErrorCode {
   staleSurface,
   sequenceViolation,
   profileMismatch,
+  profileBusy,
+  profileCorrupt,
+  profileUnavailable,
+  migrationFailed,
   protocol,
 }
 
@@ -47,6 +51,9 @@ class ProtocolException implements Exception {
 }
 
 class ProfileKey {
+  /// The stable local account-record identity (the Matrix client's
+  /// `MatrixClient.identifier`). Callers must not substitute a Matrix user
+  /// id, homeserver URL, display name, or a URL-derived path.
   final String value;
 
   ProfileKey(String value) : value = _validateProfileKey(value);
