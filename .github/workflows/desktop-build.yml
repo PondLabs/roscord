@@ -14,7 +14,7 @@ on:
         required: true
         type: string
       platforms:
-        description: JSON array of platforms to build, from windows and linux
+        description: JSON array of platforms to build, from windows, linux and macos
         required: false
         type: string
         default: '["windows", "linux"]'
@@ -26,14 +26,21 @@ jobs:
       fail-fast: false
       matrix:
         platform: ${{ fromJSON(inputs.platforms) }}
-    runs-on: ${{ matrix.platform == 'windows' && 'blacksmith-4vcpu-windows-2025' || 'blacksmith-4vcpu-ubuntu-2404' }}
+    # Blacksmith has no macOS image, so that one leg runs on GitHub's.
+    runs-on: ${{ matrix.platform == 'windows' && 'blacksmith-4vcpu-windows-2025' || matrix.platform == 'macos' && 'macos-15' || 'blacksmith-4vcpu-ubuntu-2404' }}
+    # macOS is the newest target and has never been built here, so it does not
+    # get to hold up a release: the leg goes red on its own and publish still
+    # runs, with whatever it managed to upload.
+    continue-on-error: ${{ matrix.platform == 'macos' }}
     env:
-      ASSET_NAME: roscord-${{ inputs.version }}-${{ matrix.platform }}-x64-${{ inputs.build_mode }}
+      # Flutter builds macOS release binaries for both architectures.
+      ARCH: ${{ matrix.platform == 'macos' && 'universal' || 'x64' }}
+      ASSET_NAME: roscord-${{ inputs.version }}-${{ matrix.platform }}-${{ matrix.platform == 'macos' && 'universal' || 'x64' }}-${{ inputs.build_mode }}
       # Release builds get the production application id, debug builds the
       # .develop one so both can be installed side by side.
       COMMET_PROD: ${{ inputs.build_mode == 'release' && '1' || '0' }}
-      BUNDLE: ${{ matrix.platform == 'windows' && format('commet/build/windows/x64/runner/{0}', inputs.build_mode == 'debug' && 'Debug' || 'Release') || format('commet/build/linux/x64/{0}/bundle', inputs.build_mode) }}
-      ARCHIVE: ${{ matrix.platform == 'windows' && 'zip' || 'tar.gz' }}
+      BUNDLE: ${{ matrix.platform == 'windows' && format('commet/build/windows/x64/runner/{0}', inputs.build_mode == 'debug' && 'Debug' || 'Release') || matrix.platform == 'macos' && format('commet/build/macos/Build/Products/{0}/roscord.app', inputs.build_mode == 'debug' && 'Debug' || 'Release') || format('commet/build/linux/x64/{0}/bundle', inputs.build_mode) }}
+      ARCHIVE: ${{ matrix.platform == 'linux' && 'tar.gz' || 'zip' }}
     steps:
       - name: Enable long paths
         if: runner.os == 'Windows'
@@ -80,19 +87,32 @@ jobs:
           --build_mode ${{ inputs.build_mode }}
           --version_tag ${{ inputs.version }}
           --git_hash ${{ github.sha }}
-          --build_detail ${{ matrix.platform }}-x64
+          --build_detail ${{ matrix.platform }}-${{ env.ARCH }}
 
       - name: Package
         shell: bash
         run: |
           mkdir -p dist
-          cp -r "$BUNDLE" "dist/$ASSET_NAME"
-          cd dist
-          if [ "$ARCHIVE" = zip ]; then
-            7z a -tzip "$ASSET_NAME.zip" "$ASSET_NAME" > /dev/null
-          else
-            tar -czf "$ASSET_NAME.tar.gz" "$ASSET_NAME"
-          fi
+          case "${{ matrix.platform }}" in
+            macos)
+              # An .app is a tree of symlinks (every framework's
+              # Versions/Current) around an ad-hoc signature, and anything
+              # that flattens them leaves an app the Finder refuses to open,
+              # so: ditto rather than cp and zip. --keepParent puts
+              # roscord.app itself at the root of the archive, which is what
+              # someone dragging it to /Applications expects.
+              echo "Architectures: $(lipo -archs "$BUNDLE/Contents/MacOS/roscord")"
+              ditto -c -k --sequesterRsrc --keepParent "$BUNDLE" "dist/$ASSET_NAME.zip"
+              ;;
+            windows)
+              cp -r "$BUNDLE" "dist/$ASSET_NAME"
+              (cd dist && 7z a -tzip "$ASSET_NAME.zip" "$ASSET_NAME" > /dev/null)
+              ;;
+            *)
+              cp -r "$BUNDLE" "dist/$ASSET_NAME"
+              (cd dist && tar -czf "$ASSET_NAME.tar.gz" "$ASSET_NAME")
+              ;;
+          esac
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

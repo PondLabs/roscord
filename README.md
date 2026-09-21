@@ -19,8 +19,9 @@ Builds are published on the [releases page](https://github.com/PondLabs/roscord/
 |---|---|
 | Windows | `roscord-v<version>-windows-x64-release.zip` |
 | Linux | `roscord-v<version>-linux-x64-release.tar.gz` |
+| macOS | `roscord-v<version>-macos-universal-release.zip` |
 
-Unpack the archive and run `roscord` from inside it. macOS, iOS and Android are not currently built.
+Unpack the archive and run `roscord` from inside it. The macOS archive holds `roscord.app`: drag it to Applications. It is not signed by Apple, so the first launch needs right click → Open, and it does not update itself the way the Windows and Linux builds do. iOS and Android are not currently built.
 
 # Features
 
