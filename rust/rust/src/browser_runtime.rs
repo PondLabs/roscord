@@ -503,6 +503,19 @@ pub enum ClipboardDecision {
     Cancel,
 }
 
+/// Upload handoff decision.  `Accept` means "show the OS/portal chooser";
+/// the host stages the user's explicit selection as read-only copies and
+/// never reveals real filesystem paths to the page.  Uploads never grant a
+/// persistent path or directory enumeration, so there is intentionally no
+/// path field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UploadDecision {
+    Deny,
+    Cancel,
+    Accept,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum SurfaceCommand {
@@ -557,6 +570,12 @@ pub enum SurfaceCommand {
         request_id: String,
         decision: ClipboardDecision,
     },
+    Upload {
+        sequence: u64,
+        profile_key: Option<ProfileKey>,
+        request_id: String,
+        decision: UploadDecision,
+    },
     ReleaseFrame {
         sequence: u64,
         profile_key: Option<ProfileKey>,
@@ -576,6 +595,7 @@ impl SurfaceCommand {
             | Self::Popup { sequence, .. }
             | Self::Download { sequence, .. }
             | Self::Clipboard { sequence, .. }
+            | Self::Upload { sequence, .. }
             | Self::ReleaseFrame { sequence, .. } => *sequence,
         }
     }
@@ -591,6 +611,7 @@ impl SurfaceCommand {
             | Self::Popup { profile_key, .. }
             | Self::Download { profile_key, .. }
             | Self::Clipboard { profile_key, .. }
+            | Self::Upload { profile_key, .. }
             | Self::ReleaseFrame { profile_key, .. } => profile_key.as_ref(),
         }
     }
@@ -623,6 +644,7 @@ impl SurfaceCommand {
             | Self::Popup { request_id, .. }
             | Self::Download { request_id, .. }
             | Self::Clipboard { request_id, .. }
+            | Self::Upload { request_id, .. }
                 if request_id.is_empty() =>
             {
                 Err(RuntimeError::InvalidCommand(
@@ -889,6 +911,14 @@ pub enum SurfaceEvent {
         write: bool,
         user_gesture: bool,
     },
+    UploadRequest {
+        surface_id: SurfaceId,
+        sequence: u64,
+        request_id: String,
+        multiple: bool,
+        #[serde(default)]
+        accept: Vec<String>,
+    },
     WindowChanged {
         surface_id: SurfaceId,
         sequence: u64,
@@ -909,6 +939,7 @@ impl SurfaceEvent {
             | Self::PopupRequest { surface_id, .. }
             | Self::DownloadRequest { surface_id, .. }
             | Self::ClipboardRequest { surface_id, .. }
+            | Self::UploadRequest { surface_id, .. }
             | Self::WindowChanged { surface_id, .. } => *surface_id,
         }
     }
@@ -925,6 +956,7 @@ impl SurfaceEvent {
             | Self::PopupRequest { sequence, .. }
             | Self::DownloadRequest { sequence, .. }
             | Self::ClipboardRequest { sequence, .. }
+            | Self::UploadRequest { sequence, .. }
             | Self::WindowChanged { sequence, .. } => *sequence,
         }
     }
@@ -1159,6 +1191,7 @@ impl BrowserRuntime for FakeBrowserRuntime {
             | SurfaceCommand::Popup { .. }
             | SurfaceCommand::Download { .. }
             | SurfaceCommand::Clipboard { .. }
+            | SurfaceCommand::Upload { .. }
             | SurfaceCommand::ReleaseFrame { .. } => return Ok(()),
         };
         self.enqueue(event);

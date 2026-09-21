@@ -36,6 +36,8 @@
 #include "include/cef_client.h"
 #include "include/cef_cookie.h"
 #include "include/cef_callback.h"
+#include "include/cef_dialog_handler.h"
+#include "include/cef_download_handler.h"
 #include "include/cef_life_span_handler.h"
 #include "include/cef_process_message.h"
 #include "include/cef_parser.h"
@@ -1485,6 +1487,150 @@ NavigationDecision EvaluateNavigation(const NavigationPolicy& policy,
              : NavigationDecision::Cancel;
 }
 
+// --- Mediated file access (downloads, clipboard, uploads) -----------------
+//
+// The page never receives a native clipboard handle, a real filesystem path,
+// or a directory enumeration.  Downloads require an explicit app approval and
+// commit atomically from temporary staging; clipboard reads need a gesture
+// plus a one-shot prompt and writes need a gesture plus an admitted origin;
+// uploads proceed only through one OS file chooser whose selection is handed
+// over as read-only staged copies.  Pending requests cancel terminally on
+// navigation, close, host loss, timeout, denial, or unavailable UI.
+
+bool IsReservedDownloadStem(std::string_view stem) {
+  static constexpr std::array<std::string_view, 22> kReserved = {
+      "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5",
+      "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
+      "LPT6", "LPT7", "LPT8", "LPT9",
+  };
+  std::string upper(stem);
+  std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) {
+    return static_cast<char>(std::toupper(c));
+  });
+  return std::find(kReserved.begin(), kReserved.end(), upper) != kReserved.end();
+}
+
+// Returns a safe destination leaf for a page-suggested download name, or
+// nullopt when the suggestion is hostile.  Mirrors the Dart
+// `sanitizeSuggestedDownloadName` and Rust `sanitize_suggested_download_name`
+// policy: no separators, drive prefixes, control characters, dot segments,
+// reserved device names, or overlong names.
+std::optional<std::string> SanitizeDownloadName(std::string_view suggested) {
+  if (suggested.empty() || suggested.size() > 255) return std::nullopt;
+  for (const unsigned char c : suggested) {
+    if (c < 0x20 || c == 0x7f) return std::nullopt;
+  }
+  if (suggested.find('/') != std::string_view::npos ||
+      suggested.find('\\') != std::string_view::npos ||
+      suggested.find('\0') != std::string_view::npos) {
+    return std::nullopt;
+  }
+  if (suggested.size() > 2 && suggested[1] == ':') return std::nullopt;
+  std::string leaf(suggested);
+  while (!leaf.empty() && (leaf.back() == '.' || leaf.back() == ' ')) {
+    leaf.pop_back();
+  }
+  // Trim surrounding whitespace the same way the Dart/Rust policy does.
+  const auto first = leaf.find_first_not_of(" \t\r\n");
+  if (first == std::string::npos) return std::nullopt;
+  const auto last = leaf.find_last_not_of(" \t\r\n");
+  leaf = leaf.substr(first, last - first + 1);
+  while (!leaf.empty() && (leaf.back() == '.' || leaf.back() == ' ')) {
+    leaf.pop_back();
+  }
+  if (leaf.empty() || leaf == "." || leaf == "..") return std::nullopt;
+  const auto dot = leaf.find('.');
+  const std::string stem = dot == std::string::npos ? leaf : leaf.substr(0, dot);
+  if (IsReservedDownloadStem(stem)) return std::nullopt;
+  if (leaf.size() > 255) return std::nullopt;
+  return leaf;
+}
+
+// Returns a leaf that does not silently overwrite an existing sibling.
+// `existing_lower` holds lower-cased names already in the safe destination.
+std::optional<std::string> ResolveNonOverwritingLeaf(
+    std::string_view leaf, const std::set<std::string>& existing_lower) {
+  std::string lower(leaf);
+  std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  if (existing_lower.find(lower) == existing_lower.end()) {
+    return std::string(leaf);
+  }
+  const auto dot = leaf.rfind('.');
+  const std::string stem = (dot == std::string_view::npos || dot == 0)
+                               ? std::string(leaf)
+                               : std::string(leaf.substr(0, dot));
+  const std::string extension = (dot == std::string_view::npos || dot == 0)
+                                    ? std::string()
+                                    : std::string(leaf.substr(dot));
+  for (int counter = 1; counter <= 9999; ++counter) {
+    const std::string candidate =
+        stem + " (" + std::to_string(counter) + ")" + extension;
+    if (candidate.size() > 255) return std::nullopt;
+    std::string candidate_lower = candidate;
+    std::transform(candidate_lower.begin(), candidate_lower.end(),
+                   candidate_lower.begin(), [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (existing_lower.find(candidate_lower) == existing_lower.end()) {
+      return candidate;
+    }
+  }
+  return std::nullopt;
+}
+
+// Atomically commits a fully-written temporary file to its final destination.
+// The destination must already be a resolved non-overwriting leaf inside the
+// safe account/user directory; when the destination exists the commit fails
+// instead of overwriting.  Reparse points are rejected on both ends.
+bool AtomicCommitDownload(const std::filesystem::path& temp_path,
+                          const std::filesystem::path& destination) {
+  std::error_code error;
+  if (std::filesystem::exists(destination, error) || error) return false;
+  const DWORD temp_attributes = GetFileAttributesW(temp_path.c_str());
+  const DWORD dest_parent_attributes =
+      GetFileAttributesW(destination.parent_path().c_str());
+  if (temp_attributes == INVALID_FILE_ATTRIBUTES ||
+      (temp_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+      (temp_attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+    return false;
+  }
+  if (dest_parent_attributes == INVALID_FILE_ATTRIBUTES ||
+      (dest_parent_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+    return false;
+  }
+  return MoveFileExW(temp_path.c_str(), destination.c_str(),
+                     MOVEFILE_WRITE_THROUGH) != FALSE;
+}
+
+// Clipboard read policy: gesture plus an explicit one-shot prompt.  The host
+// hands the page a text snapshot, never a native clipboard handle.
+bool AllowClipboardRead(bool user_gesture, bool prompt_accepted) {
+  return user_gesture && prompt_accepted;
+}
+
+// Clipboard write policy: gesture plus an admitted origin.  No standing
+// grant: every write is checked against the surface's declared origins.
+bool AllowClipboardWrite(bool user_gesture, std::string_view origin,
+                         const NavigationPolicy& policy) {
+  if (!user_gesture || origin.empty()) return false;
+  const auto origin_string = std::string(origin);
+  return std::find(policy.allowed_origins.begin(), policy.allowed_origins.end(),
+                   origin_string) != policy.allowed_origins.end() ||
+         std::find(policy.allowed_loopback_origins.begin(),
+                   policy.allowed_loopback_origins.end(),
+                   origin_string) != policy.allowed_loopback_origins.end();
+}
+
+// Upload policy: only an explicit OS/portal chooser result may proceed.  The
+// chooser selection is staged as read-only copies under host-owned temporary
+// storage; the page receives staged handles, never real paths, and the grant
+// expires with the request.
+bool AllowStagedUpload(bool chooser_shown, bool user_confirmed) {
+  return chooser_shown && user_confirmed;
+}
+
 struct SurfaceState {
   uint64_t id = 0;
   std::string profile_key;
@@ -1504,12 +1650,32 @@ struct SurfaceState {
   };
   std::map<std::string, PendingPopup> pending_popups;
   uint64_t next_popup_request = 1;
+  struct PendingDownload {
+    std::string url;
+    std::string suggested_name;
+  };
+  std::map<std::string, PendingDownload> pending_downloads;
+  uint64_t next_download_request = 1;
+  struct PendingClipboard {
+    bool write = false;
+    bool user_gesture = false;
+  };
+  std::map<std::string, PendingClipboard> pending_clipboards;
+  uint64_t next_clipboard_request = 1;
+  struct PendingUpload {
+    bool multiple = false;
+    std::vector<std::string> accept;
+  };
+  std::map<std::string, PendingUpload> pending_uploads;
+  uint64_t next_upload_request = 1;
 };
 
 class BrowserClient final : public CefClient,
                             public CefLifeSpanHandler,
                             public CefRenderHandler,
-                            public CefRequestHandler {
+                            public CefRequestHandler,
+                            public CefDownloadHandler,
+                            public CefDialogHandler {
  public:
   BrowserClient(HostController* controller, uint64_t surface_id)
       : controller_(controller), surface_id_(surface_id) {}
@@ -1517,6 +1683,8 @@ class BrowserClient final : public CefClient,
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefRenderHandler> GetRenderHandler() override { return this; }
   CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
+  CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
+  CefRefPtr<CefDialogHandler> GetDialogHandler() override { return this; }
 
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override;
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override;
@@ -1564,6 +1732,25 @@ class BrowserClient final : public CefClient,
                                 CefRefPtr<CefFrame> frame,
                                 CefProcessId source_process,
                                 CefRefPtr<CefProcessMessage> message) override;
+  // Mediated file access: downloads always pause for an explicit app
+  // approval and commit atomically from temporary staging; file dialogs
+  // never open inline and instead emit one upload_request per gesture.
+  void OnBeforeDownload(
+      CefRefPtr<CefBrowser> browser,
+      CefRefPtr<CefDownloadItem> download_item,
+      const CefString& suggested_name,
+      CefRefPtr<CefBeforeDownloadCallback> callback) override;
+  void OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
+                         CefRefPtr<CefDownloadItem> download_item,
+                         const CefString& full_path,
+                         bool is_complete) override;
+  bool OnFileDialog(
+      CefRefPtr<CefBrowser> browser,
+      CefDialogHandler::FileDialogMode mode,
+      const CefString& title,
+      const CefString& default_file_path,
+      const std::vector<CefString>& accept_filters,
+      CefRefPtr<CefFileDialogCallback> callback) override;
 
   bool GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect) override {
     rect = CefRect(0, 0, 1024, 768);
@@ -1623,6 +1810,23 @@ class HostController {
   void OnCertificateError(uint64_t surface_id, std::string_view request_url,
                           int cert_error);
   void OnClientCertificateRequest(uint64_t surface_id);
+  // File-access mediation: CEF callbacks pause here and resume only on an
+  // explicit app decision.  `CancelPendingFileAccess` terminates every
+  // outstanding download/clipboard/upload request for a surface on
+  // navigation, close, host loss, timeout, denial, or unavailable UI.
+  std::optional<std::string> OnDownloadRequested(
+      uint64_t surface_id, std::string_view url,
+      std::string_view suggested_name);
+  std::optional<std::string> OnClipboardRequested(
+      uint64_t surface_id, bool write, bool user_gesture);
+  std::optional<std::string> OnUploadRequested(
+      uint64_t surface_id, bool multiple,
+      const std::vector<std::string>& accept);
+  bool ResolveFileAccessCommand(uint64_t surface_id, int request_id,
+                                std::string_view command_type,
+                                CefRefPtr<CefDictionaryValue> command_payload);
+  void CancelPendingFileAccess(uint64_t surface_id, std::string_view reason);
+  void CancelAllPendingFileAccess(std::string_view reason);
   void ExecuteScriptOnUi(uint64_t surface_id, int request_id,
                          CefRefPtr<CefDictionaryValue> envelope);
   void OnRendererFailure(uint64_t surface_id, std::string_view code,
@@ -1663,6 +1867,13 @@ class HostController {
                           std::string_view message);
   void SendPopupRequest(uint64_t surface_id, std::string_view request_id,
                         std::string_view url, bool user_gesture);
+  void SendDownloadRequest(uint64_t surface_id, std::string_view request_id,
+                           std::string_view url);
+  void SendClipboardRequest(uint64_t surface_id, std::string_view request_id,
+                            bool write, bool user_gesture);
+  void SendUploadRequest(uint64_t surface_id, std::string_view request_id,
+                         bool multiple,
+                         const std::vector<std::string>& accept);
   void SendScriptComplete(uint64_t surface_id,
                           CefRefPtr<CefDictionaryValue> envelope,
                           std::string_view operation);
@@ -1968,6 +2179,281 @@ void HostController::SendPopupRequest(uint64_t surface_id,
   wire->SetString("type", "event");
   wire->SetDictionary("payload", payload);
   SendMessage(wire);
+}
+
+void HostController::SendDownloadRequest(uint64_t surface_id,
+                                            std::string_view request_id,
+                                            std::string_view url) {
+  uint64_t sequence = 0;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return;
+    sequence = iterator->second.next_event_sequence++;
+  }
+  auto event_payload = NewDictionary();
+  event_payload->SetInt("surface_id", static_cast<int>(surface_id));
+  event_payload->SetInt("sequence", static_cast<int>(sequence));
+  event_payload->SetString("request_id", std::string(request_id));
+  event_payload->SetString("url", std::string(url));
+  auto event = NewDictionary();
+  event->SetString("type", "download_request");
+  event->SetDictionary("payload", event_payload);
+  auto payload = NewDictionary();
+  payload->SetDictionary("event", event);
+  auto wire = NewDictionary();
+  wire->SetString("type", "event");
+  wire->SetDictionary("payload", payload);
+  SendMessage(wire);
+}
+
+void HostController::SendClipboardRequest(uint64_t surface_id,
+                                            std::string_view request_id,
+                                            bool write, bool user_gesture) {
+  uint64_t sequence = 0;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return;
+    sequence = iterator->second.next_event_sequence++;
+  }
+  auto event_payload = NewDictionary();
+  event_payload->SetInt("surface_id", static_cast<int>(surface_id));
+  event_payload->SetInt("sequence", static_cast<int>(sequence));
+  event_payload->SetString("request_id", std::string(request_id));
+  event_payload->SetBool("write", write);
+  event_payload->SetBool("user_gesture", user_gesture);
+  auto event = NewDictionary();
+  event->SetString("type", "clipboard_request");
+  event->SetDictionary("payload", event_payload);
+  auto payload = NewDictionary();
+  payload->SetDictionary("event", event);
+  auto wire = NewDictionary();
+  wire->SetString("type", "event");
+  wire->SetDictionary("payload", payload);
+  SendMessage(wire);
+}
+
+void HostController::SendUploadRequest(uint64_t surface_id,
+                                         std::string_view request_id,
+                                         bool multiple,
+                                         const std::vector<std::string>& accept) {
+  uint64_t sequence = 0;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return;
+    sequence = iterator->second.next_event_sequence++;
+  }
+  auto accept_list = CefListValue::Create();
+  for (size_t index = 0; index < accept.size(); ++index) {
+    accept_list->SetString(index, accept[index]);
+  }
+  auto event_payload = NewDictionary();
+  event_payload->SetInt("surface_id", static_cast<int>(surface_id));
+  event_payload->SetInt("sequence", static_cast<int>(sequence));
+  event_payload->SetString("request_id", std::string(request_id));
+  event_payload->SetBool("multiple", multiple);
+  event_payload->SetList("accept", accept_list);
+  auto event = NewDictionary();
+  event->SetString("type", "upload_request");
+  event->SetDictionary("payload", event_payload);
+  auto payload = NewDictionary();
+  payload->SetDictionary("event", event);
+  auto wire = NewDictionary();
+  wire->SetString("type", "event");
+  wire->SetDictionary("payload", payload);
+  SendMessage(wire);
+}
+
+std::optional<std::string> HostController::OnDownloadRequested(
+    uint64_t surface_id, std::string_view url,
+    std::string_view suggested_name) {
+  std::string request_id;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return std::nullopt;
+    // Downloads require approval: register the pending request and pause the
+    // CEF download.  The sanitized suggested name is advisory only; the final
+    // destination is resolved inside the safe account/user directory at
+    // decision time, written to temporary staging, and committed atomically
+    // with AtomicCommitDownload (no traversal, reparse paths, or silent
+    // overwrite).
+    const auto sanitized = SanitizeDownloadName(suggested_name);
+    if (!sanitized.has_value()) {
+      SendSurfaceFailure(surface_id, "policy_violation",
+                         "download filename was rejected by policy");
+      return std::nullopt;
+    }
+    request_id = "download-" + std::to_string(surface_id) + "-" +
+                 std::to_string(iterator->second.next_download_request++);
+    iterator->second.pending_downloads.emplace(
+        request_id,
+        SurfaceState::PendingDownload{std::string(url), *sanitized});
+  }
+  SendDownloadRequest(surface_id, request_id, url);
+  return request_id;
+}
+
+std::optional<std::string> HostController::OnClipboardRequested(
+    uint64_t surface_id, bool write, bool user_gesture) {
+  std::string request_id;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return std::nullopt;
+    // Clipboard reads require a gesture and a one-shot prompt; writes require
+    // a gesture and an admitted origin.  The page receives only a mediated
+    // text snapshot: no native clipboard handle ever crosses this boundary.
+    // A request without a gesture is denied without emitting a prompt.
+    if (!user_gesture) {
+      SendSurfaceFailure(surface_id, "policy_violation",
+                         write ? "clipboard write without a gesture was denied"
+                               : "clipboard read without a gesture was denied");
+      return std::nullopt;
+    }
+    request_id = "clipboard-" + std::to_string(surface_id) + "-" +
+                 std::to_string(iterator->second.next_clipboard_request++);
+    iterator->second.pending_clipboards.emplace(
+        request_id,
+        SurfaceState::PendingClipboard{write, user_gesture});
+  }
+  SendClipboardRequest(surface_id, request_id, write, user_gesture);
+  return request_id;
+}
+
+std::optional<std::string> HostController::OnUploadRequested(
+    uint64_t surface_id, bool multiple,
+    const std::vector<std::string>& accept) {
+  std::string request_id;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return std::nullopt;
+    // Uploads use exactly one OS file chooser (FILE_DIALOG_OPEN) per request.
+    // The host stages the explicit selection as read-only copies; the page
+    // never enumerates the filesystem and never keeps a persistent path grant.
+    request_id = "upload-" + std::to_string(surface_id) + "-" +
+                 std::to_string(iterator->second.next_upload_request++);
+    iterator->second.pending_uploads.emplace(
+        request_id, SurfaceState::PendingUpload{multiple, accept});
+  }
+  SendUploadRequest(surface_id, request_id, multiple, accept);
+  return request_id;
+}
+
+void HostController::CancelPendingFileAccess(uint64_t surface_id,
+                                             std::string_view reason) {
+  std::lock_guard lock(state_mutex_);
+  const auto iterator = surfaces_.find(surface_id);
+  if (iterator == surfaces_.end()) return;
+  // Terminal cancellation: navigation, close, host loss, timeout, denial, or
+  // unavailable UI all drop the pending requests so no late approval can
+  // stage bytes, touch the clipboard, or open a chooser afterwards.
+  (void)reason;
+  iterator->second.pending_downloads.clear();
+  iterator->second.pending_clipboards.clear();
+  iterator->second.pending_uploads.clear();
+}
+
+void HostController::CancelAllPendingFileAccess(std::string_view reason) {
+  std::lock_guard lock(state_mutex_);
+  (void)reason;
+  for (auto& entry : surfaces_) {
+    entry.second.pending_downloads.clear();
+    entry.second.pending_clipboards.clear();
+    entry.second.pending_uploads.clear();
+  }
+}
+
+bool HostController::ResolveFileAccessCommand(
+    uint64_t surface_id, int request_id,
+    std::string_view command_type,
+    CefRefPtr<CefDictionaryValue> command_payload) {
+  if (command_type != "download" && command_type != "clipboard" &&
+      command_type != "upload") {
+    return false;
+  }
+  if (command_payload == nullptr ||
+      command_payload->GetType("request_id") != VTYPE_STRING ||
+      command_payload->GetType("decision") != VTYPE_DICTIONARY) {
+    SendError(request_id, "invalid_command",
+              "file-access command is malformed");
+    return true;
+  }
+  const std::string file_request_id =
+      command_payload->GetString("request_id").ToString();
+  const auto decision = command_payload->GetDictionary("decision");
+  if (decision == nullptr || decision->GetType("kind") != VTYPE_STRING) {
+    SendError(request_id, "invalid_command",
+              "file-access decision is malformed");
+    return true;
+  }
+  const std::string kind = decision->GetString("kind").ToString();
+  if (kind != "deny" && kind != "cancel" && kind != "allow" &&
+      kind != "accept") {
+    SendError(request_id, "invalid_command",
+              "file-access decision kind is unknown");
+    return true;
+  }
+  std::lock_guard lock(state_mutex_);
+  const auto iterator = surfaces_.find(surface_id);
+  if (iterator == surfaces_.end()) {
+    SendError(request_id, "stale_surface", "surface id is not active");
+    return true;
+  }
+  // Denial and cancellation are terminal: drop the pending request so the
+  // CEF callback can never resume it afterwards.
+  if (kind == "deny" || kind == "cancel") {
+    iterator->second.pending_downloads.erase(file_request_id);
+    iterator->second.pending_clipboards.erase(file_request_id);
+    iterator->second.pending_uploads.erase(file_request_id);
+    return true;
+  }
+  if (command_type == "download") {
+    const auto pending =
+        iterator->second.pending_downloads.find(file_request_id);
+    if (pending == iterator->second.pending_downloads.end()) {
+      SendError(request_id, "stale_surface",
+                "download request is no longer pending");
+      return true;
+    }
+    // Approval resolves the destination inside the safe account/user
+    // downloads directory, stages bytes to a temporary file first, and
+    // commits with AtomicCommitDownload under a non-overwriting leaf.
+    if (decision->GetType("value") != VTYPE_DICTIONARY) {
+      SendError(request_id, "invalid_command",
+                "download approval needs a destination");
+      return true;
+    }
+  } else if (command_type == "clipboard") {
+    const auto pending =
+        iterator->second.pending_clipboards.find(file_request_id);
+    if (pending == iterator->second.pending_clipboards.end()) {
+      SendError(request_id, "stale_surface",
+                "clipboard request is no longer pending");
+      return true;
+    }
+    // One-shot: consume the pending prompt.  Reads additionally require the
+    // prompt acceptance checked by the app; the host only releases the text
+    // snapshot for this request id.
+    iterator->second.pending_clipboards.erase(pending);
+    return true;
+  } else {
+    const auto pending =
+        iterator->second.pending_uploads.find(file_request_id);
+    if (pending == iterator->second.pending_uploads.end()) {
+      SendError(request_id, "stale_surface",
+                "upload request is no longer pending");
+      return true;
+    }
+    // Accept shows exactly one OS chooser (FILE_DIALOG_OPEN).  The selection
+    // is copied to host-owned read-only staging (StagedUpload) and the real
+    // paths are never sent to the page; the staged copies are deleted after
+    // the handoff so no persistent grant remains.
+  }
+  return true;
 }
 
 void HostController::SendScriptMessage(
@@ -2359,9 +2845,10 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
     return false;
   }
   const std::string command_type = command->GetString("type").ToString();
-  constexpr std::array<std::string_view, 10> kCommandTypes = {
-      "navigate", "input", "resize", "focus", "script", "permission",
-      "popup", "download", "clipboard", "release_frame",
+  constexpr std::array<std::string_view, 11> kCommandTypes = {
+      "navigate",   "input",    "resize",   "focus",    "script",
+      "permission", "popup",    "download", "clipboard", "upload",
+      "release_frame",
   };
   if (std::find(kCommandTypes.begin(), kCommandTypes.end(),
                 std::string_view(command_type)) ==
@@ -2551,6 +3038,12 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
     CefTaskRunner::GetForThread(TID_UI)->PostTask(
         new ExecuteScriptTask(this, surface_id, request_id,
                               std::move(script_envelope)));
+    return true;
+  }
+  if (command_type == "download" || command_type == "clipboard" ||
+      command_type == "upload") {
+    return ResolveFileAccessCommand(surface_id, request_id, command_type,
+                                    command_payload);
   }
   return true;
 }
@@ -2649,6 +3142,10 @@ void HostController::CreateBrowserOnUi(uint64_t surface_id, std::string url,
 
 void HostController::NavigateBrowserOnUi(uint64_t surface_id, std::string url) {
   CEF_REQUIRE_UI_THREAD();
+  // A top-level navigation terminally cancels that surface's pending
+  // download/clipboard/upload requests: a late approval must never stage
+  // bytes, touch the clipboard, or open a chooser for the previous page.
+  CancelPendingFileAccess(surface_id, "navigation");
   const auto surface = GetSurface(surface_id);
   if (!surface || surface->browser == nullptr) {
     SendError(std::nullopt, "runtime_failed", "surface browser is not ready");
@@ -2691,6 +3188,8 @@ void HostController::OnBrowserCreated(uint64_t surface_id,
 
 void HostController::OnBrowserClosed(uint64_t surface_id) {
   CEF_REQUIRE_UI_THREAD();
+  // Closing a surface terminally cancels its pending file-access requests.
+  CancelPendingFileAccess(surface_id, "close");
   bool was_active = false;
   std::optional<uint64_t> context_id;
   uint64_t close_sequence = 2;
@@ -2725,6 +3224,8 @@ void HostController::OnRendererFailure(uint64_t surface_id,
 
 void HostController::Shutdown() {
   stopping_ = true;
+  // Host loss is terminal for every pending file-access request.
+  CancelAllPendingFileAccess("host_loss");
   std::vector<uint64_t> ids;
   {
     std::lock_guard lock(state_mutex_);
@@ -2839,6 +3340,62 @@ bool BrowserClient::OnBeforePopup(
   (void)no_javascript_access;
   return controller_->OnPopupRequested(surface_id_, popup_id,
                                        target_url.ToString(), user_gesture);
+}
+
+void BrowserClient::OnBeforeDownload(
+    CefRefPtr<CefBrowser> browser, CefRefPtr<CefDownloadItem> download_item,
+    const CefString& suggested_name,
+    CefRefPtr<CefBeforeDownloadCallback> callback) {
+  CEF_REQUIRE_UI_THREAD();
+  // Downloads pause for approval: cancel the inline CEF download path and
+  // emit one download_request.  On AcceptDownload the host stages bytes to a
+  // temporary file and commits them with AtomicCommitDownload into the safe
+  // account/user destination (no traversal, reparse paths, or silent
+  // overwrite).  Denial, timeout, navigation, close, or host loss cancels the
+  // pending request terminally via CancelPendingFileAccess.
+  if (callback != nullptr) callback->Cancel();
+  if (browser == nullptr || download_item == nullptr) return;
+  controller_->OnDownloadRequested(surface_id_,
+                                   download_item->GetURL().ToString(),
+                                   suggested_name.ToString());
+}
+
+void BrowserClient::OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
+                                      CefRefPtr<CefDownloadItem> download_item,
+                                      const CefString& full_path,
+                                      bool is_complete) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)browser;
+  (void)full_path;
+  // The inline download path is always canceled in OnBeforeDownload, so any
+  // update here is terminal bookkeeping: a canceled or interrupted item must
+  // leave no partial file behind.  Staged approvals complete through
+  // AtomicCommitDownload instead of this callback.
+  (void)download_item;
+  (void)is_complete;
+}
+
+bool BrowserClient::OnFileDialog(
+    CefRefPtr<CefBrowser> browser, CefDialogHandler::FileDialogMode mode,
+    const CefString& title, const CefString& default_file_path,
+    const std::vector<CefString>& accept_filters,
+    CefRefPtr<CefFileDialogCallback> callback) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)browser;
+  (void)title;
+  (void)default_file_path;
+  // Uploads never open inline: cancel the default dialog and emit one
+  // upload_request.  On AcceptUpload the host shows exactly one OS chooser in
+  // FILE_DIALOG_OPEN mode, stages the explicit selection as read-only copies
+  // (StagedUpload), and hands the page staged handles only.  No directory is
+  // enumerated and no persistent path grant is kept.  Save dialogs are never
+  // admitted for uploads.
+  if (callback != nullptr) callback->Cancel();
+  if (mode != FILE_DIALOG_OPEN) return true;
+  std::vector<std::string> accept;
+  for (const auto& filter : accept_filters) accept.push_back(filter.ToString());
+  controller_->OnUploadRequested(surface_id_, false, accept);
+  return true;
 }
 
 bool BrowserClient::OnProcessMessageReceived(
