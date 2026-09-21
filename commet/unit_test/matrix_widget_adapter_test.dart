@@ -232,6 +232,28 @@ void main() {
     expect(session.surfaceId, const SurfaceId(2));
     await adapter.dispose();
   });
+
+  test('surface failure before ready unblocks initialization', () async {
+    final runtime = _RecordingRuntime();
+    final session = MatrixWidgetBrowserRuntimeSession(
+      runtime: runtime,
+      surfaceId: const SurfaceId(1),
+      profileKey: ProfileKey('account-record-1'),
+      pageOrigin: 'https://widgets.test',
+    );
+
+    final initializing = session.initialize();
+    runtime.emit(
+      const FailedEvent(
+        SurfaceId(1),
+        1,
+        SurfaceFailure(FailureKind.runtimeLost, 'host stopped'),
+      ),
+    );
+
+    await expectLater(initializing, throwsA(isA<StateError>()));
+    await session.dispose();
+  });
 }
 
 MatrixWidgetAdapterLaunch _launch({

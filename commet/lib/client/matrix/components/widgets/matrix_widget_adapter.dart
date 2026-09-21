@@ -561,15 +561,15 @@ class MatrixWidgetBrowserRuntimeSession {
     await transceiver.initializeBridge();
   }
 
-  Future<void> waitUntilReady() {
+  Future<void> waitUntilReady() async {
     final failure = _readyFailure;
-    if (failure != null) return Future<void>.error(failure);
+    if (failure != null) throw failure;
     if (_closedState && !_ready.isCompleted) {
-      return Future<void>.error(
-        StateError('Matrix widget surface closed before ready'),
-      );
+      throw StateError('Matrix widget surface closed before ready');
     }
-    return _ready.future;
+    await _ready.future;
+    final readyFailure = _readyFailure;
+    if (readyFailure != null) throw readyFailure;
   }
 
   void _handleEvent(SurfaceEvent event) {
@@ -593,6 +593,10 @@ class MatrixWidgetBrowserRuntimeSession {
   void _finishClosed() {
     if (_closedState) return;
     _closedState = true;
+    if (!_ready.isCompleted) {
+      _readyFailure ??= StateError('Matrix widget surface closed before ready');
+      _ready.complete();
+    }
     if (!_closed.isCompleted) _closed.complete();
     _onClosed.add(null);
     _onClosed.close();
