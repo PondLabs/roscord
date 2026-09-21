@@ -935,7 +935,7 @@ class FixtureSchemeHandlerFactory final : public CefSchemeHandlerFactory {
 // The renderer-side half of the generic BrowserRuntime script bridge.  It
 // deliberately accepts only a JSON string: the browser process validates and
 // wraps the opaque value as a ScriptEnvelope before it reaches Dart.  No
-// Matrix action or capability vocabulary crosses this CEF boundary.
+// Caller-specific action or capability vocabulary crosses this CEF boundary.
 class BrowserRuntimeSendHandler final : public CefV8Handler {
  public:
   bool Execute(const CefString& name, CefRefPtr<CefV8Value> object,

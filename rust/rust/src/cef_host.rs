@@ -1179,7 +1179,7 @@ impl HostCore {
 /// Script commands are a generic BrowserRuntime execution seam.  The native
 /// CEF bridge evaluates the operation in the page; the transport-only Linux
 /// host still emits a host-sourced terminal event so command acknowledgements
-/// cannot remain pending or be mistaken for a page-originated Matrix message.
+/// cannot remain pending or be mistaken for a page-originated message.
 fn script_completion_envelope(envelope: &ScriptEnvelope) -> Result<ScriptEnvelope, RuntimeError> {
     let operation = envelope
         .value()
@@ -1506,13 +1506,13 @@ mod tests {
         .unwrap();
         let envelope = ScriptEnvelope::new(
             ScriptSource::App,
-            "commet://widget",
+            "https://surface.example",
             "test.channel",
             "script-1",
             json!({
                 "operation": "dispatch_script_message",
-                "storage_key": "chat.commet.toWidget:1",
-                "payload": "_{\"api\":\"toWidget\"}\n",
+                "storage_key": "app.toSurface:1",
+                "payload": "_{\"kind\":\"message\"}\n",
             }),
         )
         .unwrap();

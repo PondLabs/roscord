@@ -16,6 +16,9 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 HOST = ROOT / "commet" / "windows" / "cef_host"
 SOURCE = (HOST / "cef_host.cpp").read_text(encoding="utf-8")
+RUST_HOST_SOURCE = (
+    ROOT / "rust" / "rust" / "src" / "cef_host.rs"
+).read_text(encoding="utf-8")
 CMAKE = (HOST / "CMakeLists.txt").read_text(encoding="utf-8")
 WINDOWS_CMAKE = (ROOT / "commet" / "windows" / "CMakeLists.txt").read_text(
     encoding="utf-8"
@@ -129,6 +132,12 @@ class CefHostContractTests(unittest.TestCase):
             "script_message",
         ):
             self.assertIn(token, SOURCE)
+
+    def test_matrix_protocol_vocabulary_stays_outside_cef_hosts(self) -> None:
+        for source in (SOURCE, RUST_HOST_SOURCE):
+            lowered = source.lower()
+            for token in ("matrix", "org.matrix", "chat.commet", "fromwidget", "towidget"):
+                self.assertNotIn(token, lowered)
 
     def test_bounded_recovery_and_observability_are_wired(self) -> None:
         for token in (
