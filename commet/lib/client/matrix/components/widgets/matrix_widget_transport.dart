@@ -23,8 +23,13 @@ class MatrixWidgetTransport implements WidgetMessageTransport {
 
   dynamic decodeArrayBuffers(dynamic input) {
     if (input is Map<String, dynamic>) {
-      if (input['__type'] == 'ArrayBuffer' && input['data'] is String) {
-        return base64Decode(input['data']);
+      final type = input['__type'];
+      final data = input['data'];
+      if (data is String && type == 'ArrayBuffer') {
+        return Uint8List.fromList(base64Decode(data));
+      }
+      if (data is String && type == 'Blob') {
+        return MatrixWidgetBlob(Uint8List.fromList(base64Decode(data)));
       }
 
       return input.map(
