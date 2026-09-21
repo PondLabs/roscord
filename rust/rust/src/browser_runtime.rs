@@ -20,6 +20,15 @@ pub use crate::browser_runtime_lifecycle::{
     RuntimeLifecycle, RuntimeState,
 };
 
+// Media and capture mediation shares the four-operation seam.  The decision
+// table lives in its own module so both hosts can share it without pulling
+// in CEF or portal types.
+pub use crate::browser_media::{
+    sanitized_permission_denied_message, CapturePortalOutcome, HostPermissionRegistry,
+    MediaCapability, MediaGrantScope, MediaGrantStore, MediaPolicyView, PendingPermissionRequest,
+    PermissionResolution, FAILURE_CAPTURE_DENIED, FAILURE_PERMISSION_DENIED,
+};
+
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_PROFILE_KEY_BYTES: usize = 256;
@@ -805,6 +814,8 @@ pub enum FailureKind {
     CertificateDenied,
     ClientCertificateDenied,
     PolicyViolation,
+    PermissionDenied,
+    CaptureDenied,
     MalformedMessage,
     OversizedMessage,
     UnknownMessage,

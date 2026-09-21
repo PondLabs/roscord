@@ -27,6 +27,7 @@
 #include <string>
 #include <string_view>
 #include <tchar.h>
+#include <tuple>
 #include <cwctype>
 #include <utility>
 #include <vector>
@@ -39,6 +40,7 @@
 #include "include/cef_dialog_handler.h"
 #include "include/cef_download_handler.h"
 #include "include/cef_life_span_handler.h"
+#include "include/cef_permission_handler.h"
 #include "include/cef_process_message.h"
 #include "include/cef_parser.h"
 #include "include/cef_render_handler.h"
@@ -1340,6 +1342,11 @@ struct NavigationPolicy {
   std::vector<std::string> allowed_origins;
   std::vector<std::string> allowed_loopback_origins;
   bool allow_external_navigation = false;
+  // Explicit capability flags from the surface policy.  Only the canonical
+  // media capability names are consulted by permission mediation; all other
+  // capability names stay in the Dart adapter and are never interpreted
+  // here.  A capability is enabled unless it is explicitly set to false.
+  std::map<std::string, bool> capabilities;
 };
 
 enum class NavigationDecision { InProcess, External, Cancel };
@@ -1450,6 +1457,27 @@ bool ParseNavigationPolicy(CefRefPtr<CefDictionaryValue> value,
   }
   policy.allow_external_navigation = external_type == VTYPE_BOOL &&
                                      value->GetBool("allow_external_navigation");
+  // Capability flags are optional routing data.  Only boolean entries are
+  // interpreted; anything else is ignored so a future capability shape
+  // cannot silently change mediation.
+  const auto capabilities_type = value->GetType("capabilities");
+  if (capabilities_type != VTYPE_DICTIONARY &&
+      capabilities_type != VTYPE_INVALID &&
+      capabilities_type != VTYPE_NULL) {
+    return false;
+  }
+  if (capabilities_type == VTYPE_DICTIONARY) {
+    const auto capabilities = value->GetDictionary("capabilities");
+    if (capabilities == nullptr) return false;
+    std::vector<CefString> capability_keys;
+    capabilities->GetKeys(capability_keys);
+    for (const auto& key : capability_keys) {
+      const std::string name = key.ToString();
+      if (name.empty()) return false;
+      if (capabilities->GetType(key) != VTYPE_BOOL) continue;
+      policy.capabilities[name] = capabilities->GetBool(key);
+    }
+  }
   return true;
 }
 
@@ -1483,8 +1511,8 @@ NavigationDecision EvaluateNavigation(const NavigationPolicy& policy,
     return NavigationDecision::Cancel;
   }
   return user_gesture && policy.allow_external_navigation
-             ? NavigationDecision::External
-             : NavigationDecision::Cancel;
+              ? NavigationDecision::External
+              : NavigationDecision::Cancel;
 }
 
 // --- Mediated file access (downloads, clipboard, uploads) -----------------
@@ -1631,12 +1659,101 @@ bool AllowStagedUpload(bool chooser_shown, bool user_confirmed) {
   return chooser_shown && user_confirmed;
 }
 
+// Media and capture permission mediation.  Access is deny-by-default and
+// fails closed through the qualified OS media path: every page request for
+// camera, microphone, or display capture arrives here, is checked against
+// scoped grants and current policy, and otherwise waits for an explicit app
+// decision.  The host never captures directly and never bypasses the OS.
+struct MediaGrantKey {
+  std::string profile_key;
+  std::string requesting_origin;
+  std::string top_level_origin;
+  std::string capability;
+
+  bool operator<(const MediaGrantKey& other) const {
+    return std::tie(profile_key, requesting_origin, top_level_origin,
+                    capability) <
+           std::tie(other.profile_key, other.requesting_origin,
+                    other.top_level_origin, other.capability);
+  }
+};
+
+enum class MediaGrantKind { Session, Persistent };
+
+struct PendingMediaRequest {
+  std::string request_id;
+  std::string requesting_origin;
+  std::string top_level_origin;
+  std::string capability;
+  uint32_t requested_permissions = 0;
+  CefRefPtr<CefMediaAccessCallback> callback;
+};
+
+std::string ClassifyMediaCapability(uint32_t requested_permissions) {
+  constexpr uint32_t kKnown =
+      CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE |
+      CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE |
+      CEF_MEDIA_PERMISSION_DESKTOP_AUDIO_CAPTURE |
+      CEF_MEDIA_PERMISSION_DESKTOP_VIDEO_CAPTURE;
+  if (requested_permissions == CEF_MEDIA_PERMISSION_NONE ||
+      (requested_permissions & ~kKnown) != 0) {
+    return "unknown_media";
+  }
+  const bool device_audio =
+      (requested_permissions & CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE) != 0;
+  const bool device_video =
+      (requested_permissions & CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE) != 0;
+  const bool desktop_audio =
+      (requested_permissions & CEF_MEDIA_PERMISSION_DESKTOP_AUDIO_CAPTURE) != 0;
+  const bool desktop_video =
+      (requested_permissions & CEF_MEDIA_PERMISSION_DESKTOP_VIDEO_CAPTURE) != 0;
+  if (desktop_audio || desktop_video) {
+    // Mixed device and desktop bits are never mapped to a grantable scope.
+    if (device_audio || device_video) return "unknown_media";
+    if (desktop_video && desktop_audio) return "display_video+display_audio";
+    if (desktop_video) return "display_video";
+    return "display_audio";
+  }
+  if (device_video && device_audio) return "camera+microphone";
+  if (device_video) return "camera";
+  return "microphone";
+}
+
+bool IsDisplayCapability(std::string_view capability) {
+  return capability == "display_video" || capability == "display_audio" ||
+         capability == "display_video+display_audio";
+}
+
+bool CapabilitySupportsPersistentGrant(std::string_view capability) {
+  return capability == "camera" || capability == "microphone" ||
+         capability == "camera+microphone";
+}
+
+bool PolicyCapabilityAllowed(const NavigationPolicy& policy,
+                             std::string_view capability) {
+  const auto iterator = policy.capabilities.find(std::string(capability));
+  return iterator == policy.capabilities.end() || iterator->second;
+}
+
+// Fixed sanitized denial text.  Failures never carry origins, paths, tokens,
+// or page contents.
+std::string_view SanitizedMediaDeniedMessage(std::string_view capability) {
+  if (IsDisplayCapability(capability)) {
+    return "display capture was denied; each request needs fresh consent";
+  }
+  if (capability == "unknown_media") {
+    return "media access was denied by policy";
+  }
+  return "camera or microphone access was denied by policy";
+}
+
 struct SurfaceState {
   uint64_t id = 0;
   std::string profile_key;
   uint64_t context_id = 0;
   CefRefPtr<CefRequestContext> request_context;
   std::string presentation;
+  std::string privacy;
   std::string initial_url;
   NavigationPolicy policy;
   int last_command_sequence = 0;
@@ -1668,6 +1785,8 @@ struct SurfaceState {
   };
   std::map<std::string, PendingUpload> pending_uploads;
   uint64_t next_upload_request = 1;
+  std::map<std::string, PendingMediaRequest> pending_media;
+  uint64_t next_media_request = 1;
 };
 
 class BrowserClient final : public CefClient,
@@ -1675,7 +1794,8 @@ class BrowserClient final : public CefClient,
                             public CefRenderHandler,
                             public CefRequestHandler,
                             public CefDownloadHandler,
-                            public CefDialogHandler {
+                            public CefDialogHandler,
+                            public CefPermissionHandler {
  public:
   BrowserClient(HostController* controller, uint64_t surface_id)
       : controller_(controller), surface_id_(surface_id) {}
@@ -1685,6 +1805,9 @@ class BrowserClient final : public CefClient,
   CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
   CefRefPtr<CefDialogHandler> GetDialogHandler() override { return this; }
+  CefRefPtr<CefPermissionHandler> GetPermissionHandler() override {
+    return this;
+  }
 
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override;
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override;
@@ -1723,6 +1846,21 @@ class BrowserClient final : public CefClient,
                      CefBrowserSettings& settings,
                      CefRefPtr<CefDictionaryValue>& extra_info,
                      bool* no_javascript_access) override;
+  bool OnRequestMediaAccessPermission(
+      CefRefPtr<CefBrowser> browser,
+      CefRefPtr<CefFrame> frame,
+      const CefString& requesting_origin,
+      uint32_t requested_permissions,
+      CefRefPtr<CefMediaAccessCallback> callback) override;
+  bool OnShowPermissionPrompt(
+      CefRefPtr<CefBrowser> browser,
+      uint64_t prompt_id,
+      const CefString& requesting_origin,
+      uint32_t requested_permissions,
+      CefRefPtr<CefPermissionPromptCallback> callback) override;
+  void OnDismissPermissionPrompt(CefRefPtr<CefBrowser> browser,
+                                 uint64_t prompt_id,
+                                 cef_permission_request_result_t result) override;
   void OnRenderProcessTerminated(CefRefPtr<CefBrowser> browser,
                                  TerminationStatus status,
                                  int error_code,
@@ -1827,6 +1965,19 @@ class HostController {
                                 CefRefPtr<CefDictionaryValue> command_payload);
   void CancelPendingFileAccess(uint64_t surface_id, std::string_view reason);
   void CancelAllPendingFileAccess(std::string_view reason);
+  bool OnMediaAccessRequested(uint64_t surface_id,
+                              CefRefPtr<CefBrowser> browser,
+                              std::string_view requesting_origin,
+                              uint32_t requested_permissions,
+                              CefRefPtr<CefMediaAccessCallback> callback);
+  void OnPermissionPrompt(uint64_t surface_id, uint64_t prompt_id,
+                          std::string_view requesting_origin);
+  void ResolveMediaDecision(uint64_t surface_id, int request_id,
+                            const std::string& permission_request_id,
+                            const std::string& decision);
+  void ResolveMediaOnUi(uint64_t surface_id, std::string request_id,
+                        bool allow, uint32_t allowed_permissions);
+  void CancelPendingMediaOnUi(uint64_t surface_id);
   void ExecuteScriptOnUi(uint64_t surface_id, int request_id,
                          CefRefPtr<CefDictionaryValue> envelope);
   void OnRendererFailure(uint64_t surface_id, std::string_view code,
@@ -1840,6 +1991,9 @@ class HostController {
       error = "profile is busy";
       return false;
     }
+    // Account browser state includes media grants: persistent camera and
+    // microphone grants do not survive clear-data.
+    ClearMediaGrants(profile_key);
     return profiles_.ClearData(profile_key, error);
   }
 
@@ -1874,6 +2028,14 @@ class HostController {
   void SendUploadRequest(uint64_t surface_id, std::string_view request_id,
                          bool multiple,
                          const std::vector<std::string>& accept);
+  void SendPermissionRequest(uint64_t surface_id, std::string_view request_id,
+                             std::string_view origin,
+                             std::string_view top_level_origin,
+                             std::string_view capability);
+  bool MediaGrantCovers(const SurfaceState& surface, const MediaGrantKey& key);
+  void RememberMediaGrant(const MediaGrantKey& key,
+                          const std::string& decision, bool is_private);
+  void ClearMediaGrants(std::string_view profile_key);
   void SendScriptComplete(uint64_t surface_id,
                           CefRefPtr<CefDictionaryValue> envelope,
                           std::string_view operation);
@@ -1887,6 +2049,10 @@ class HostController {
   std::mutex state_mutex_;
   std::mutex pipe_mutex_;
   std::map<uint64_t, SurfaceState> surfaces_;
+  // Scoped media grants: (account, requesting origin, top-level origin,
+  // capability) -> session or persistent.  Stored grants are re-checked
+  // against current policy on every use; display capture is never stored.
+  std::map<MediaGrantKey, MediaGrantKind> media_grants_;
   ProfileManager profiles_;
   uint64_t next_surface_id_ = 1;
   std::atomic<bool> stopping_ = false;
@@ -1969,6 +2135,31 @@ class ExecuteScriptTask final : public CefTask {
   int request_id_;
   CefRefPtr<CefDictionaryValue> envelope_;
   IMPLEMENT_REFCOUNTING(ExecuteScriptTask);
+};
+
+class ResolveMediaTask final : public CefTask {
+ public:
+  ResolveMediaTask(HostController* controller, uint64_t surface_id,
+                   std::string request_id, bool allow,
+                   uint32_t allowed_permissions)
+      : controller_(controller),
+        surface_id_(surface_id),
+        request_id_(std::move(request_id)),
+        allow_(allow),
+        allowed_permissions_(allowed_permissions) {}
+
+  void Execute() override {
+    controller_->ResolveMediaOnUi(surface_id_, std::move(request_id_), allow_,
+                                  allowed_permissions_);
+  }
+
+ private:
+  HostController* controller_;
+  uint64_t surface_id_;
+  std::string request_id_;
+  bool allow_;
+  uint32_t allowed_permissions_;
+  IMPLEMENT_REFCOUNTING(ResolveMediaTask);
 };
 
 CefRefPtr<CefDictionaryValue> Dictionary(CefRefPtr<CefValue> value) {
@@ -2198,6 +2389,37 @@ void HostController::SendDownloadRequest(uint64_t surface_id,
   event_payload->SetString("url", std::string(url));
   auto event = NewDictionary();
   event->SetString("type", "download_request");
+  event->SetDictionary("payload", event_payload);
+  auto payload = NewDictionary();
+  payload->SetDictionary("event", event);
+  auto wire = NewDictionary();
+  wire->SetString("type", "event");
+  wire->SetDictionary("payload", payload);
+  SendMessage(wire);
+}
+
+void HostController::SendPermissionRequest(uint64_t surface_id,
+                                              std::string_view request_id,
+                                              std::string_view origin,
+                                              std::string_view top_level_origin,
+                                              std::string_view capability) {
+  uint64_t sequence = 0;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return;
+    sequence = iterator->second.next_event_sequence++;
+  }
+  auto event_payload = NewDictionary();
+  event_payload->SetInt("surface_id", static_cast<int>(surface_id));
+  event_payload->SetInt("sequence", static_cast<int>(sequence));
+  event_payload->SetString("request_id", std::string(request_id));
+  event_payload->SetString("origin", std::string(origin));
+  event_payload->SetString("top_level_origin", std::string(top_level_origin));
+  event_payload->SetString("capability", std::string(capability));
+  event_payload->SetBool("user_gesture", false);
+  auto event = NewDictionary();
+  event->SetString("type", "permission_request");
   event->SetDictionary("payload", event_payload);
   auto payload = NewDictionary();
   payload->SetDictionary("event", event);
@@ -2454,6 +2676,267 @@ bool HostController::ResolveFileAccessCommand(
     // the handoff so no persistent grant remains.
   }
   return true;
+}
+
+bool HostController::MediaGrantCovers(const SurfaceState& surface,
+                                      const MediaGrantKey& key) {
+  // Display capture always needs fresh source consent; stored grants never
+  // satisfy it.  Unknown capabilities are never grantable.
+  if (IsDisplayCapability(key.capability) ||
+      !CapabilitySupportsPersistentGrant(key.capability)) {
+    return false;
+  }
+  const auto grant = media_grants_.find(key);
+  if (grant == media_grants_.end()) return false;
+  if (grant->second == MediaGrantKind::Persistent &&
+      surface.privacy == "private") {
+    return false;
+  }
+  // Every use re-checks current policy: both origins must still be declared
+  // and the capability must still be enabled.  The OS-level check is the
+  // qualified Windows media path itself, which mediates synchronously when
+  // the host continues the request; a grant never bypasses it.
+  if (!PolicyCapabilityAllowed(surface.policy, key.capability)) return false;
+  return PolicyAllowsInProcess(surface.policy, key.requesting_origin) &&
+         PolicyAllowsInProcess(surface.policy, key.top_level_origin);
+}
+
+void HostController::RememberMediaGrant(const MediaGrantKey& key,
+                                        const std::string& decision,
+                                        bool is_private) {
+  if (decision == "deny") {
+    media_grants_.erase(key);
+    return;
+  }
+  if (decision == "allow_once") return;
+  if (decision == "allow_session") {
+    media_grants_[key] = MediaGrantKind::Session;
+    return;
+  }
+  if (decision == "allow_always") {
+    if (!CapabilitySupportsPersistentGrant(key.capability)) {
+      // Display capture (and anything unclassifiable) always needs fresh
+      // consent: the pending request may proceed once, but nothing is
+      // stored for the next request.
+      return;
+    }
+    media_grants_[key] =
+        is_private ? MediaGrantKind::Session : MediaGrantKind::Persistent;
+  }
+}
+
+void HostController::ClearMediaGrants(std::string_view profile_key) {
+  for (auto iterator = media_grants_.begin();
+       iterator != media_grants_.end();) {
+    if (iterator->first.profile_key == profile_key) {
+      iterator = media_grants_.erase(iterator);
+    } else {
+      ++iterator;
+    }
+  }
+}
+
+bool HostController::OnMediaAccessRequested(
+    uint64_t surface_id, CefRefPtr<CefBrowser> browser,
+    std::string_view requesting_origin, uint32_t requested_permissions,
+    CefRefPtr<CefMediaAccessCallback> callback) {
+  CEF_REQUIRE_UI_THREAD();
+  if (callback == nullptr) return true;
+  const std::string capability = ClassifyMediaCapability(requested_permissions);
+  std::string top_level_origin;
+  if (browser != nullptr && browser->GetMainFrame() != nullptr) {
+    const auto top_origin =
+        UrlOrigin(browser->GetMainFrame()->GetURL().ToString());
+    if (top_origin.has_value()) top_level_origin = *top_origin;
+  }
+  std::string profile_key;
+  NavigationPolicy policy;
+  bool has_surface = false;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator != surfaces_.end()) {
+      profile_key = iterator->second.profile_key;
+      policy = iterator->second.policy;
+      has_surface = true;
+    }
+  }
+  if (!has_surface || top_level_origin.empty() ||
+      !PolicyCapabilityAllowed(policy, capability) ||
+      !PolicyAllowsInProcess(policy, requesting_origin) ||
+      !PolicyAllowsInProcess(policy, top_level_origin)) {
+    // Deny-by-default: unknown surfaces, undeclared origins, disabled
+    // capabilities, and unclassifiable requests never reach the app.
+    callback->Cancel();
+    if (has_surface) {
+      SendSurfaceFailure(surface_id, "permission_denied",
+                         SanitizedMediaDeniedMessage(capability));
+    }
+    return true;
+  }
+  const MediaGrantKey key{profile_key, std::string(requesting_origin),
+                          top_level_origin, capability};
+  std::string request_id;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) {
+      callback->Cancel();
+      return true;
+    }
+    if (MediaGrantCovers(iterator->second, key)) {
+      // A stored grant covers this exact scope under current policy: the
+      // qualified OS media path still mediates the actual capture when the
+      // host continues the request.
+      callback->Continue(requested_permissions);
+      return true;
+    }
+    request_id = "media-" + std::to_string(surface_id) + "-" +
+                 std::to_string(iterator->second.next_media_request++);
+    iterator->second.pending_media.emplace(
+        request_id,
+        PendingMediaRequest{request_id, std::string(requesting_origin),
+                            top_level_origin, capability, requested_permissions,
+                            callback});
+  }
+  SendPermissionRequest(surface_id, request_id, requesting_origin,
+                        top_level_origin, capability);
+  return true;
+}
+
+void HostController::OnPermissionPrompt(uint64_t surface_id,
+                                        uint64_t prompt_id,
+                                        std::string_view requesting_origin) {
+  (void)prompt_id;
+  (void)requesting_origin;
+  // Generic permission prompts (geolocation, notifications, and similar)
+  // are always denied: there is no grant store for them and no bypass.
+  SendSurfaceFailure(surface_id, "permission_denied",
+                     "permission prompt was denied by policy");
+}
+
+void HostController::ResolveMediaDecision(
+    uint64_t surface_id, int request_id,
+    const std::string& permission_request_id, const std::string& decision) {
+  // The pending entry stays alive until the UI task consumes it, so a close
+  // racing the decision still cancels exactly once via
+  // CancelPendingMediaOnUi.
+  bool found_surface = false;
+  bool found_pending = false;
+  bool allow = false;
+  uint32_t requested_permissions = 0;
+  std::string failure_kind;
+  std::string failure_message;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto surface = surfaces_.find(surface_id);
+    if (surface == surfaces_.end()) {
+      found_surface = false;
+    } else {
+      found_surface = true;
+      const auto pending =
+          surface->second.pending_media.find(permission_request_id);
+      if (pending == surface->second.pending_media.end()) {
+        found_pending = false;
+      } else {
+        found_pending = true;
+        const MediaGrantKey key{surface->second.profile_key,
+                                pending->second.requesting_origin,
+                                pending->second.top_level_origin,
+                                pending->second.capability};
+        requested_permissions = pending->second.requested_permissions;
+        const bool is_private = surface->second.privacy == "private";
+        // Every decision re-checks current policy before anything is stored
+        // or continued: origins may have left the policy while the prompt
+        // was open.
+        const bool policy_current =
+            PolicyCapabilityAllowed(surface->second.policy,
+                                    pending->second.capability) &&
+            PolicyAllowsInProcess(surface->second.policy,
+                                  pending->second.requesting_origin) &&
+            PolicyAllowsInProcess(surface->second.policy,
+                                  pending->second.top_level_origin);
+        const std::string capability = pending->second.capability;
+        if (decision == "deny") {
+          RememberMediaGrant(key, "deny", is_private);
+          failure_kind = "permission_denied";
+          failure_message = std::string(SanitizedMediaDeniedMessage(capability));
+        } else if (!policy_current || capability == "unknown_media") {
+          // Policy drift denies without revoking the stored scope: the
+          // grant simply does not apply until the policy declares the
+          // origins again.  Unknown capabilities are never grantable.
+          failure_kind = "permission_denied";
+          failure_message = std::string(SanitizedMediaDeniedMessage(capability));
+        } else {
+          if (IsDisplayCapability(capability)) {
+            // Display allow_always degrades to once: proceed once, store
+            // nothing for the next request.
+            RememberMediaGrant(
+                key, decision == "allow_always" ? "allow_once" : decision,
+                is_private);
+          } else {
+            RememberMediaGrant(key, decision, is_private);
+          }
+          allow = true;
+        }
+      }
+    }
+  }
+  if (!found_surface) {
+    SendError(request_id, "stale_surface", "surface id is not active");
+    return;
+  }
+  if (!found_pending) {
+    SendError(request_id, "unknown_permission_request",
+              "permission request is not pending");
+    return;
+  }
+  if (!failure_kind.empty()) {
+    SendSurfaceFailure(surface_id, failure_kind, failure_message);
+  }
+  CefTaskRunner::GetForThread(TID_UI)->PostTask(new ResolveMediaTask(
+      this, surface_id, permission_request_id, allow, requested_permissions));
+}
+
+void HostController::ResolveMediaOnUi(uint64_t surface_id,
+                                       std::string request_id, bool allow,
+                                       uint32_t allowed_permissions) {
+  CEF_REQUIRE_UI_THREAD();
+  CefRefPtr<CefMediaAccessCallback> callback;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto surface = surfaces_.find(surface_id);
+    if (surface == surfaces_.end()) {
+      // The surface closed first; CancelPendingMediaOnUi already canceled
+      // every pending callback.  Fail closed: do nothing.
+      return;
+    }
+    const auto pending = surface->second.pending_media.find(request_id);
+    if (pending == surface->second.pending_media.end()) {
+      // Already canceled on close.  Fail closed: do nothing.
+      return;
+    }
+    callback = pending->second.callback;
+    surface->second.pending_media.erase(pending);
+  }
+  if (callback == nullptr) return;
+  if (allow) {
+    callback->Continue(allowed_permissions);
+  } else {
+    callback->Cancel();
+  }
+}
+
+void HostController::CancelPendingMediaOnUi(uint64_t surface_id) {
+  CEF_REQUIRE_UI_THREAD();
+  std::lock_guard lock(state_mutex_);
+  const auto iterator = surfaces_.find(surface_id);
+  if (iterator == surfaces_.end()) return;
+  for (auto& [request_id, pending] : iterator->second.pending_media) {
+    (void)request_id;
+    if (pending.callback != nullptr) pending.callback->Cancel();
+  }
+  iterator->second.pending_media.clear();
 }
 
 void HostController::SendScriptMessage(
@@ -2776,6 +3259,7 @@ bool HostController::HandleOpen(CefRefPtr<CefDictionaryValue> payload) {
       surface.context_id = context_id;
       surface.request_context = request_context;
       surface.presentation = presentation;
+      surface.privacy = privacy;
       surface.initial_url = url;
       surface.policy = policy;
       surfaces_.emplace(surface.id, surface);
@@ -2914,6 +3398,26 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
     popup_request_id = command_payload->GetString("request_id").ToString();
     popup_action = command_payload->GetString("action").ToString();
   }
+  std::string permission_request_id;
+  std::string permission_decision;
+  if (command_type == "permission") {
+    if (command_payload->GetType("request_id") != VTYPE_STRING ||
+        command_payload->GetType("decision") != VTYPE_STRING) {
+      SendError(request_id, "invalid_command", "permission command is malformed");
+      return false;
+    }
+    permission_request_id =
+        command_payload->GetString("request_id").ToString();
+    permission_decision = command_payload->GetString("decision").ToString();
+    if (permission_request_id.empty() ||
+        (permission_decision != "deny" &&
+         permission_decision != "allow_once" &&
+         permission_decision != "allow_session" &&
+         permission_decision != "allow_always")) {
+      SendError(request_id, "invalid_command", "permission decision is invalid");
+      return false;
+    }
+  }
   CefRefPtr<CefDictionaryValue> script_envelope;
   std::string script_operation;
   if (command_type == "script") {
@@ -3032,6 +3536,11 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
     } else {
       SendNavigation(surface_id, pending_popup.url, "new_surface", "cancelled");
     }
+    return true;
+  }
+  if (command_type == "permission") {
+    ResolveMediaDecision(surface_id, request_id, permission_request_id,
+                         permission_decision);
     return true;
   }
   if (command_type == "script") {
@@ -3190,6 +3699,9 @@ void HostController::OnBrowserClosed(uint64_t surface_id) {
   CEF_REQUIRE_UI_THREAD();
   // Closing a surface terminally cancels its pending file-access requests.
   CancelPendingFileAccess(surface_id, "close");
+  // Pending media callbacks belong to the dead surface: cancel them before
+  // the surface state is erased so a late app decision can never grant them.
+  CancelPendingMediaOnUi(surface_id);
   bool was_active = false;
   std::optional<uint64_t> context_id;
   uint64_t close_sequence = 2;
@@ -3396,6 +3908,49 @@ bool BrowserClient::OnFileDialog(
   for (const auto& filter : accept_filters) accept.push_back(filter.ToString());
   controller_->OnUploadRequested(surface_id_, false, accept);
   return true;
+}
+
+bool BrowserClient::OnRequestMediaAccessPermission(
+    CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+    const CefString& requesting_origin, uint32_t requested_permissions,
+    CefRefPtr<CefMediaAccessCallback> callback) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)frame;
+  // Always return true: the host mediates every media request and never
+  // falls through to default handling (which would show unowned Chrome UI).
+  // Deny-by-default lives in OnMediaAccessRequested; unregistered requests
+  // are canceled there.
+  return controller_->OnMediaAccessRequested(
+      surface_id_, browser, requesting_origin.ToString(), requested_permissions,
+      callback);
+}
+
+bool BrowserClient::OnShowPermissionPrompt(
+    CefRefPtr<CefBrowser> browser, uint64_t prompt_id,
+    const CefString& requesting_origin, uint32_t requested_permissions,
+    CefRefPtr<CefPermissionPromptCallback> callback) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)browser;
+  (void)requested_permissions;
+  // Generic permission prompts are always denied synchronously: there is no
+  // grant store for them and no bypass.  The denial is reported once here;
+  // dismissal needs no second event.
+  if (callback != nullptr) callback->Continue(CEF_PERMISSION_RESULT_DENY);
+  controller_->OnPermissionPrompt(surface_id_, prompt_id,
+                                  requesting_origin.ToString());
+  return true;
+}
+
+void BrowserClient::OnDismissPermissionPrompt(
+    CefRefPtr<CefBrowser> browser, uint64_t prompt_id,
+    cef_permission_request_result_t result) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)browser;
+  (void)prompt_id;
+  (void)result;
+  // Denials are already reported synchronously in OnShowPermissionPrompt, so
+  // dismissal carries no additional event.  The handler exists to document
+  // that dismissal can never grant: the prompt outcome was already deny.
 }
 
 bool BrowserClient::OnProcessMessageReceived(

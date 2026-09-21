@@ -343,6 +343,451 @@ void main() {
           .having((message) => message.requestId, 'id', 7),
     );
   });
+
+  test('classifies media capabilities exactly and fails closed', () {
+    expect(MediaCapability.classify('camera'), MediaCapability.camera);
+    expect(MediaCapability.classify('microphone'), MediaCapability.microphone);
+    expect(
+      MediaCapability.classify('display_video'),
+      MediaCapability.displayVideo,
+    );
+    expect(
+      MediaCapability.classify('display_audio'),
+      MediaCapability.displayAudio,
+    );
+    for (final foreign in [
+      'Camera',
+      'camera ',
+      ' screen',
+      'geolocation',
+      '',
+      'display',
+    ]) {
+      expect(MediaCapability.classify(foreign), MediaCapability.unknown);
+    }
+    expect(MediaCapability.camera.supportsPersistentGrant, isTrue);
+    expect(MediaCapability.microphone.supportsPersistentGrant, isTrue);
+    expect(MediaCapability.displayVideo.supportsPersistentGrant, isFalse);
+    expect(MediaCapability.displayAudio.supportsPersistentGrant, isFalse);
+    expect(MediaCapability.unknown.supportsPersistentGrant, isFalse);
+    expect(MediaCapability.displayVideo.isDisplay, isTrue);
+    expect(MediaCapability.camera.isDisplay, isFalse);
+    expect(
+      () => MediaGrantScope(
+        profileKey: ProfileKey('account-a'),
+        requestingOrigin: 'https://widget.test',
+        topLevelOrigin: 'https://shell.test',
+        capability: MediaCapability.unknown,
+      ),
+      throwsA(isA<BrowserRuntimeException>()),
+    );
+  });
+
+  test('media grants support deny, once, session, and scoped persistence',
+      () {
+    final store = MediaGrantStore();
+    final scope = MediaGrantScope(
+      profileKey: ProfileKey('account-a'),
+      requestingOrigin: 'https://widget.test',
+      topLevelOrigin: 'https://shell.test',
+      capability: MediaCapability.camera,
+    );
+    const policyOrigins = ['https://widget.test', 'https://shell.test'];
+
+    bool covers() => store.takeGrant(
+          scope,
+          policyOrigins: policyOrigins,
+          capabilityAllowed: true,
+          osMediated: true,
+          privateContext: false,
+        );
+
+    // Deny-by-default.
+    expect(covers(), isFalse);
+
+    // Once applies to the pending request only.
+    expect(
+      store.remember(scope, PermissionDecision.allowOnce,
+          privateContext: false),
+      isFalse,
+    );
+    expect(store.length, 0);
+    expect(covers(), isFalse);
+
+    // Session grants apply while the session lives.
+    expect(
+      store.remember(scope, PermissionDecision.allowSession,
+          privateContext: false),
+      isTrue,
+    );
+    expect(covers(), isTrue);
+
+    // An explicit deny revokes the stored grant.
+    expect(
+      store.remember(scope, PermissionDecision.deny, privateContext: false),
+      isFalse,
+    );
+    expect(covers(), isFalse);
+
+    // Persistent grants apply across surfaces of the same scope.
+    expect(
+      store.remember(scope, PermissionDecision.allowAlways,
+          privateContext: false),
+      isTrue,
+    );
+    expect(covers(), isTrue);
+  });
+
+  test('media grants are scoped and rechecked on every use', () {
+    final store = MediaGrantStore();
+    final scope = MediaGrantScope(
+      profileKey: ProfileKey('account-a'),
+      requestingOrigin: 'https://widget.test',
+      topLevelOrigin: 'https://shell.test',
+      capability: MediaCapability.camera,
+    );
+    store.remember(scope, PermissionDecision.allowAlways,
+        privateContext: false);
+    const policyOrigins = ['https://widget.test', 'https://shell.test'];
+
+    MediaGrantScope other({
+      String account = 'account-a',
+      String requesting = 'https://widget.test',
+      String top = 'https://shell.test',
+      MediaCapability capability = MediaCapability.camera,
+    }) =>
+        MediaGrantScope(
+          profileKey: ProfileKey(account),
+          requestingOrigin: requesting,
+          topLevelOrigin: top,
+          capability: capability,
+        );
+
+    bool coversScope(MediaGrantScope candidate,
+            {List<String> origins = policyOrigins,
+            bool capabilityAllowed = true,
+            bool osMediated = true,
+            bool privateContext = false}) =>
+        store.takeGrant(
+          candidate,
+          policyOrigins: origins,
+          capabilityAllowed: capabilityAllowed,
+          osMediated: osMediated,
+          privateContext: privateContext,
+        );
+
+    // A different account, requesting origin, top-level origin, or
+    // capability must not inherit the grant.
+    expect(coversScope(other(account: 'account-b')), isFalse);
+    expect(
+      coversScope(other(requesting: 'https://evil.test'),
+          origins: ['https://evil.test', 'https://shell.test']),
+      isFalse,
+    );
+    expect(
+      coversScope(other(top: 'https://other.test'),
+          origins: ['https://widget.test', 'https://other.test']),
+      isFalse,
+    );
+    expect(
+        coversScope(other(capability: MediaCapability.microphone)), isFalse);
+
+    // Every use rechecks current policy and OS mediation.
+    expect(coversScope(scope), isTrue);
+    expect(coversScope(scope, origins: ['https://shell.test']), isFalse);
+    expect(coversScope(scope, capabilityAllowed: false), isFalse);
+    expect(coversScope(scope, osMediated: false), isFalse);
+  });
+
+  test('display capture always needs fresh consent', () {
+    final store = MediaGrantStore();
+    const policyOrigins = ['https://widget.test', 'https://shell.test'];
+    for (final capability in [
+      MediaCapability.displayVideo,
+      MediaCapability.displayAudio,
+      MediaCapability.displayVideoAndAudio,
+    ]) {
+      final scope = MediaGrantScope(
+        profileKey: ProfileKey('account-a'),
+        requestingOrigin: 'https://widget.test',
+        topLevelOrigin: 'https://shell.test',
+        capability: capability,
+      );
+      // Even allowAlways stores nothing for display capture.
+      expect(
+        store.remember(scope, PermissionDecision.allowAlways,
+            privateContext: false),
+        isFalse,
+      );
+      expect(
+        store.takeGrant(
+          scope,
+          policyOrigins: policyOrigins,
+          capabilityAllowed: true,
+          osMediated: true,
+          privateContext: false,
+        ),
+        isFalse,
+      );
+    }
+  });
+
+  test('private contexts never hold persistent media grants', () {
+    final store = MediaGrantStore();
+    final scope = MediaGrantScope(
+      profileKey: ProfileKey('account-a'),
+      requestingOrigin: 'https://widget.test',
+      topLevelOrigin: 'https://shell.test',
+      capability: MediaCapability.camera,
+    );
+    const policyOrigins = ['https://widget.test', 'https://shell.test'];
+    expect(
+      store.remember(scope, PermissionDecision.allowAlways,
+          privateContext: true),
+      isTrue,
+    );
+    // The session grant applies while the session lives ...
+    expect(
+      store.takeGrant(
+        scope,
+        policyOrigins: policyOrigins,
+        capabilityAllowed: true,
+        osMediated: true,
+        privateContext: true,
+      ),
+      isTrue,
+    );
+    // ... but evaporates with the session and is not persistent.
+    store.clearSession();
+    expect(
+      store.takeGrant(
+        scope,
+        policyOrigins: policyOrigins,
+        capabilityAllowed: true,
+        osMediated: true,
+        privateContext: true,
+      ),
+      isFalse,
+    );
+
+    store.remember(scope, PermissionDecision.allowAlways,
+        privateContext: false);
+    store.clearProfile(ProfileKey('account-a'));
+    expect(store.length, 0);
+  });
+
+  test('portal outcomes deny the page with sanitized events', () {
+    for (final outcome in [
+      CapturePortalOutcome.denied,
+      CapturePortalOutcome.dismissed,
+      CapturePortalOutcome.timedOut,
+      CapturePortalOutcome.disconnected,
+      CapturePortalOutcome.unsupported,
+    ]) {
+      expect(outcome.deniesPage, isTrue);
+      final message = outcome.sanitizedMessage;
+      expect(message, isNotEmpty);
+      expect(message.toLowerCase(), isNot(contains('https://')));
+      expect(message.toLowerCase(), isNot(contains('token')));
+      expect(message, isNot(contains('/')));
+    }
+    expect(CapturePortalOutcome.parse('granted'),
+        CapturePortalOutcome.granted);
+    expect(CapturePortalOutcome.granted.deniesPage, isFalse);
+    expect(CapturePortalOutcome.parse('bogus'), isNull);
+    expect(
+      sanitizedPermissionDeniedMessage(MediaCapability.displayVideo),
+      contains('fresh consent'),
+    );
+  });
+
+  MediaPolicyView policyView({bool privateContext = false}) {
+    return MediaPolicyView(
+      origins: const ['https://widget.test', 'https://shell.test'],
+      capabilityAllowed: true,
+      privateContext: privateContext,
+      osMediated: true,
+    );
+  }
+
+  SurfaceId registerCamera(HostPermissionRegistry registry, String request) {
+    final surface = SurfaceId(1);
+    expect(
+      registry.register(
+        surfaceId: surface,
+        profileKey: ProfileKey('account-a'),
+        requestId: request,
+        requestingOrigin: 'https://widget.test',
+        topLevelOrigin: 'https://shell.test',
+        capabilityName: 'camera',
+      ),
+      MediaCapability.camera,
+    );
+    return surface;
+  }
+
+  test('permission registry rejects replays and unknown requests', () {
+    final registry = HostPermissionRegistry(portalMediationRequired: false);
+    registerCamera(registry, 'media-1');
+    expect(
+      () => registerCamera(registry, 'media-1'),
+      throwsA(isA<BrowserRuntimeException>()),
+    );
+    expect(
+      () => registry.resolve(
+          'media-missing', PermissionDecision.allowAlways, policyView()),
+      throwsA(isA<BrowserRuntimeException>()),
+    );
+    expect(registry.pendingCount, 1);
+  });
+
+  test('permission registry denies unknown capabilities with a failure', () {
+    final registry = HostPermissionRegistry(portalMediationRequired: false);
+    expect(
+      registry.register(
+        surfaceId: const SurfaceId(2),
+        profileKey: ProfileKey('account-a'),
+        requestId: 'media-foreign',
+        requestingOrigin: 'https://widget.test',
+        topLevelOrigin: 'https://shell.test',
+        capabilityName: 'geolocation',
+      ),
+      MediaCapability.unknown,
+    );
+    final resolution = registry.resolve(
+        'media-foreign', PermissionDecision.allowAlways, policyView());
+    expect(resolution.grantedOnce, isFalse);
+    expect(resolution.stored, isFalse);
+    expect(resolution.failure!.kind, FailureKind.permissionDenied);
+    expect(resolution.failure!.message, isNot(contains('https://')));
+  });
+
+  test('permission registry auto-covers session grants', () {
+    final registry = HostPermissionRegistry(portalMediationRequired: false);
+    registerCamera(registry, 'media-1');
+    final first = registry.resolve(
+        'media-1', PermissionDecision.allowSession, policyView());
+    expect(first.grantedOnce, isTrue);
+    expect(first.stored, isTrue);
+    expect(first.failure, isNull);
+
+    registerCamera(registry, 'media-2');
+    expect(
+      registry.storedGrantCovers(
+        surfaceId: const SurfaceId(1),
+        profileKey: ProfileKey('account-a'),
+        requestingOrigin: 'https://widget.test',
+        topLevelOrigin: 'https://shell.test',
+        capabilityName: 'camera',
+        policy: policyView(),
+      ),
+      isTrue,
+    );
+  });
+
+  test('permission registry mediates display capture through the portal', () {
+    final registry = HostPermissionRegistry(portalMediationRequired: true);
+    registry.register(
+      surfaceId: const SurfaceId(1),
+      profileKey: ProfileKey('account-a'),
+      requestId: 'media-display-1',
+      requestingOrigin: 'https://widget.test',
+      topLevelOrigin: 'https://shell.test',
+      capabilityName: 'display_video',
+    );
+    // Stored grants never cover display capture ...
+    expect(
+      registry.storedGrantCovers(
+        surfaceId: const SurfaceId(1),
+        profileKey: ProfileKey('account-a'),
+        requestingOrigin: 'https://widget.test',
+        topLevelOrigin: 'https://shell.test',
+        capabilityName: 'display_video',
+        policy: policyView(),
+      ),
+      isFalse,
+    );
+    // ... and without the portal grant the app decision cannot proceed.
+    final blocked = registry.resolve(
+        'media-display-1', PermissionDecision.allowOnce, policyView());
+    expect(blocked.grantedOnce, isFalse);
+    expect(blocked.failure!.kind, FailureKind.captureDenied);
+
+    registry.register(
+      surfaceId: const SurfaceId(1),
+      profileKey: ProfileKey('account-a'),
+      requestId: 'media-display-2',
+      requestingOrigin: 'https://widget.test',
+      topLevelOrigin: 'https://shell.test',
+      capabilityName: 'display_video',
+    );
+    final (surface, portalFailure) = registry.reportPortalOutcome(
+        'media-display-2', CapturePortalOutcome.granted);
+    expect(surface, const SurfaceId(1));
+    expect(portalFailure, isNull);
+    final granted = registry.resolve(
+        'media-display-2', PermissionDecision.allowAlways, policyView());
+    expect(granted.grantedOnce, isTrue);
+    expect(granted.stored, isFalse);
+    expect(granted.failure, isNull);
+  });
+
+  test('permission registry reports every portal failure sanitized', () {
+    for (final outcome in [
+      CapturePortalOutcome.denied,
+      CapturePortalOutcome.dismissed,
+      CapturePortalOutcome.timedOut,
+      CapturePortalOutcome.disconnected,
+      CapturePortalOutcome.unsupported,
+    ]) {
+      final registry = HostPermissionRegistry(portalMediationRequired: true);
+      registry.register(
+        surfaceId: const SurfaceId(3),
+        profileKey: ProfileKey('account-a'),
+        requestId: 'media-display',
+        requestingOrigin: 'https://widget.test',
+        topLevelOrigin: 'https://shell.test',
+        capabilityName: 'display_video',
+      );
+      final (surface, failure) =
+          registry.reportPortalOutcome('media-display', outcome);
+      expect(surface, const SurfaceId(3));
+      expect(failure!.kind, FailureKind.captureDenied);
+      expect(failure.message, outcome.sanitizedMessage);
+      expect(
+        () => registry.resolve(
+            'media-display', PermissionDecision.allowOnce, policyView()),
+        throwsA(isA<BrowserRuntimeException>()),
+      );
+    }
+  });
+
+  test('permission registry drops pending requests with the surface', () {
+    final registry = HostPermissionRegistry(portalMediationRequired: false);
+    registerCamera(registry, 'media-1');
+    registry.removeSurface(const SurfaceId(1));
+    expect(registry.pendingCount, 0);
+    expect(
+      () => registry.resolve(
+          'media-1', PermissionDecision.allowOnce, policyView()),
+      throwsA(isA<BrowserRuntimeException>()),
+    );
+  });
+
+  test('permission_denied and capture_denied round-trip on the wire', () {
+    for (final kind in [
+      FailureKind.permissionDenied,
+      FailureKind.captureDenied,
+    ]) {
+      final failure = SurfaceFailure(kind, 'sanitized');
+      final decoded = SurfaceFailure.fromJson(
+        Map<String, dynamic>.from(
+          jsonDecode(jsonEncode(failure.toJson())) as Map,
+        ),
+      );
+      expect(decoded.kind, kind);
+    }
+  });
 }
 
 Uint8List _frame(List<int> body) {
