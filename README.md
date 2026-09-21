@@ -59,6 +59,9 @@ rules, and validation-only fault controls are documented in
 Account profile sharing, private contexts, clear-data transitions, and
 migration quarantine are documented in
 [`docs/cef-browser-runtime-profiles.md`](docs/cef-browser-runtime-profiles.md).
+Navigation, certificate, redirect, external-routing, and popup policy are
+documented in
+[`docs/cef-browser-runtime-navigation.md`](docs/cef-browser-runtime-navigation.md).
 
 ### 1. [Install Flutter](https://docs.flutter.dev/get-started/install)
 

@@ -6,6 +6,7 @@ SurfaceSpec _spec() => SurfaceSpec(
       presentation: PresentationMode.embedded,
       privacy: PrivacyMode.persistent,
       initialNavigation: NavigationRequest(url: 'https://widget.test/index'),
+      policy: SurfacePolicy(allowedOrigins: ['https://widget.test']),
     );
 
 void main() {

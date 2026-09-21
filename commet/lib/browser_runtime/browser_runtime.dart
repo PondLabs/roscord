@@ -18,6 +18,9 @@ enum BrowserRuntimeErrorCode {
   profileCorrupt,
   profileUnavailable,
   migrationFailed,
+  certificateDenied,
+  clientCertificateDenied,
+  policyViolation,
   protocol,
 }
 
@@ -138,20 +141,23 @@ class NavigationRequest {
 
 class SurfacePolicy {
   final List<String> allowedOrigins;
+  final List<String> allowedLoopbackOrigins;
+  final bool allowExternalNavigation;
   final Map<String, bool> capabilities;
 
   SurfacePolicy({
     Iterable<String> allowedOrigins = const [],
+    Iterable<String> allowedLoopbackOrigins = const [],
+    this.allowExternalNavigation = false,
     Map<String, bool> capabilities = const {},
   })  : allowedOrigins = List.unmodifiable(allowedOrigins),
+        allowedLoopbackOrigins = List.unmodifiable(allowedLoopbackOrigins),
         capabilities = Map.unmodifiable(capabilities) {
-    if (this.allowedOrigins.any(
-          (origin) => origin.isEmpty || origin.runes.any((rune) => rune < 0x20),
-        )) {
-      throw const BrowserRuntimeException(
-        BrowserRuntimeErrorCode.invalidSpec,
-        'policy contains an invalid origin',
-      );
+    for (final origin in this.allowedOrigins) {
+      _validateDeclaredOrigin(origin, loopback: false);
+    }
+    for (final origin in this.allowedLoopbackOrigins) {
+      _validateDeclaredOrigin(origin, loopback: true);
     }
     if (this.capabilities.keys.any(
           (capability) =>
@@ -166,10 +172,14 @@ class SurfacePolicy {
 
   const SurfacePolicy._empty()
       : allowedOrigins = const [],
+        allowedLoopbackOrigins = const [],
+        allowExternalNavigation = false,
         capabilities = const {};
 
   Map<String, Object?> toJson() => {
         'allowed_origins': allowedOrigins,
+        'allowed_loopback_origins': allowedLoopbackOrigins,
+        'allow_external_navigation': allowExternalNavigation,
         'capabilities': capabilities,
       };
 
@@ -177,20 +187,45 @@ class SurfacePolicy {
     final origins = (json['allowed_origins'] as List<dynamic>? ?? const []).map(
       (value) => value as String,
     );
+    final loopbackOrigins =
+        (json['allowed_loopback_origins'] as List<dynamic>? ?? const []).map(
+      (value) => value as String,
+    );
     final capabilities = Map<String, bool>.from(
       (json['capabilities'] as Map<dynamic, dynamic>? ?? const {}).map(
         (key, value) => MapEntry(key as String, value as bool),
       ),
     );
-    return SurfacePolicy(allowedOrigins: origins, capabilities: capabilities);
+    return SurfacePolicy(
+      allowedOrigins: origins,
+      allowedLoopbackOrigins: loopbackOrigins,
+      allowExternalNavigation:
+          json['allow_external_navigation'] as bool? ?? false,
+      capabilities: capabilities,
+    );
   }
 
   bool allowsUrl(String url) {
-    if (allowedOrigins.isEmpty) return true;
     final origin = _urlOrigin(url);
-    return origin != null && allowedOrigins.contains(origin);
+    if (_isControlledFixture(url)) return true;
+    return origin != null &&
+        [...allowedOrigins, ...allowedLoopbackOrigins].contains(origin);
+  }
+
+  NavigationPolicyDecision navigationDecision(NavigationRequest navigation) {
+    if (navigation.disposition == NavigationDisposition.external) {
+      return navigation.userInitiated && allowExternalNavigation
+          ? NavigationPolicyDecision.external
+          : NavigationPolicyDecision.blocked;
+    }
+    if (allowsUrl(navigation.url)) return NavigationPolicyDecision.inProcess;
+    return navigation.userInitiated && allowExternalNavigation
+        ? NavigationPolicyDecision.external
+        : NavigationPolicyDecision.blocked;
   }
 }
+
+enum NavigationPolicyDecision { inProcess, external, blocked }
 
 class SurfaceSpec {
   final ProfileKey profileKey;
@@ -206,7 +241,8 @@ class SurfaceSpec {
     required this.initialNavigation,
     this.policy = const SurfacePolicy._empty(),
   }) {
-    if (!policy.allowsUrl(initialNavigation.url)) {
+    if (policy.navigationDecision(initialNavigation) !=
+        NavigationPolicyDecision.inProcess) {
       throw const BrowserRuntimeException(
         BrowserRuntimeErrorCode.invalidSpec,
         'initial navigation is outside the declared policy',
@@ -971,7 +1007,7 @@ class FrameReference {
       );
 }
 
-enum NavigationOutcome { allowed, blocked, cancelled }
+enum NavigationOutcome { allowed, external, blocked, cancelled }
 
 class NormalizedNavigation {
   final String url;
@@ -1010,6 +1046,9 @@ enum FailureKind {
   profileMismatch,
   protocolViolation,
   navigationBlocked,
+  certificateDenied,
+  clientCertificateDenied,
+  policyViolation,
   malformedMessage,
   oversizedMessage,
   unknownMessage,
@@ -1143,6 +1182,7 @@ sealed class SurfaceEvent {
           sequence,
           requestId: _requiredString(payload, 'request_id'),
           url: _requiredString(payload, 'url'),
+          userGesture: _requiredBool(payload, 'user_gesture'),
         ),
       'download_request' => DownloadRequestEvent(
           id,
@@ -1291,12 +1331,14 @@ class PermissionRequestEvent extends SurfaceEvent {
 class PopupRequestEvent extends SurfaceEvent {
   final String requestId;
   final String url;
+  final bool userGesture;
 
   const PopupRequestEvent(
     super.surfaceId,
     super.sequence, {
     required this.requestId,
     required this.url,
+    required this.userGesture,
   });
 
   @override
@@ -1305,6 +1347,7 @@ class PopupRequestEvent extends SurfaceEvent {
         'payload': _eventPayload(surfaceId, sequence, {
           'request_id': requestId,
           'url': url,
+          'user_gesture': userGesture,
         }),
       };
 }
@@ -1436,7 +1479,15 @@ class FakeBrowserRuntime implements BrowserRuntime {
     switch (command) {
       case NavigateCommand(:final navigation):
         final eventSequence = surface.nextEventSequence++;
-        final allowed = surface.spec.policy.allowsUrl(navigation.url);
+        final decision = surface.spec.policy.navigationDecision(navigation);
+        final outcome = switch (decision) {
+          NavigationPolicyDecision.inProcess => NavigationOutcome.allowed,
+          NavigationPolicyDecision.external => NavigationOutcome.external,
+          NavigationPolicyDecision.blocked =>
+            navigation.disposition == NavigationDisposition.external
+                ? NavigationOutcome.cancelled
+                : NavigationOutcome.blocked,
+        };
         _enqueue(
           NavigationEvent(
             surfaceId,
@@ -1444,9 +1495,7 @@ class FakeBrowserRuntime implements BrowserRuntime {
             NormalizedNavigation(
               url: navigation.url,
               disposition: navigation.disposition,
-              outcome: allowed
-                  ? NavigationOutcome.allowed
-                  : NavigationOutcome.blocked,
+              outcome: outcome,
             ),
           ),
         );
@@ -1846,8 +1895,13 @@ String _validateUrl(String url) {
       'navigation URL is invalid',
     );
   }
-  const schemes = ['http://', 'https://', 'about:', 'commet://'];
-  if (!schemes.any(url.startsWith)) {
+  final parsed = Uri.tryParse(url);
+  final scheme = parsed?.scheme.toLowerCase();
+  if (parsed == null ||
+      !const {'http', 'https', 'commet'}.contains(scheme) ||
+      parsed.host.isEmpty ||
+      parsed.userInfo.isNotEmpty ||
+      !_hasValidAuthority(url)) {
     throw const BrowserRuntimeException(
       BrowserRuntimeErrorCode.invalidSpec,
       'navigation scheme is not declared by the runtime',
@@ -1938,6 +1992,9 @@ String _failureKindToWire(FailureKind kind) => switch (kind) {
       FailureKind.profileMismatch => 'profile_mismatch',
       FailureKind.protocolViolation => 'protocol_violation',
       FailureKind.navigationBlocked => 'navigation_blocked',
+      FailureKind.certificateDenied => 'certificate_denied',
+      FailureKind.clientCertificateDenied => 'client_certificate_denied',
+      FailureKind.policyViolation => 'policy_violation',
       FailureKind.malformedMessage => 'malformed_message',
       FailureKind.oversizedMessage => 'oversized_message',
       FailureKind.unknownMessage => 'unknown_message',
@@ -1948,6 +2005,9 @@ FailureKind _failureKindFromWire(String value) => switch (value) {
       'profile_mismatch' => FailureKind.profileMismatch,
       'protocol_violation' => FailureKind.protocolViolation,
       'navigation_blocked' => FailureKind.navigationBlocked,
+      'certificate_denied' => FailureKind.certificateDenied,
+      'client_certificate_denied' => FailureKind.clientCertificateDenied,
+      'policy_violation' => FailureKind.policyViolation,
       'malformed_message' => FailureKind.malformedMessage,
       'oversized_message' => FailureKind.oversizedMessage,
       'unknown_message' => FailureKind.unknownMessage,
@@ -1956,20 +2016,80 @@ FailureKind _failureKindFromWire(String value) => switch (value) {
     };
 
 String? _urlOrigin(String url) {
-  for (final scheme in ['https://', 'http://']) {
-    if (url.startsWith(scheme)) {
-      final rest = url.substring(scheme.length);
-      return '$scheme${rest.split('/').first}';
-    }
+  final parsed = Uri.tryParse(url);
+  if (parsed == null ||
+      parsed.host.isEmpty ||
+      parsed.userInfo.isNotEmpty ||
+      !_hasValidAuthority(url)) {
+    return null;
   }
-  if (url.startsWith('commet://')) {
-    final rest = url.substring('commet://'.length);
-    return 'commet://${rest.split('/').first}';
+  final scheme = parsed.scheme.toLowerCase();
+  if (!const {'http', 'https', 'commet'}.contains(scheme)) return null;
+  final host = parsed.host.toLowerCase();
+  final normalizedHost = host.contains(':') ? '[$host]' : host;
+  final port = parsed.hasPort ? ':${parsed.port}' : '';
+  return '$scheme://$normalizedHost$port';
+}
+
+bool _hasValidAuthority(String url) {
+  final separator = url.indexOf('://');
+  if (separator <= 0) return false;
+  final rest = url.substring(separator + 3);
+  final authorityEnd = RegExp(r'[/\?#]').firstMatch(rest)?.start ?? rest.length;
+  final authority = rest.substring(0, authorityEnd);
+  if (authority.isEmpty || authority.contains('@')) return false;
+  if (authority.runes.any((rune) => rune < 0x20 || rune == 0x7f) ||
+      authority.contains(RegExp(r'\s'))) {
+    return false;
   }
-  if (url.startsWith('about:')) {
-    return url.split('/').first;
+  if (authority.startsWith('[')) {
+    final close = authority.indexOf(']');
+    if (close <= 1) return false;
+    final suffix = authority.substring(close + 1);
+    if (suffix.isEmpty) return true;
+    if (!suffix.startsWith(':')) return false;
+    final port = suffix.substring(1);
+    return port.isNotEmpty && port.runes.every(_isAsciiDigit);
   }
-  return null;
+  final firstColon = authority.indexOf(':');
+  if (firstColon < 0) return true;
+  if (firstColon != authority.lastIndexOf(':')) return false;
+  final host = authority.substring(0, firstColon);
+  final port = authority.substring(firstColon + 1);
+  return host.isNotEmpty &&
+      port.isNotEmpty &&
+      port.runes.every(_isAsciiDigit);
+}
+
+bool _isAsciiDigit(int rune) => rune >= 0x30 && rune <= 0x39;
+
+bool _isControlledFixture(String url) =>
+    url == 'commet://fixture' || url.startsWith('commet://fixture/');
+
+void _validateDeclaredOrigin(String origin, {required bool loopback}) {
+  final normalized = _urlOrigin(origin);
+  final parsed = Uri.tryParse(origin);
+  final scheme = parsed?.scheme.toLowerCase();
+  final validScheme = loopback
+      ? scheme == 'http'
+      : scheme == 'https' || scheme == 'commet';
+  final validLoopback = !loopback ||
+      parsed != null &&
+          parsed.hasPort &&
+          const {'localhost', '127.0.0.1', '::1'}
+              .contains(parsed.host.toLowerCase());
+  if (normalized == null ||
+      parsed!.userInfo.isNotEmpty ||
+      parsed.path != '' ||
+      parsed.query != '' ||
+      parsed.fragment != '' ||
+      !validScheme ||
+      !validLoopback) {
+    throw const BrowserRuntimeException(
+      BrowserRuntimeErrorCode.invalidSpec,
+      'policy contains an invalid origin',
+    );
+  }
 }
 
 JsonValue _validateAndCopyJson(JsonValue value) {

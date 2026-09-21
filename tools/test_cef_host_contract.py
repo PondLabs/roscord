@@ -221,6 +221,50 @@ class CefHostContractTests(unittest.TestCase):
         self.assertIn("legacy", PROFILE_DOC.lower())
         self.assertIn("quarantine", PROFILE_DOC.lower())
 
+    def test_navigation_certificate_and_popup_policy_is_fail_closed(self) -> None:
+        for token in (
+            "NavigationPolicy",
+            "allowed_loopback_origins",
+            "allow_external_navigation",
+            "PolicyAllowsInProcess",
+            "EvaluateNavigation",
+            "OnBeforeBrowse",
+            "OnOpenURLFromTab",
+            "OnCertificateError",
+            "OnSelectClientCertificate",
+            "callback->Cancel()",
+            "callback->Select(nullptr)",
+            "OnBeforePopup",
+            "SendPopupRequest",
+            "SendSurfaceFailure",
+            "is_redirect",
+            "PolicyAllowsInProcess(surface->policy, url)",
+            '"popup_request"',
+            '"certificate_denied"',
+            '"client_certificate_denied"',
+            '"outcome", std::string(outcome)',
+        ):
+            self.assertIn(token, SOURCE)
+        self.assertNotIn("ignore_certificate_errors", SOURCE)
+        self.assertNotIn("--ignore-certificate-errors", SOURCE)
+
+    def test_policy_contract_is_shared_with_typed_runtime(self) -> None:
+        browser_runtime = (
+            ROOT / "rust" / "rust" / "src" / "browser_runtime.rs"
+        ).read_text(encoding="utf-8")
+        dart_runtime = (
+            ROOT / "commet" / "lib" / "browser_runtime" / "browser_runtime.dart"
+        ).read_text(encoding="utf-8")
+        for source in (browser_runtime, dart_runtime):
+            for token in (
+                "allowed_loopback_origins",
+                "allow_external_navigation",
+                "NavigationPolicyDecision",
+                "NavigationOutcome",
+                "External",
+            ):
+                self.assertIn(token, source)
+
 
 if __name__ == "__main__":
     unittest.main()
