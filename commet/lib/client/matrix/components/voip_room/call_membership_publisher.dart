@@ -16,6 +16,7 @@ class CallMembershipState {
   const CallMembershipState({
     this.media = const {},
     this.voice = const {},
+    this.away = false,
   });
 
   /// What we publish: screen share, camera.
@@ -24,6 +25,11 @@ class CallMembershipState {
   /// How we have silenced ourselves: muted, deafened.
   final Set<VoiceState> voice;
 
+  /// Whether we have been away from the machine long enough to count as
+  /// away. Changes at most twice an hour or so, which the debounce below
+  /// absorbs along with everything else.
+  final bool away;
+
   static const _media = SetEquality<LiveMedia>();
   static const _voice = SetEquality<VoiceState>();
 
@@ -31,13 +37,16 @@ class CallMembershipState {
   bool operator ==(Object other) =>
       other is CallMembershipState &&
       _media.equals(media, other.media) &&
-      _voice.equals(voice, other.voice);
+      _voice.equals(voice, other.voice) &&
+      away == other.away;
 
   @override
-  int get hashCode => Object.hash(_media.hash(media), _voice.hash(voice));
+  int get hashCode =>
+      Object.hash(_media.hash(media), _voice.hash(voice), away);
 
   @override
-  String toString() => "CallMembershipState(media: $media, voice: $voice)";
+  String toString() =>
+      "CallMembershipState(media: $media, voice: $voice, away: $away)";
 }
 
 class CallMembershipPublisher {

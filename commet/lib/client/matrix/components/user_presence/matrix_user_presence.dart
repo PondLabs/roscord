@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:commet/client/components/user_presence/user_presence_component.dart';
-import 'package:commet/client/components/user_presence/user_presence_lifecycle_watcher.dart';
+import 'package:commet/client/components/user_presence/user_idle_watcher.dart';
 import 'package:commet/client/matrix/components/read_receipts/matrix_read_receipt_component.dart';
 import 'package:commet/client/matrix/components/typing_indicators/matrix_typing_indicators_component.dart';
 import 'package:commet/client/matrix/components/voip_room/matrix_call_membership.dart';
@@ -30,7 +30,21 @@ class MatrixUserPresenceComponent
         pollFrequency: Duration(seconds: 100));
     lastSeen.onRemove.listen(onLastSeenRemoved);
 
-    UserPresenceLifecycleWatcher().init();
+    UserIdleWatcher.instance.init();
+    // Our own dot, without waiting for the homeserver to tell us something
+    // it may never tell anyone.
+    UserIdleWatcher.instance.isAway.addListener(_ownAwayChanged);
+  }
+
+  void _ownAwayChanged() {
+    final self = client.self?.identifier;
+    if (self == null) return;
+    _controller.add((
+      self,
+      UserPresence(UserIdleWatcher.instance.isAway.value
+          ? UserPresenceStatus.unavailable
+          : UserPresenceStatus.online)
+    ));
   }
 
   @override
@@ -72,9 +86,16 @@ class MatrixUserPresenceComponent
   @override
   Future<UserPresence> getUserPresence(String userId) async {
     final presence = await client.matrixClient.fetchCurrentPresence(userId);
+    final call = callPresence(userId);
 
-    if (presence.presence == PresenceType.offline && isInCall(userId)) {
-      return convertPresence(presence)..status = UserPresenceStatus.online;
+    // A membership that says its owner is away is first hand and recent,
+    // where the homeserver's idea of their presence is neither.
+    if (call == UserPresenceStatus.unavailable) {
+      return convertPresence(presence)..status = UserPresenceStatus.unavailable;
+    }
+
+    if (presence.presence == PresenceType.offline && call != null) {
+      return convertPresence(presence)..status = call;
     }
 
     if (presence.presence == PresenceType.offline &&
@@ -91,12 +112,13 @@ class MatrixUserPresenceComponent
     return convertPresence(presence);
   }
 
-  /// Whether [userId] is in a voice call: by a live call membership in any
-  /// room we share, or by being connected to a call we are in. Homeservers
-  /// that don't share presence (matrix.org) report everyone as offline, and
-  /// someone in a call is plainly online.
-  bool isInCall(String userId) {
+  /// What being in a voice call says about [userId]: null when they are in
+  /// none. Homeservers that don't share presence (matrix.org) report everyone
+  /// as offline, and someone in a call is plainly online — or away, where
+  /// their membership says they have left their machine.
+  UserPresenceStatus? callPresence(String userId) {
     final now = DateTime.now();
+    UserPresenceStatus? status;
     for (final room in client.matrixClient.rooms) {
       final memberships =
           room.states[MatrixVoipRoomComponent.callMemberStateEvent];
@@ -108,15 +130,26 @@ class MatrixUserPresenceComponent
         if (MatrixCallMembership.isExpired(event.content, sentAt, now)) {
           continue;
         }
-        return true;
+        // Away only where every membership they have says so: one device
+        // left idle while they talk on another is not away.
+        if (!MatrixCallMembership.isAway(event.content)) {
+          return UserPresenceStatus.online;
+        }
+        status = UserPresenceStatus.unavailable;
       }
     }
 
+    if (status != null) return status;
+
     final sessions = clientManager?.callManager.currentSessions ?? const [];
-    return sessions.any((session) =>
+    final connected = sessions.any((session) =>
         session.client == client &&
         session.streams.any((stream) => stream.streamUserId == userId));
+    return connected ? UserPresenceStatus.online : null;
   }
+
+  /// Whether [userId] is in a voice call at all.
+  bool isInCall(String userId) => callPresence(userId) != null;
 
   UserPresence convertPresence(CachedPresence presence) {
     final status = switch (presence.presence) {
@@ -149,15 +182,21 @@ class MatrixUserPresenceComponent
 
     final current = await client.matrixClient.getPresence(self);
 
-    await client.matrixClient.setPresence(
-        self,
+    final presence = switch (status) {
+      UserPresenceStatus.offline => PresenceType.offline,
+      UserPresenceStatus.unknown => PresenceType.offline,
+      UserPresenceStatus.online => PresenceType.online,
+      UserPresenceStatus.unavailable => PresenceType.unavailable,
+    };
+
+    // Also on every sync from here on. A sync without set_presence means
+    // online per the spec, so leaving it alone would have the homeserver
+    // undo this within seconds.
+    client.matrixClient.syncPresence = presence;
+
+    await client.matrixClient.setPresence(self,
         statusMsg: clearMessage ? null : message ?? current.statusMsg,
-        switch (status) {
-          UserPresenceStatus.offline => PresenceType.offline,
-          UserPresenceStatus.unknown => PresenceType.offline,
-          UserPresenceStatus.online => PresenceType.online,
-          UserPresenceStatus.unavailable => PresenceType.unavailable,
-        });
+        presence);
   }
 
   void onSync(SyncUpdate event) {

@@ -21,13 +21,18 @@ class _BenchmarkTimelineViewerState extends State<BenchmarkTimelineViewer> {
 
   @override
   void initState() {
+    // The timeline arrives after a round trip through the client, so the
+    // build that set this up has already been and gone. Without saying so,
+    // nothing draws it: the benchmark then scrolled a list that was never
+    // there, which is why it had never once passed.
     MatrixClient.create("benchmark").then((client) {
       client.mockComponents();
       client.self = MatrixProfile(client,
           matrix.Profile(userId: '@benchy:matrix.org', displayName: 'benchy'));
 
       var room = client.createRoomWithData();
-      timeline = room.getBenchmarkTimeline();
+      if (!mounted) return;
+      setState(() => timeline = room.getBenchmarkTimeline());
     });
     super.initState();
   }

@@ -1,8 +1,10 @@
 name: ci
 
-# Every push to main: tests and the Windows and Linux release builds start at
-# once (the builds only need the version), and publishing the GitHub release
-# waits for all of them. The debug bundles only run when the workflow is
+# Every push to main: tests and the Windows, Linux and macOS release builds
+# start at once (the builds only need the version), and publishing the GitHub
+# release waits for all of them. macOS cannot hold the release up — see
+# continue-on-error in desktop-build.yml — so a broken macOS leg costs that one
+# asset and nothing else. The debug bundles only run when the workflow is
 # started by hand with them ticked; attaching the debug bundles waits for the
 # release and the debug builds.
 on:
@@ -19,7 +21,7 @@ on:
         options: [auto, patch, minor, major]
         default: auto
       debug:
-        description: Also build debug bundles (Windows and Linux)
+        description: Also build debug bundles (Windows, Linux and macOS)
         type: boolean
         default: false
 
@@ -141,7 +143,7 @@ jobs:
     with:
       build_mode: release
       version: ${{ needs.version.outputs.version }}
-      platforms: '["windows", "linux"]'
+      platforms: '["windows", "linux", "macos"]'
 
   publish:
     needs: [test, version, build-release]
@@ -174,7 +176,7 @@ jobs:
     with:
       build_mode: debug
       version: ${{ needs.version.outputs.version }}
-      platforms: '["windows", "linux"]'
+      platforms: '["windows", "linux", "macos"]'
 
   attach-debug:
     needs: [version, publish, build-debug]

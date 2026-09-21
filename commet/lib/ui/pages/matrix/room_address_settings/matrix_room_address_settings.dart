@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:commet/client/matrix/extensions/matrix_client_extensions.dart';
+import 'package:commet/client/matrix/matrix_room_permissions.dart';
 import 'package:commet/ui/pages/matrix/room_address_settings/matrix_room_address_settings_view.dart';
 import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
@@ -95,7 +96,7 @@ class _MatrixRoomAddressSettingsState extends State<MatrixRoomAddressSettings> {
       publishAlias: publishAlias,
       unpublishAlias: unpublishAlias,
       canChangeMainAlias:
-          widget.matrixRoom.canChangeStateEvent("m.room.canonical_alias"),
+          widget.matrixRoom.canChangeState("m.room.canonical_alias"),
     );
   }
 

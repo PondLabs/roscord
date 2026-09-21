@@ -155,5 +155,31 @@ void main() {
               joined.add(const Duration(hours: 4, minutes: 59))),
           isFalse);
     });
+
+    test('says whether we are away, and says so either way', () {
+      final present = MatrixCallMembership.withPublishedState(joinContent,
+          media: const {}, voiceState: const {}, joinedAt: joined, now: joined);
+      expect(MatrixCallMembership.isAway(present), isFalse);
+
+      final away = MatrixCallMembership.withPublishedState(present,
+          media: const {},
+          voiceState: const {},
+          away: true,
+          joinedAt: joined,
+          now: joined);
+      expect(MatrixCallMembership.isAway(away), isTrue);
+
+      // Coming back has to clear it: the rewrite keeps every key it isn't
+      // given a new value for.
+      final back = MatrixCallMembership.withPublishedState(away,
+          media: const {}, voiceState: const {}, joinedAt: joined, now: joined);
+      expect(MatrixCallMembership.isAway(back), isFalse);
+    });
+
+    test('a membership from a client that does not report it is not away', () {
+      expect(MatrixCallMembership.isAway(joinContent), isFalse);
+      expect(MatrixCallMembership.isAway(const {'chat.commet.away': 'yes'}),
+          isFalse);
+    });
   });
 }

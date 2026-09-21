@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:commet/client/components/space_banner/space_banner_component.dart';
 import 'package:commet/client/matrix/matrix_client.dart';
 import 'package:commet/client/matrix/matrix_mxc_image_provider.dart';
+import 'package:commet/client/matrix/matrix_room_permissions.dart';
 import 'package:commet/client/matrix/matrix_space.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/src/painting/image_provider.dart';
@@ -61,5 +62,5 @@ class MatrixSpaceBannerComponent
   }
 
   @override
-  bool get canEditBanner => space.matrixRoom.canChangeStateEvent(key);
+  bool get canEditBanner => space.matrixRoom.canChangeState(key);
 }

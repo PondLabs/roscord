@@ -10,6 +10,7 @@ import 'package:commet/client/components/voip/voip_component.dart';
 import 'package:commet/client/components/voip/voip_session.dart';
 import 'package:commet/client/stale_info.dart';
 import 'package:commet/config/platform_utils.dart';
+import 'package:commet/debug/log.dart';
 import 'package:commet/main.dart';
 import 'package:commet/utils/notifying_list.dart';
 import 'package:intl/intl.dart';
@@ -65,6 +66,19 @@ class CallManager {
     var room = event.client.getRoom(event.roomId);
     currentSessions.add(event);
 
+    // The join path leaves the other channels before it starts this one,
+    // but two joins close together each look around before either has
+    // registered. This is the backstop: whatever else is live when a
+    // session the user is actually in appears, goes. A call that is merely
+    // ringing is not one they are in, and must not empty the room they are
+    // standing in.
+    if (event.state != VoipState.incoming) {
+      leaveOtherCalls(client: event.client, roomId: event.roomId)
+          .catchError((Object e, StackTrace s) {
+        Log.onError(e, s, content: "Could not leave the other calls");
+      });
+    }
+
     AudioProcessingManager.instance.onSessionStarted(event);
 
     if (event.state == VoipState.incoming) {
@@ -118,6 +132,46 @@ class CallManager {
     }
 
     endCallSound();
+  }
+
+  /// Which of [sessions] joining [roomId] on [client] has to end, so a
+  /// person is only ever in one voice channel.
+  ///
+  /// The room being joined is not in the list: the component leaving and
+  /// rejoining its own room has its own path through that (issue #48). Nor
+  /// is a session that is still ringing — an incoming call is not one they
+  /// are in, and hanging it up would decline it on their behalf — or one
+  /// that has already ended.
+  static List<VoipSession> callsToLeave(
+    Iterable<VoipSession> sessions,
+    Client client,
+    String roomId,
+  ) =>
+      sessions
+          .where((session) =>
+              !(session.client == client && session.roomId == roomId) &&
+              session.state != VoipState.incoming &&
+              session.state != VoipState.ended)
+          .toList();
+
+  /// Ends every voice session [callsToLeave] names.
+  ///
+  /// One that will not end does not hold up the join: better to be in the
+  /// room they asked for than in neither.
+  Future<void> leaveOtherCalls({
+    required Client client,
+    required String roomId,
+  }) async {
+    final others = callsToLeave(currentSessions, client, roomId);
+
+    await Future.wait(others.map((session) async {
+      try {
+        Log.i("Leaving ${session.roomName} to join another voice channel");
+        await session.hangUpCall();
+      } catch (e, s) {
+        Log.onError(e, s, content: "Could not leave ${session.roomName}");
+      }
+    }));
   }
 
   VoipSession? getCallInRoom(Client client, String roomId) {
