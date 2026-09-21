@@ -144,14 +144,15 @@ Duration? _x11IdleTime() {
   if (_queryInfo == null) {
     final xlib = DynamicLibrary.open('libX11.so.6');
     final xss = DynamicLibrary.open('libXss.so.1');
-    final display = xlib
-        .lookupFunction<_XOpenDisplayNative, _XOpenDisplay>('XOpenDisplay')(
+    final display =
+        xlib.lookupFunction<_XOpenDisplayNative, _XOpenDisplay>('XOpenDisplay')(
       nullptr,
     );
     if (display == nullptr) return null;
     _display = display;
-    _rootWindow = xlib.lookupFunction<_XDefaultRootWindowNative,
-        _XDefaultRootWindow>('XDefaultRootWindow')(display);
+    _rootWindow =
+        xlib.lookupFunction<_XDefaultRootWindowNative, _XDefaultRootWindow>(
+            'XDefaultRootWindow')(display);
     _saverInfo = xss.lookupFunction<_XScreenSaverAllocInfoNative,
         _XScreenSaverAllocInfo>('XScreenSaverAllocInfo')();
     if (_saverInfo == nullptr) return null;

@@ -41,8 +41,7 @@ class CallMembershipState {
       away == other.away;
 
   @override
-  int get hashCode =>
-      Object.hash(_media.hash(media), _voice.hash(voice), away);
+  int get hashCode => Object.hash(_media.hash(media), _voice.hash(voice), away);
 
   @override
   String toString() =>

@@ -194,7 +194,8 @@ class MatrixUserPresenceComponent
     // undo this within seconds.
     client.matrixClient.syncPresence = presence;
 
-    await client.matrixClient.setPresence(self,
+    await client.matrixClient.setPresence(
+        self,
         statusMsg: clearMessage ? null : message ?? current.statusMsg,
         presence);
   }

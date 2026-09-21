@@ -111,8 +111,7 @@ class UserIdleWatcher {
     return since == null ? Duration.zero : _now().difference(since);
   }
 
-  static Future<void> _setStatusOnEveryClient(
-      UserPresenceStatus status) async {
+  static Future<void> _setStatusOnEveryClient(UserPresenceStatus status) async {
     final manager = clientManager;
     if (manager == null) return;
     for (final client in manager.clients) {
