@@ -89,7 +89,13 @@ class NativeSelfUpdater implements SelfUpdater {
   Directory? _staged;
   bool _running = false;
 
-  String get _platform => Platform.isWindows ? 'windows' : 'linux';
+  /// Not a bool: a macOS build that called itself linux would pass
+  /// [isSelfInstallable] and then download the Linux tarball.
+  String get _platform => Platform.isWindows
+      ? 'windows'
+      : Platform.isMacOS
+          ? 'macos'
+          : 'linux';
 
   Directory get _installDir =>
       File(Platform.resolvedExecutable).parent.absolute;
