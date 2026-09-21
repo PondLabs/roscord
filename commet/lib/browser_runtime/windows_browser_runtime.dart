@@ -32,6 +32,7 @@ class WindowsBrowserRuntime implements BrowserRuntime {
     this.maxFrameBytes = defaultBrowserRuntimeMaxFrameBytes,
     this.validationBuild = false,
     this.faultPoint,
+    this.forceSoftwareRendering = false,
     String? profileRoot,
   })  : _hostExecutable = hostExecutable,
         _connector = connector ?? ipc.connect,
@@ -56,6 +57,10 @@ class WindowsBrowserRuntime implements BrowserRuntime {
   final int maxFrameBytes;
   final bool validationBuild;
   final FaultPoint? faultPoint;
+  // Forced software rendering keeps the CPU OnPaint frame ring authoritative
+  // when GPU import is unavailable.  It never selects another browser engine;
+  // the same frame/input/resize/focus contract applies.
+  final bool forceSoftwareRendering;
   final String? _hostExecutable;
   final BrowserHostConnector _connector;
   final BrowserHostStarter _starter;
@@ -373,6 +378,7 @@ class WindowsBrowserRuntime implements BrowserRuntime {
       '--nonce=$nonce',
       '--parent-pid=$_parentProcessId',
       '--profile-root=$profileRoot',
+      if (forceSoftwareRendering) '--cef-software-rendering',
       if (validationBuild) '--cef-validation',
       if (faultPoint != null) '--cef-fault=${_faultName(faultPoint!)}',
     ];
