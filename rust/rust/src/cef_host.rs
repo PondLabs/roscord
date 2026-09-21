@@ -20,11 +20,14 @@ use std::os::unix::fs::{MetadataExt as UnixMetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
+use crate::browser_media::{
+    CapturePortalOutcome, HostPermissionRegistry, MediaCapability, MediaPolicyView,
+};
 use crate::browser_profile::{ProfileContext, ProfileError, ProfileStore};
 use crate::browser_runtime::{
     CloseReason, FramedCodec, NavigationEvent, NavigationOutcome, NavigationPolicyDecision,
-    ProfileKey, RuntimeError, ScriptEnvelope, ScriptSource, SurfaceCommand, SurfaceEvent,
-    SurfaceId, SurfaceSpec, WireMessage,
+    PermissionDecision, PrivacyMode, ProfileKey, RuntimeError, ScriptEnvelope, ScriptSource,
+    SurfaceCommand, SurfaceEvent, SurfaceFailure, SurfaceId, SurfaceSpec, WireMessage,
 };
 use crate::browser_runtime_lifecycle::FaultPoint;
 use serde_json::json;
@@ -939,6 +942,11 @@ pub struct HostCore {
     surfaces: BTreeMap<SurfaceId, SurfaceState>,
     stopped: bool,
     validation_fault: Option<FaultPoint>,
+    /// Mediated camera/microphone/capture decisions.  The Linux host
+    /// requires XDG portal mediation for display capture; device grants are
+    /// scoped to account, requesting origin, top-level origin, and
+    /// capability, and are re-checked against current policy on every use.
+    permissions: HostPermissionRegistry,
 }
 
 impl HostCore {
@@ -953,6 +961,7 @@ impl HostCore {
             surfaces: BTreeMap::new(),
             stopped: false,
             validation_fault,
+            permissions: HostPermissionRegistry::new(true),
         }
     }
 
@@ -1057,6 +1066,9 @@ impl HostCore {
                 message: message.to_owned(),
             }]);
         }
+        if matches!(command, SurfaceCommand::Permission { .. }) {
+            return self.resolve_permission_command(request_id, surface_id, command);
+        }
         command.validate().map_err(runtime_error)?;
         let surface = self
             .surfaces
@@ -1134,6 +1146,10 @@ impl HostCore {
             | SurfaceCommand::Clipboard { .. }
             | SurfaceCommand::ReleaseFrame { .. } => None,
         };
+        // NOTE: `Permission` commands never reach this arm: they are
+        // intercepted above by `resolve_permission_command`, which applies
+        // the mediated grant table and portal outcomes.  The arm remains so
+        // the match stays exhaustive over every surface command.
         let mut responses = vec![WireMessage::Ack { request_id }];
         responses.extend(event.into_iter().map(|event| WireMessage::Event { event }));
         Ok(responses)
@@ -1147,6 +1163,8 @@ impl HostCore {
         self.profile_store
             .release(surface.context.context_id())
             .map_err(profile_error)?;
+        // A late app decision must never grant a closed surface.
+        self.permissions.remove_surface(surface_id);
         Ok(vec![WireMessage::Event {
             event: SurfaceEvent::Closed {
                 surface_id,
@@ -1158,6 +1176,7 @@ impl HostCore {
 
     fn shutdown(&mut self) {
         self.surfaces.clear();
+        self.permissions.clear_session();
         self.profile_store.shutdown();
         self.stopped = true;
     }
@@ -1178,9 +1197,226 @@ impl HostCore {
         {
             return Err(HostError::ProfileBusy);
         }
-        self.profile_store
+        let result = self
+            .profile_store
             .clear_data(profile_key)
-            .map_err(profile_error)
+            .map_err(profile_error)?;
+        // Account browser state includes media grants: persistent camera and
+        // microphone grants do not survive clear-data.
+        self.permissions.clear_profile(profile_key);
+        Ok(result)
+    }
+
+    /// Record a page-originated media request from the CEF permission
+    /// callback.  The caller emits the `permission_request` event for the
+    /// app unless a stored grant already covers the scope.  Unknown
+    /// capabilities register (and are then always denied); replayed request
+    /// ids and unknown surfaces are rejected.
+    pub fn register_permission_request(
+        &mut self,
+        surface_id: SurfaceId,
+        request_id: String,
+        requesting_origin: String,
+        top_level_origin: String,
+        capability: &str,
+    ) -> Result<MediaCapability, HostError> {
+        let profile_key = self
+            .surfaces
+            .get(&surface_id)
+            .ok_or_else(|| HostError::Runtime(format!("stale surface {surface_id}")))?
+            .spec
+            .profile_key()
+            .clone();
+        self.permissions
+            .register(
+                surface_id,
+                &profile_key,
+                request_id,
+                requesting_origin,
+                top_level_origin,
+                capability,
+            )
+            .map_err(runtime_error)
+    }
+
+    /// Fast path for the CEF callback: true when a stored grant covers this
+    /// exact scope under the surface's current policy and OS mediation, so
+    /// the host can continue the request without reprompting the app.
+    /// Display capture always returns false.
+    pub fn stored_media_grant_covers(
+        &self,
+        surface_id: SurfaceId,
+        requesting_origin: &str,
+        top_level_origin: &str,
+        capability: &str,
+    ) -> bool {
+        let Some(surface) = self.surfaces.get(&surface_id) else {
+            return false;
+        };
+        let policy = Self::media_policy_view(surface, capability, true);
+        self.permissions.stored_grant_covers(
+            surface_id,
+            surface.spec.profile_key(),
+            requesting_origin,
+            top_level_origin,
+            capability,
+            &policy,
+        )
+    }
+
+    /// Record the XDG ScreenCast/PipeWire portal outcome for a pending
+    /// display request.  Non-grant outcomes deny the page and return the
+    /// sanitized `capture_denied` failure; the caller cancels the page
+    /// callback.  Direct unmediated capture is never consulted: there is no
+    /// X11 fallback path in this host.
+    pub fn report_portal_outcome(
+        &mut self,
+        request_id: &str,
+        outcome_name: &str,
+    ) -> Result<Vec<WireMessage>, HostError> {
+        let outcome = CapturePortalOutcome::parse(outcome_name).ok_or_else(|| {
+            HostError::Runtime(format!("unknown portal outcome {outcome_name}"))
+        })?;
+        let (surface_id, failure) = self
+            .permissions
+            .report_portal_outcome(request_id, outcome)
+            .map_err(runtime_error)?;
+        Ok(self.failed_event(surface_id, failure).unwrap_or_default())
+    }
+
+    /// Resolve one app `Permission` command for a pending request.  The
+    /// command is acknowledged; a denial additionally carries the sanitized
+    /// `permission_denied` or `capture_denied` failure event.  Decisions for
+    /// requests the host never issued are rejected without granting
+    /// anything.
+    fn resolve_permission_command(
+        &mut self,
+        request_id: u64,
+        surface_id: SurfaceId,
+        command: SurfaceCommand,
+    ) -> Result<Vec<WireMessage>, HostError> {
+        let (permission_id, decision): (String, PermissionDecision) = match &command {
+            SurfaceCommand::Permission {
+                request_id,
+                decision,
+                ..
+            } => (request_id.clone(), *decision),
+            _ => {
+                return Err(HostError::Runtime(
+                    "permission resolution requires a permission command".to_owned(),
+                ));
+            }
+        };
+        command.validate().map_err(runtime_error)?;
+        // Mirror the shared surface ownership checks so stale, mismatched,
+        // or replayed commands are rejected before touching permissions.
+        // Decisions for requests the host never issued are rejected with a
+        // wire error without granting anything.
+        if self.permissions.pending(&permission_id).is_none() {
+            return Ok(vec![WireMessage::Error {
+                request_id: Some(request_id),
+                code: "unknown_permission_request".to_owned(),
+                message: "permission request is not pending".to_owned(),
+            }]);
+        }
+        let policy = {
+            let surface = self
+                .surfaces
+                .get_mut(&surface_id)
+                .ok_or_else(|| HostError::Runtime(format!("stale surface {surface_id}")))?;
+            if let Some(profile_key) = command.profile_key() {
+                if profile_key != surface.spec.profile_key() {
+                    return Err(HostError::Runtime(
+                        "surface profile key mismatch".to_owned(),
+                    ));
+                }
+            }
+            let sequence = command.sequence();
+            if sequence <= surface.last_command_sequence {
+                return Err(HostError::Runtime(format!(
+                    "command sequence must be greater than {}",
+                    surface.last_command_sequence
+                )));
+            }
+            surface.last_command_sequence = sequence;
+            let capability = self
+                .permissions
+                .pending(&permission_id)
+                .and_then(|pending| pending.scope())
+                .map(|scope| scope.capability().as_str())
+                .unwrap_or("unknown_media");
+            Self::media_policy_view(surface, capability, true)
+        };
+        let resolution = self
+            .permissions
+            .resolve(&permission_id, decision, &policy)
+            .map_err(runtime_error)?;
+        if resolution.surface_id != surface_id {
+            return Ok(vec![WireMessage::Error {
+                request_id: Some(request_id),
+                code: "unknown_permission_request".to_owned(),
+                message: "permission request is not pending".to_owned(),
+            }]);
+        }
+        let mut responses = vec![WireMessage::Ack { request_id }];
+        if let Some(failure) = resolution.failure {
+            responses.extend(self.failed_event(surface_id, Some(failure)).unwrap_or_default());
+        }
+        Ok(responses)
+    }
+
+    /// Assemble the current-policy view for one surface and capability.
+    /// Both the requesting and the top-level origin must still be declared
+    /// for a grant to apply, and an explicitly disabled capability never
+    /// applies.  Device capture is OS-mediated synchronously by the capture
+    /// stack; display capture additionally requires the portal grant, which
+    /// the registry enforces separately.
+    fn media_policy_view(
+        surface: &SurfaceState,
+        capability: &str,
+        os_mediated: bool,
+    ) -> MediaPolicyView {
+        let mut origins = surface.spec.policy().allowed_origins().to_vec();
+        origins.extend(
+            surface
+                .spec
+                .policy()
+                .allowed_loopback_origins()
+                .iter()
+                .cloned(),
+        );
+        let capability_allowed = surface
+            .spec
+            .policy()
+            .capabilities()
+            .get(capability)
+            .copied()
+            .unwrap_or(true);
+        MediaPolicyView {
+            origins,
+            capability_allowed,
+            private_context: surface.spec.privacy() == PrivacyMode::Private,
+            os_mediated,
+        }
+    }
+
+    /// Emit a surface-scoped `failed` event for a sanitized permission or
+    /// capture denial, consuming one event sequence.  Returns an empty
+    /// vector when there is no failure to report or the surface is gone.
+    fn failed_event(
+        &mut self,
+        surface_id: SurfaceId,
+        failure: Option<SurfaceFailure>,
+    ) -> Option<Vec<WireMessage>> {
+        let failure = failure?;
+        let sequence = next_event_sequence(self.surfaces.get_mut(&surface_id)?);
+        Some(vec![WireMessage::Event {
+            event: SurfaceEvent::Failed {
+                surface_id,
+                sequence,
+                failure,
+            },
+        }])
     }
 }
 
@@ -1473,6 +1709,169 @@ mod tests {
                 surface_id: SurfaceId(99),
             })
             .is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn host_core_mediates_camera_and_display_requests() {
+        use crate::browser_runtime::{FailureKind, PermissionDecision};
+
+        let root = temp_root("media");
+        let mut host = HostCore::new(root.clone());
+        host.dispatch(WireMessage::Open {
+            request_id: 1,
+            spec: spec("account-a"),
+        })
+        .unwrap();
+
+        // Camera allow: acknowledged with no failure event.
+        host.register_permission_request(
+            SurfaceId(1),
+            "media-camera-1".to_owned(),
+            "https://widget.test".to_owned(),
+            "https://widget.test".to_owned(),
+            "camera",
+        )
+        .unwrap();
+        let allowed = host
+            .dispatch(WireMessage::Command {
+                request_id: 10,
+                surface_id: SurfaceId(1),
+                command: SurfaceCommand::Permission {
+                    sequence: 1,
+                    profile_key: None,
+                    request_id: "media-camera-1".to_owned(),
+                    decision: PermissionDecision::AllowSession,
+                },
+            })
+            .unwrap();
+        assert_eq!(allowed, vec![WireMessage::Ack { request_id: 10 }]);
+
+        // Camera deny: acknowledged plus a sanitized permission_denied event
+        // that carries no origin.
+        host.register_permission_request(
+            SurfaceId(1),
+            "media-camera-2".to_owned(),
+            "https://widget.test".to_owned(),
+            "https://widget.test".to_owned(),
+            "microphone",
+        )
+        .unwrap();
+        let denied = host
+            .dispatch(WireMessage::Command {
+                request_id: 11,
+                surface_id: SurfaceId(1),
+                command: SurfaceCommand::Permission {
+                    sequence: 2,
+                    profile_key: None,
+                    request_id: "media-camera-2".to_owned(),
+                    decision: PermissionDecision::Deny,
+                },
+            })
+            .unwrap();
+        assert!(matches!(
+            denied.first(),
+            Some(WireMessage::Ack { request_id: 11 })
+        ));
+        let Some(WireMessage::Event {
+            event: SurfaceEvent::Failed { failure, .. },
+        }) = denied.get(1)
+        else {
+            panic!("camera denial must emit a sanitized failure");
+        };
+        assert_eq!(failure.kind(), &FailureKind::PermissionDenied);
+        assert!(!failure.message().contains("https://"));
+
+        // Decisions for requests the host never issued grant nothing.
+        let unknown = host
+            .dispatch(WireMessage::Command {
+                request_id: 12,
+                surface_id: SurfaceId(1),
+                command: SurfaceCommand::Permission {
+                    sequence: 3,
+                    profile_key: None,
+                    request_id: "media-missing".to_owned(),
+                    decision: PermissionDecision::AllowAlways,
+                },
+            })
+            .unwrap();
+        assert!(matches!(
+            unknown.first(),
+            Some(WireMessage::Error { request_id: Some(12), .. })
+        ));
+        let Some(WireMessage::Error { code, .. }) = unknown.first() else {
+            unreachable!()
+        };
+        assert_eq!(code, "unknown_permission_request");
+
+        // Display dismissal: the portal outcome denies the page with a
+        // sanitized capture_denied event, and the consumed request cannot
+        // be decided afterwards.
+        host.register_permission_request(
+            SurfaceId(1),
+            "media-display-1".to_owned(),
+            "https://widget.test".to_owned(),
+            "https://widget.test".to_owned(),
+            "display_video",
+        )
+        .unwrap();
+        let portal = host
+            .report_portal_outcome("media-display-1", "dismissed")
+            .unwrap();
+        let Some(WireMessage::Event {
+            event: SurfaceEvent::Failed { failure, .. },
+        }) = portal.first()
+        else {
+            panic!("portal dismissal must emit a sanitized failure");
+        };
+        assert_eq!(failure.kind(), &FailureKind::CaptureDenied);
+        let late = host
+            .dispatch(WireMessage::Command {
+                request_id: 13,
+                surface_id: SurfaceId(1),
+                command: SurfaceCommand::Permission {
+                    sequence: 4,
+                    profile_key: None,
+                    request_id: "media-display-1".to_owned(),
+                    decision: PermissionDecision::AllowOnce,
+                },
+            })
+            .unwrap();
+        assert!(matches!(
+            late.first(),
+            Some(WireMessage::Error { request_id: Some(13), .. })
+        ));
+
+        // Closing the surface drops pending requests: late decisions fail
+        // closed instead of granting a dead surface.
+        host.register_permission_request(
+            SurfaceId(1),
+            "media-camera-3".to_owned(),
+            "https://widget.test".to_owned(),
+            "https://widget.test".to_owned(),
+            "camera",
+        )
+        .unwrap();
+        host.dispatch(WireMessage::Close {
+            surface_id: SurfaceId(1),
+        })
+        .unwrap();
+        let dead = host
+            .dispatch(WireMessage::Command {
+                request_id: 14,
+                surface_id: SurfaceId(1),
+                command: SurfaceCommand::Permission {
+                    sequence: 5,
+                    profile_key: None,
+                    request_id: "media-camera-3".to_owned(),
+                    decision: PermissionDecision::AllowOnce,
+                },
+            })
+            .unwrap();
+        let Some(WireMessage::Error { code, .. }) = dead.first() else {
+            panic!("late decisions for closed surfaces must fail closed");
+        };
+        assert_eq!(code, "unknown_permission_request");
         fs::remove_dir_all(root).unwrap();
     }
 

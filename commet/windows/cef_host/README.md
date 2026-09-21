@@ -60,3 +60,7 @@ preserves committed downloads.
 Navigation and popup policy details, including the exact HTTPS/loopback rules
 and fail-closed certificate handling, live in
 [`docs/cef-browser-runtime-navigation.md`](../../../docs/cef-browser-runtime-navigation.md).
+
+Camera, microphone, and screen-capture mediation, including scoped grants,
+fresh display consent, and portal outcomes, live in
+[`docs/cef-browser-runtime-media.md`](../../../docs/cef-browser-runtime-media.md).

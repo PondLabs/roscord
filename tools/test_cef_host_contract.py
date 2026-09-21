@@ -42,6 +42,21 @@ LINUX_RUNTIME = (
     ROOT / "rust" / "rust" / "src" / "linux_browser_runtime.rs"
 ).read_text(encoding="utf-8")
 RUNTIME_TOOL = (ROOT / "tools" / "cef_runtime.py").read_text(encoding="utf-8")
+MEDIA_RUST = (ROOT / "rust" / "rust" / "src" / "browser_media.rs").read_text(
+    encoding="utf-8"
+)
+MEDIA_DART = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "media_permission.dart"
+).read_text(encoding="utf-8")
+BROWSER_RUNTIME_DART = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "browser_runtime.dart"
+).read_text(encoding="utf-8")
+BROWSER_RUNTIME_RUST = (
+    ROOT / "rust" / "rust" / "src" / "browser_runtime.rs"
+).read_text(encoding="utf-8")
+MEDIA_DOC = (ROOT / "docs" / "cef-browser-runtime-media.md").read_text(
+    encoding="utf-8"
+)
 MAIN_DART = (ROOT / "commet" / "lib" / "main.dart").read_text(encoding="utf-8")
 CEF_LOCK = (ROOT / "third_party" / "cef" / "cef.lock.json").read_text(
     encoding="utf-8"
@@ -264,6 +279,131 @@ class CefHostContractTests(unittest.TestCase):
                 "External",
             ):
                 self.assertIn(token, source)
+
+    def test_media_and_capture_permissions_are_mediated(self) -> None:
+        for token in (
+            "OnRequestMediaAccessPermission",
+            "GetPermissionHandler",
+            "CefPermissionHandler",
+            "CefMediaAccessCallback",
+            "CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE",
+            "CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE",
+            "CEF_MEDIA_PERMISSION_DESKTOP_AUDIO_CAPTURE",
+            "CEF_MEDIA_PERMISSION_DESKTOP_VIDEO_CAPTURE",
+            "callback->Cancel()",
+            "callback->Continue(",
+            "OnShowPermissionPrompt",
+            "OnDismissPermissionPrompt",
+            "CEF_PERMISSION_RESULT_DENY",
+            "SendPermissionRequest",
+            '"permission_request"',
+            '"permission_denied"',
+            "MediaGrantKey",
+            "MediaGrantCovers",
+            "RememberMediaGrant",
+            "ResolveMediaDecision",
+            "ResolveMediaOnUi",
+            "CancelPendingMediaOnUi",
+            "SanitizedMediaDeniedMessage",
+            "fresh consent",
+            "unknown_permission_request",
+        ):
+            self.assertIn(token, SOURCE)
+        for token in (
+            "--enable-media-stream",
+            "--use-fake-device-for-media-stream",
+            "--use-fake-ui-for-media-stream",
+        ):
+            self.assertIn(token, SOURCE)
+
+        for token in (
+            "HostPermissionRegistry",
+            "MediaCapability",
+            "MediaPolicyView",
+            "CapturePortalOutcome",
+            "permission_denied",
+            "capture_denied",
+            "register_permission_request",
+            "stored_media_grant_covers",
+            "report_portal_outcome",
+            "resolve_permission_command",
+            "unknown_permission_request",
+        ):
+            self.assertIn(token, RUST_HOST_SOURCE)
+        for token in (
+            "--use-fake-device-for-media-stream",
+            "--use-fake-ui-for-media-stream",
+        ):
+            self.assertIn(token, RUST_HOST_SOURCE)
+
+        for source in (MEDIA_RUST, MEDIA_DART):
+            for token in (
+                "camera",
+                "microphone",
+                "display_video",
+                "display_audio",
+                "CapturePortalOutcome",
+                "MediaGrantStore",
+                "MediaGrantScope",
+                "HostPermissionRegistry",
+                "fresh consent",
+            ):
+                self.assertIn(token, source)
+        for token in (
+            "FAILURE_PERMISSION_DENIED",
+            "FAILURE_CAPTURE_DENIED",
+            "MediaPolicyView",
+            "PermissionResolution",
+            "PendingPermissionRequest",
+        ):
+            self.assertIn(token, MEDIA_RUST)
+        self.assertIn("denies_page", MEDIA_RUST)
+        self.assertIn("deniesPage", MEDIA_DART)
+        for token in (
+            "HostPermissionRegistry",
+            "storedGrantCovers",
+            "reportPortalOutcome",
+            "unknown permission request",
+        ):
+            self.assertIn(token, MEDIA_DART)
+        for token in (
+            "permissionDenied",
+            "captureDenied",
+            "permission_denied",
+            "capture_denied",
+        ):
+            self.assertIn(token, BROWSER_RUNTIME_DART)
+        for token in ("PermissionDenied", "CaptureDenied"):
+            self.assertIn(token, BROWSER_RUNTIME_RUST)
+        for token in (
+            "unknown_permission_request",
+            "FailureKind.permissionDenied",
+            "FailureKind.captureDenied",
+        ):
+            self.assertIn(token, DART_RUNTIME)
+        for token in (
+            "deny-by-default",
+            "fresh consent",
+            "permission_denied",
+            "capture_denied",
+            "ScreenCast",
+            "PipeWire",
+        ):
+            self.assertIn(token, MEDIA_DOC)
+
+    def test_no_unmediated_capture_path_exists(self) -> None:
+        for source in (SOURCE, RUST_HOST_SOURCE, MEDIA_RUST):
+            for token in (
+                "XGetImage",
+                "XShmGetImage",
+                "XOpenDisplay",
+                "xcb_image",
+                "DuplicateOutput",
+                "IDXGIOutputDuplication",
+            ):
+                self.assertNotIn(token, source)
+        self.assertNotIn("URLDownloadToFile", SOURCE)
+        self.assertNotIn("getDisplayMedia", SOURCE)
 
 
 if __name__ == "__main__":
