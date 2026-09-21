@@ -1,10 +1,13 @@
+mod frb_generated;
+
 pub mod api;
+pub mod browser_profile;
 pub mod browser_runtime;
+pub mod browser_runtime_lifecycle;
 #[cfg(target_os = "linux")]
 pub mod cef_host;
 #[cfg(target_os = "linux")]
 pub mod linux_browser_runtime;
-mod frb_generated;
 
 // Voice DSP (noise suppression, gate, ducking). Re-exported so its C ABI
 // symbols are linked into this library; Dart loads them from here.

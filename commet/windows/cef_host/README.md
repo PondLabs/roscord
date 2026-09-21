@@ -36,11 +36,22 @@ and the parent connects to it:
 The host validates the pipe prefix, parent PID, same-user token, nonce,
 protocol version, and a four-byte big-endian length prefix before accepting a
 message.  Frames are capped at the BrowserRuntime limit (1 MiB).  The first
-fixture `open` creates a windowless CEF browser at `commet://fixture/` and
-emits `opened` followed by `event/ready`; `close` emits `event/closed` after
-CEF closes the browser.  CEF-owned pointers and buffers never cross this
-transport.
+fixture `open` creates an embedded windowless or standalone owned CEF browser
+at `commet://fixture/` and emits `opened` followed by `event/ready`; `close`
+emits `event/closed` after CEF closes the browser.  CEF-owned pointers and
+buffers never cross this transport.
 
 The fixture is a development/smoke-test surface.  It does not provide a
 production fallback or a second browser engine; CEF initialization and the
 same sandbox/bootstrap checks are required before it can be opened.
+
+The parent also passes an owner-controlled `--profile-root` below the Windows
+local app-data directory.  `ProfileManager` maps each stable local account
+record to a generated directory and owner-only manifest, shares one
+persistent `CefRequestContext` for that account, and creates a new empty
+request context for every private surface.  Reparse points, traversal,
+outside-root paths, and non-owner manifests are rejected.  Missing or
+mismatched manifests are moved to `quarantine-*` and reported as migration
+failures; no legacy browser directory is imported.  Clear-data is exposed to
+the account-data bridge only after all account surfaces are quiescent and
+preserves committed downloads.

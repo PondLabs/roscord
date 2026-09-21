@@ -16,12 +16,30 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 HOST = ROOT / "commet" / "windows" / "cef_host"
 SOURCE = (HOST / "cef_host.cpp").read_text(encoding="utf-8")
+RUST_HOST_SOURCE = (
+    ROOT / "rust" / "rust" / "src" / "cef_host.rs"
+).read_text(encoding="utf-8")
 CMAKE = (HOST / "CMakeLists.txt").read_text(encoding="utf-8")
 WINDOWS_CMAKE = (ROOT / "commet" / "windows" / "CMakeLists.txt").read_text(
     encoding="utf-8"
 )
 DART_RUNTIME = (
     ROOT / "commet" / "lib" / "browser_runtime" / "windows_browser_runtime.dart"
+).read_text(encoding="utf-8")
+PROFILE_RUNTIME = (ROOT / "rust" / "rust" / "src" / "browser_profile.rs").read_text(
+    encoding="utf-8"
+)
+PROFILE_DOC = (ROOT / "docs" / "cef-browser-runtime-profiles.md").read_text(
+    encoding="utf-8"
+)
+LIFECYCLE_RUST = (
+    ROOT / "rust" / "rust" / "src" / "browser_runtime_lifecycle.rs"
+).read_text(encoding="utf-8")
+LIFECYCLE_DART = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "runtime_lifecycle.dart"
+).read_text(encoding="utf-8")
+LINUX_RUNTIME = (
+    ROOT / "rust" / "rust" / "src" / "linux_browser_runtime.rs"
 ).read_text(encoding="utf-8")
 RUNTIME_TOOL = (ROOT / "tools" / "cef_runtime.py").read_text(encoding="utf-8")
 MAIN_DART = (ROOT / "commet" / "lib" / "main.dart").read_text(encoding="utf-8")
@@ -102,12 +120,106 @@ class CefHostContractTests(unittest.TestCase):
         self.assertIn("CreateBrowserSync", SOURCE)
         self.assertIn("CloseBrowser(true)", SOURCE)
 
+    def test_script_commands_execute_in_cef_and_page_messages_return_as_events(self) -> None:
+        for token in (
+            "BrowserRuntimeSendHandler",
+            "__roscordBrowserRuntimeSend",
+            "roscord_browser_runtime_send",
+            "ExecuteJavaScript",
+            "__roscordBrowserRuntimeReceive",
+            "SendScriptComplete",
+            "OnProcessMessageReceived",
+            "script_message",
+        ):
+            self.assertIn(token, SOURCE)
+
+    def test_matrix_protocol_vocabulary_stays_outside_cef_hosts(self) -> None:
+        for source in (SOURCE, RUST_HOST_SOURCE):
+            lowered = source.lower()
+            for token in ("matrix", "org.matrix", "chat.commet", "fromwidget", "towidget"):
+                self.assertNotIn(token, lowered)
+
+    def test_bounded_recovery_and_observability_are_wired(self) -> None:
+        for token in (
+            "RuntimeState",
+            "runtime_epoch",
+            "event_seq",
+            "FailureScope",
+            "HostUnresponsive",
+            "CommandOutcome",
+            "MAX_AUTOMATIC_HOST_RESTARTS",
+            "HEARTBEAT_TIMEOUT_MS",
+            "HOST_TERMINATION_GRACE_MS",
+            "FaultPoint",
+        ):
+            self.assertIn(token, LIFECYCLE_RUST)
+        for token in (
+            "RuntimeState",
+            "runtimeEpoch",
+            "eventSeq",
+            "hostUnresponsive",
+            "CommandOutcome",
+            "maxAutomaticHostRestarts",
+            "heartbeatTimeoutMs",
+            "parseFaultPoint",
+        ):
+            self.assertIn(token, LIFECYCLE_DART)
+        self.assertIn('"heartbeat_ack"', SOURCE)
+        self.assertIn("SendHeartbeatAck", SOURCE)
+        self.assertIn('GetType("request_id")', SOURCE)
+        self.assertIn("SendAck(request_id)", SOURCE)
+        for token in (
+            "OnRenderProcessTerminated",
+            "OnRenderProcessUnresponsive",
+            "renderer_oom",
+            "profile_locked",
+        ):
+            self.assertIn(token, SOURCE)
+        self.assertIn("Timer.periodic", DART_RUNTIME)
+        self.assertIn("retryBrowser", DART_RUNTIME)
+        self.assertIn("retry_browser", LINUX_RUNTIME)
+        self.assertIn("held_presentation", LINUX_RUNTIME)
+        self.assertIn("beginShutdown", DART_RUNTIME)
+        for token in (
+            "reconnect_if_due",
+            "restore_surfaces",
+            "host_protocol_violation",
+            "RuntimeState::Restarting",
+        ):
+            self.assertIn(token, LINUX_RUNTIME)
+
     def test_no_runtime_download_or_backend_fallback(self) -> None:
         self.assertNotIn("URLDownloadToFile", SOURCE)
         self.assertNotIn("WebView2", SOURCE)
         self.assertNotIn("webkit", SOURCE.lower())
         self.assertNotIn("wry", SOURCE.lower())
         self.assertNotIn("browser_subprocess_path", SOURCE)
+
+    def test_account_profiles_private_contexts_and_data_transition_are_bound(self) -> None:
+        self.assertIn("--profile-root", SOURCE)
+        self.assertIn("ProfileManager", SOURCE)
+        self.assertIn("CefRequestContext::CreateContext", SOURCE)
+        self.assertIn("settings.cache_path", SOURCE)
+        self.assertIn("persist_session_cookies", SOURCE)
+        self.assertIn("persist_user_preferences", SOURCE)
+        self.assertIn("FILE_ATTRIBUTE_REPARSE_POINT", SOURCE)
+        self.assertIn("profile.manifest", SOURCE)
+        self.assertIn("MoveFileExW", SOURCE)
+        self.assertIn("ClearData", SOURCE)
+        self.assertIn("FlushStore", SOURCE)
+        self.assertIn("CloseAllConnections", SOURCE)
+        self.assertIn("ClearCertificateExceptions", SOURCE)
+        self.assertIn("ClearHttpAuthCredentials", SOURCE)
+        self.assertIn("RejectReparseBelow", SOURCE)
+        self.assertIn("SetAsPopup", SOURCE)
+        self.assertIn("--profile-root=$profileRoot", DART_RUNTIME)
+
+        self.assertIn("same_account_shares_persistent_context", PROFILE_RUNTIME)
+        self.assertIn("private_contexts_are_distinct", PROFILE_RUNTIME)
+        self.assertIn("missing_or_mismatched_manifests_are_quarantined", PROFILE_RUNTIME)
+        self.assertIn("clear_data_requires_quiescence", PROFILE_RUNTIME)
+        self.assertIn("legacy", PROFILE_DOC.lower())
+        self.assertIn("quarantine", PROFILE_DOC.lower())
 
 
 if __name__ == "__main__":

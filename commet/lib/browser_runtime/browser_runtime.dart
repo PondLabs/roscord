@@ -14,6 +14,10 @@ enum BrowserRuntimeErrorCode {
   staleSurface,
   sequenceViolation,
   profileMismatch,
+  profileBusy,
+  profileCorrupt,
+  profileUnavailable,
+  migrationFailed,
   protocol,
 }
 
@@ -47,6 +51,9 @@ class ProtocolException implements Exception {
 }
 
 class ProfileKey {
+  /// The stable local account-record identity (the Matrix client's
+  /// `MatrixClient.identifier`). Callers must not substitute a Matrix user
+  /// id, homeserver URL, display name, or a URL-derived path.
   final String value;
 
   ProfileKey(String value) : value = _validateProfileKey(value);
@@ -1542,6 +1549,7 @@ sealed class WireMessage {
           SurfaceSpec.fromJson(_requiredMap(payload, 'spec')),
         ),
       'command' => CommandWireMessage(
+          _requiredInt(payload, 'request_id'),
           _surfaceIdFromJson(payload, 'surface_id'),
           SurfaceCommand.fromJson(_requiredMap(payload, 'command')),
         ),
@@ -1556,6 +1564,10 @@ sealed class WireMessage {
           _surfaceIdFromJson(payload, 'surface_id'),
         ),
       'ack' => AckWireMessage(_requiredInt(payload, 'request_id')),
+      'heartbeat' => HeartbeatWireMessage(_requiredInt(payload, 'request_id')),
+      'heartbeat_ack' => HeartbeatAckWireMessage(
+          _requiredInt(payload, 'request_id'),
+        ),
       'error' => ErrorWireMessage(
           _optionalInt(payload, 'request_id'),
           _requiredString(payload, 'code'),
@@ -1583,15 +1595,20 @@ class OpenWireMessage extends WireMessage {
 }
 
 class CommandWireMessage extends WireMessage {
+  final int requestId;
   final SurfaceId surfaceId;
   final SurfaceCommand command;
 
-  const CommandWireMessage(this.surfaceId, this.command);
+  const CommandWireMessage(this.requestId, this.surfaceId, this.command);
 
   @override
   Map<String, Object?> toJson() => {
         'type': 'command',
-        'payload': {'surface_id': surfaceId.value, 'command': command.toJson()},
+        'payload': {
+          'request_id': requestId,
+          'surface_id': surfaceId.value,
+          'command': command.toJson(),
+        },
       };
 }
 
@@ -1640,6 +1657,33 @@ class AckWireMessage extends WireMessage {
   @override
   Map<String, Object?> toJson() => {
         'type': 'ack',
+        'payload': {'request_id': requestId},
+      };
+}
+
+/// Transport liveness probe.  Heartbeats never carry surface or profile
+/// state, so an idle browser can prove that the host and authenticated pipe
+/// are still alive without replaying a caller command.
+class HeartbeatWireMessage extends WireMessage {
+  final int requestId;
+
+  const HeartbeatWireMessage(this.requestId);
+
+  @override
+  Map<String, Object?> toJson() => {
+        'type': 'heartbeat',
+        'payload': {'request_id': requestId},
+      };
+}
+
+class HeartbeatAckWireMessage extends WireMessage {
+  final int requestId;
+
+  const HeartbeatAckWireMessage(this.requestId);
+
+  @override
+  Map<String, Object?> toJson() => {
+        'type': 'heartbeat_ack',
         'payload': {'request_id': requestId},
       };
 }

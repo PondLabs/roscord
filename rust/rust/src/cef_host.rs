@@ -12,25 +12,24 @@
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_int, c_void, CString, OsString};
 use std::fmt;
-use std::fs::{self, OpenOptions};
-use std::io::{self, ErrorKind, Read, Write};
+use std::fs::{self, symlink_metadata};
+use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{
-    symlink_metadata, DirBuilderExt, MetadataExt as UnixMetadataExt, OpenOptionsExt, PermissionsExt,
-};
+use std::os::unix::fs::{MetadataExt as UnixMetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
-use base64::Engine as _;
-
+use crate::browser_profile::{ProfileContext, ProfileError, ProfileStore};
 use crate::browser_runtime::{
     CloseReason, FramedCodec, NavigationEvent, NavigationOutcome, ProfileKey, RuntimeError,
-    SurfaceCommand, SurfaceEvent, SurfaceId, SurfaceSpec, WireMessage,
+    ScriptEnvelope, ScriptSource, SurfaceCommand, SurfaceEvent, SurfaceId, SurfaceSpec,
+    WireMessage,
 };
+use crate::browser_runtime_lifecycle::FaultPoint;
+use serde_json::json;
 
 const SOCKET_PATH_MAX_BYTES: usize = 107;
-const PROFILE_SCHEMA: &str = "1";
 const CEF_RELEASE: &str = "Release";
 const REQUIRED_CEF_FILES: &[&str] = &[
     "Release/libcef.so",
@@ -70,6 +69,10 @@ pub enum HostError {
     Cef(String),
     Protocol(String),
     Runtime(String),
+    ProfileBusy,
+    ProfileCorrupt,
+    ProfileUnavailable,
+    MigrationFailed,
     Io(io::Error),
 }
 
@@ -82,6 +85,10 @@ impl fmt::Display for HostError {
             Self::Cef(message) => write!(formatter, "CEF error: {message}"),
             Self::Protocol(message) => write!(formatter, "protocol error: {message}"),
             Self::Runtime(message) => write!(formatter, "runtime error: {message}"),
+            Self::ProfileBusy => formatter.write_str("profile is busy"),
+            Self::ProfileCorrupt => formatter.write_str("profile is corrupt"),
+            Self::ProfileUnavailable => formatter.write_str("profile is unavailable"),
+            Self::MigrationFailed => formatter.write_str("profile migration failed"),
             Self::Io(error) => error.fmt(formatter),
         }
     }
@@ -104,6 +111,10 @@ pub struct HostConfig {
     pub cef_root: PathBuf,
     pub profile_root: PathBuf,
     pub max_frame_bytes: usize,
+    /// Validation-only controls.  Release builds reject these flags during
+    /// argument parsing, so production cannot select a fault path.
+    pub validation: bool,
+    pub fault: Option<FaultPoint>,
 }
 
 impl HostConfig {
@@ -119,6 +130,8 @@ impl HostConfig {
         let mut cef_root = None;
         let mut profile_root = None;
         let mut max_frame_bytes = crate::browser_runtime::DEFAULT_MAX_FRAME_BYTES;
+        let mut validation = false;
+        let mut fault_name = None;
 
         while let Some(argument) = args.next() {
             let argument = argument
@@ -127,12 +140,12 @@ impl HostConfig {
             match argument {
                 "--socket" => socket_path = Some(PathBuf::from(next_value(&mut args, "--socket")?)),
                 "--parent-pid" => {
-                    let value = next_value(&mut args, "--parent-pid")?;
+                    let value = next_string(&mut args, "--parent-pid")?;
                     parent_pid = Some(value.parse::<u32>().map_err(|_| {
                         HostError::Usage("--parent-pid must be a non-zero integer".to_owned())
                     })?);
                 }
-                "--parent-nonce" => parent_nonce = Some(next_value(&mut args, "--parent-nonce")?),
+                "--parent-nonce" => parent_nonce = Some(next_string(&mut args, "--parent-nonce")?),
                 "--cef-root" => {
                     cef_root = Some(PathBuf::from(next_value(&mut args, "--cef-root")?))
                 }
@@ -140,10 +153,26 @@ impl HostConfig {
                     profile_root = Some(PathBuf::from(next_value(&mut args, "--profile-root")?))
                 }
                 "--max-frame-bytes" => {
-                    let value = next_value(&mut args, "--max-frame-bytes")?;
+                    let value = next_string(&mut args, "--max-frame-bytes")?;
                     max_frame_bytes = value.parse::<usize>().map_err(|_| {
                         HostError::Usage("--max-frame-bytes must be a positive integer".to_owned())
                     })?;
+                }
+                "--cef-validation" => {
+                    if !cfg!(debug_assertions) {
+                        return Err(HostError::Usage(
+                            "--cef-validation is unavailable in production builds".to_owned(),
+                        ));
+                    }
+                    validation = true;
+                }
+                argument if argument.starts_with("--cef-fault=") => {
+                    if !cfg!(debug_assertions) {
+                        return Err(HostError::Usage(
+                            "CEF fault injection requires a debug validation build".to_owned(),
+                        ));
+                    }
+                    fault_name = Some(argument.trim_start_matches("--cef-fault=").to_owned());
                 }
                 "--no-sandbox" | "--disable-sandbox" | "--disable-setuid-sandbox" => {
                     return Err(HostError::Permission(
@@ -153,7 +182,8 @@ impl HostConfig {
                 "--help" => {
                     return Err(HostError::Usage(
                         "--socket PATH --parent-pid PID --parent-nonce NONCE --cef-root DIR \
-                         --profile-root DIR [--max-frame-bytes N]"
+                         --profile-root DIR [--max-frame-bytes N] [--cef-validation \
+                         --cef-fault=POINT]"
                             .to_owned(),
                     ));
                 }
@@ -192,6 +222,20 @@ impl HostConfig {
             ));
         }
 
+        let fault = if let Some(value) = fault_name {
+            if !validation {
+                return Err(HostError::Usage(
+                    "CEF fault injection requires --cef-validation".to_owned(),
+                ));
+            }
+            Some(
+                FaultPoint::parse(&value, true)
+                    .ok_or_else(|| HostError::Usage(format!("unknown CEF fault point {value}")))?,
+            )
+        } else {
+            None
+        };
+
         Ok(Self {
             socket_path,
             parent_pid,
@@ -199,6 +243,8 @@ impl HostConfig {
             cef_root,
             profile_root,
             max_frame_bytes,
+            validation,
+            fault,
         })
     }
 
@@ -225,6 +271,12 @@ fn next_value(
 ) -> Result<OsString, HostError> {
     args.next()
         .ok_or_else(|| HostError::Usage(format!("{name} requires a value")))
+}
+
+fn next_string(args: &mut impl Iterator<Item = OsString>, name: &str) -> Result<String, HostError> {
+    next_value(args, name)?
+        .into_string()
+        .map_err(|_| HostError::Usage("arguments must be valid UTF-8".to_owned()))
 }
 
 fn missing(argument: &str) -> HostError {
@@ -582,6 +634,13 @@ where
     // CEF.  Invalid transport inputs must not start an engine process.
     let config = HostConfig::parse(args.clone())?;
     let validated = config.validate()?;
+    let fault = validated.config.fault;
+    if matches!(
+        fault,
+        Some(FaultPoint::BadBundle | FaultPoint::SandboxFailure | FaultPoint::BadProtocol)
+    ) {
+        return Err(validation_fault_error(fault.expect("fault is present")));
+    }
     let mut cef = CEFLibrary::load(&validated.cef_root)?;
     cef.initialize(&args)?;
 
@@ -591,10 +650,32 @@ where
     )
     .map_err(|error| HostError::Protocol(error.to_string()))?;
     let endpoint = UnixEndpoint::bind(&validated.config.socket_path)?;
-    let mut core = HostCore::new(validated.config.profile_root.clone());
+    let mut core = HostCore::with_fault(validated.config.profile_root.clone(), fault);
     let result = endpoint.serve(validated.config.parent_pid, &codec, &mut core);
     cef.shutdown();
     result
+}
+
+fn validation_fault_error(fault: FaultPoint) -> HostError {
+    match fault {
+        FaultPoint::BadBundle => HostError::Cef("validation fault: bad CEF bundle".to_owned()),
+        FaultPoint::SandboxFailure => {
+            HostError::Permission("validation fault: sandbox failure".to_owned())
+        }
+        FaultPoint::ProfileLock => {
+            HostError::Permission("validation fault: profile lock".to_owned())
+        }
+        FaultPoint::BadProtocol => {
+            HostError::Protocol("validation fault: protocol violation".to_owned())
+        }
+        FaultPoint::HostCrash
+        | FaultPoint::HostUnresponsive
+        | FaultPoint::RendererCrash
+        | FaultPoint::RendererOom
+        | FaultPoint::RendererHang
+        | FaultPoint::GpuCrash
+        | FaultPoint::UtilityCrash => HostError::Runtime(format!("validation fault: {:?}", fault)),
+    }
 }
 
 fn reject_insecure_arguments(args: &[OsString]) -> Result<(), HostError> {
@@ -844,6 +925,7 @@ fn write_message(
 
 struct SurfaceState {
     spec: SurfaceSpec,
+    context: ProfileContext,
     last_command_sequence: u64,
     next_event_sequence: u64,
 }
@@ -856,15 +938,21 @@ pub struct HostCore {
     next_surface_id: u64,
     surfaces: BTreeMap<SurfaceId, SurfaceState>,
     stopped: bool,
+    validation_fault: Option<FaultPoint>,
 }
 
 impl HostCore {
     pub fn new(profile_root: PathBuf) -> Self {
+        Self::with_fault(profile_root, None)
+    }
+
+    fn with_fault(profile_root: PathBuf, validation_fault: Option<FaultPoint>) -> Self {
         Self {
             profile_store: ProfileStore::new(profile_root),
             next_surface_id: 1,
             surfaces: BTreeMap::new(),
             stopped: false,
+            validation_fault,
         }
     }
 
@@ -873,15 +961,29 @@ impl HostCore {
             return Err(HostError::Runtime("host is stopping".to_owned()));
         }
         match message {
-            WireMessage::Open { request_id, spec } => self.open(request_id, spec),
+            WireMessage::Open { request_id, spec } => self
+                .open(request_id, spec)
+                .or_else(|error| wire_error_for(request_id, error)),
             WireMessage::Command {
+                request_id,
                 surface_id,
                 command,
-            } => self.command(surface_id, command),
-            WireMessage::Close { surface_id } => self.close(surface_id),
+            } => self
+                .command(request_id, surface_id, command)
+                .or_else(|error| wire_error_for(request_id, error)),
+            WireMessage::Close { surface_id } => self
+                .close(surface_id)
+                .or_else(|error| wire_error_for(0, error)),
+            WireMessage::Heartbeat { request_id } => {
+                if self.validation_fault == Some(FaultPoint::HostUnresponsive) {
+                    return Ok(Vec::new());
+                }
+                Ok(vec![WireMessage::HeartbeatAck { request_id }])
+            }
             WireMessage::Event { .. }
             | WireMessage::Opened { .. }
             | WireMessage::Ack { .. }
+            | WireMessage::HeartbeatAck { .. }
             | WireMessage::Error { .. } => Err(HostError::Protocol(
                 "host accepts only open, command, and close messages".to_owned(),
             )),
@@ -889,12 +991,22 @@ impl HostCore {
     }
 
     fn open(&mut self, request_id: u64, spec: SurfaceSpec) -> Result<Vec<WireMessage>, HostError> {
+        if self.validation_fault == Some(FaultPoint::ProfileLock) {
+            self.validation_fault = None;
+            return Ok(vec![WireMessage::Error {
+                request_id: Some(request_id),
+                code: "profile_locked".to_owned(),
+                message: "validation profile lock fault".to_owned(),
+            }]);
+        }
         spec.validate().map_err(runtime_error)?;
         // Deserialization does not invoke ProfileKey::new, so revalidate the
         // opaque key at the host boundary before it participates in a path.
         ProfileKey::new(spec.profile_key().as_str().to_owned()).map_err(runtime_error)?;
-        self.profile_store
-            .open(spec.profile_key(), spec.privacy())?;
+        let context = self
+            .profile_store
+            .open(spec.profile_key(), spec.privacy())
+            .map_err(profile_error)?;
         let surface_id = SurfaceId(self.next_surface_id);
         self.next_surface_id = self
             .next_surface_id
@@ -904,6 +1016,7 @@ impl HostCore {
             surface_id,
             SurfaceState {
                 spec: spec.clone(),
+                context,
                 last_command_sequence: 0,
                 next_event_sequence: 2,
             },
@@ -925,9 +1038,25 @@ impl HostCore {
 
     fn command(
         &mut self,
+        request_id: u64,
         surface_id: SurfaceId,
         command: SurfaceCommand,
     ) -> Result<Vec<WireMessage>, HostError> {
+        if let Some(fault) = self.validation_fault.take() {
+            let (code, message) = match fault {
+                FaultPoint::RendererCrash => ("renderer_crash", "validation renderer crash"),
+                FaultPoint::RendererOom => ("renderer_oom", "validation renderer OOM"),
+                FaultPoint::RendererHang => ("renderer_unresponsive", "validation renderer hang"),
+                FaultPoint::GpuCrash => ("gpu_crash", "validation GPU crash"),
+                FaultPoint::UtilityCrash => ("utility_crash", "validation utility crash"),
+                _ => return Err(HostError::Runtime("validation host fault".to_owned())),
+            };
+            return Ok(vec![WireMessage::Error {
+                request_id: Some(request_id),
+                code: code.to_owned(),
+                message: message.to_owned(),
+            }]);
+        }
         command.validate().map_err(runtime_error)?;
         let surface = self
             .surfaces
@@ -988,7 +1117,7 @@ impl HostCore {
             SurfaceCommand::Script { envelope, .. } => Some(SurfaceEvent::ScriptMessage {
                 surface_id,
                 sequence: next_event_sequence(surface),
-                envelope,
+                envelope: script_completion_envelope(&envelope).map_err(runtime_error)?,
             }),
             SurfaceCommand::Input { .. }
             | SurfaceCommand::Permission { .. }
@@ -997,10 +1126,9 @@ impl HostCore {
             | SurfaceCommand::Clipboard { .. }
             | SurfaceCommand::ReleaseFrame { .. } => None,
         };
-        Ok(event
-            .into_iter()
-            .map(|event| WireMessage::Event { event })
-            .collect())
+        let mut responses = vec![WireMessage::Ack { request_id }];
+        responses.extend(event.into_iter().map(|event| WireMessage::Event { event }));
+        Ok(responses)
     }
 
     fn close(&mut self, surface_id: SurfaceId) -> Result<Vec<WireMessage>, HostError> {
@@ -1008,6 +1136,9 @@ impl HostCore {
             .surfaces
             .remove(&surface_id)
             .ok_or_else(|| HostError::Runtime(format!("stale surface {surface_id}")))?;
+        self.profile_store
+            .release(surface.context.context_id())
+            .map_err(profile_error)?;
         Ok(vec![WireMessage::Event {
             event: SurfaceEvent::Closed {
                 surface_id,
@@ -1019,8 +1150,77 @@ impl HostCore {
 
     fn shutdown(&mut self) {
         self.surfaces.clear();
+        self.profile_store.shutdown();
         self.stopped = true;
     }
+
+    /// Clear one account's browser state.  The operation is intentionally
+    /// outside the four BrowserRuntime caller operations: the app invokes it
+    /// through its account-data/settings bridge after closing all surfaces.
+    /// The host still enforces quiescence so a stale caller cannot clear a
+    /// context that remains reachable.
+    pub fn clear_data(
+        &mut self,
+        profile_key: &ProfileKey,
+    ) -> Result<crate::browser_profile::ProfileClearResult, HostError> {
+        if self
+            .surfaces
+            .values()
+            .any(|surface| surface.spec.profile_key() == profile_key)
+        {
+            return Err(HostError::ProfileBusy);
+        }
+        self.profile_store
+            .clear_data(profile_key)
+            .map_err(profile_error)
+    }
+}
+
+/// Script commands are a generic BrowserRuntime execution seam.  The native
+/// CEF bridge evaluates the operation in the page; the transport-only Linux
+/// host still emits a host-sourced terminal event so command acknowledgements
+/// cannot remain pending or be mistaken for a page-originated message.
+fn script_completion_envelope(envelope: &ScriptEnvelope) -> Result<ScriptEnvelope, RuntimeError> {
+    let operation = envelope
+        .value()
+        .get("operation")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| RuntimeError::InvalidCommand("script operation is missing".into()))?;
+    if operation != "evaluate_javascript" && operation != "dispatch_script_message" {
+        return Err(RuntimeError::InvalidCommand(
+            "script operation is not supported".into(),
+        ));
+    }
+    ScriptEnvelope::new(
+        ScriptSource::Host,
+        envelope.origin().to_owned(),
+        envelope.channel().to_owned(),
+        format!("{}:complete", envelope.request_id()),
+        json!({"operation": operation, "status": "executed"}),
+    )
+}
+
+fn wire_error_for(request_id: u64, error: HostError) -> Result<Vec<WireMessage>, HostError> {
+    let (code, message) = match error {
+        HostError::Runtime(message) => ("runtime_failed", message),
+        HostError::Permission(message) => ("profile_unavailable", message),
+        HostError::ProfileBusy => ("profile_busy", "profile is busy".to_owned()),
+        HostError::ProfileCorrupt => ("profile_corrupt", "profile is corrupt".to_owned()),
+        HostError::ProfileUnavailable => {
+            ("profile_unavailable", "profile is unavailable".to_owned())
+        }
+        HostError::MigrationFailed => (
+            "migration_failed",
+            "profile migration failed; re-authentication is required".to_owned(),
+        ),
+        HostError::Usage(message) => ("invalid_command", message),
+        other => return Err(other),
+    };
+    Ok(vec![WireMessage::Error {
+        request_id: (request_id != 0).then_some(request_id),
+        code: code.to_owned(),
+        message,
+    }])
 }
 
 fn next_event_sequence(surface: &mut SurfaceState) -> u64 {
@@ -1033,95 +1233,15 @@ fn runtime_error(error: RuntimeError) -> HostError {
     HostError::Runtime(error.to_string())
 }
 
-struct ProfileStore {
-    root: PathBuf,
-}
-
-impl ProfileStore {
-    fn new(root: PathBuf) -> Self {
-        Self { root }
-    }
-
-    fn open(
-        &self,
-        key: &ProfileKey,
-        privacy: crate::browser_runtime::PrivacyMode,
-    ) -> Result<(), HostError> {
-        if privacy == crate::browser_runtime::PrivacyMode::Private {
-            // Private contexts intentionally never create a profile directory.
-            return Ok(());
+fn profile_error(error: ProfileError) -> HostError {
+    match error {
+        ProfileError::Busy => HostError::ProfileBusy,
+        ProfileError::Security | ProfileError::Unavailable | ProfileError::Io => {
+            HostError::ProfileUnavailable
         }
-        let directory = self.root.join(profile_directory_name(key));
-        if let Ok(metadata) = symlink_metadata(&directory) {
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(HostError::Permission(
-                    "persistent profile path is not a real directory".to_owned(),
-                ));
-            }
-            if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
-                return Err(HostError::Permission(
-                    "persistent profile path is not owner-only".to_owned(),
-                ));
-            }
-        } else {
-            create_private_directory(&directory)?;
-        }
-        let manifest = directory.join("profile.manifest");
-        let expected = format!(
-            "schema={PROFILE_SCHEMA}\nprofile_key={}\n",
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.as_str())
-        );
-        match OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&manifest)
-        {
-            Ok(mut file) => {
-                let metadata = file.metadata()?;
-                if !metadata.is_file()
-                    || metadata.uid() != unsafe { libc::geteuid() }
-                    || metadata.mode() & 0o077 != 0
-                {
-                    return Err(HostError::Permission(
-                        "persistent profile manifest is not owner-controlled".to_owned(),
-                    ));
-                }
-                let mut actual = String::new();
-                file.read_to_string(&mut actual)?;
-                if actual == expected {
-                    Ok(())
-                } else {
-                    Err(HostError::Permission(
-                        "persistent profile manifest does not match the requested key".to_owned(),
-                    ))
-                }
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                let temporary = directory.join("profile.manifest.new");
-                let mut file = OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .mode(0o600)
-                    .open(&temporary)?;
-                file.write_all(expected.as_bytes())?;
-                file.sync_all()?;
-                fs::rename(temporary, manifest)?;
-                Ok(())
-            }
-            Err(error) => Err(HostError::Io(error)),
-        }
+        ProfileError::Corrupt => HostError::ProfileCorrupt,
+        ProfileError::MigrationFailed => HostError::MigrationFailed,
     }
-}
-
-fn profile_directory_name(key: &ProfileKey) -> String {
-    // FNV-1a is used only for a stable, non-user-controlled directory name;
-    // the manifest remains the source of truth and detects collisions.
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in key.as_str().as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("profile-{hash:016x}")
 }
 
 #[cfg(test)]
@@ -1149,10 +1269,10 @@ mod tests {
         path
     }
 
-    fn spec(key: &str) -> SurfaceSpec {
+    fn spec_with_presentation(key: &str, presentation: PresentationMode) -> SurfaceSpec {
         SurfaceSpec::new(
             ProfileKey::new(key).unwrap(),
-            PresentationMode::Embedded,
+            presentation,
             PrivacyMode::Persistent,
             NavigationRequest::new(
                 "https://widget.test/index",
@@ -1163,6 +1283,41 @@ mod tests {
             SurfacePolicy::default(),
         )
         .unwrap()
+    }
+
+    fn spec(key: &str) -> SurfaceSpec {
+        spec_with_presentation(key, PresentationMode::Embedded)
+    }
+
+    fn host_args(extra: &[&str]) -> Vec<OsString> {
+        let mut args = vec![
+            OsString::from("cef_host"),
+            OsString::from("--socket"),
+            OsString::from("/tmp/roscord-cef.sock"),
+            OsString::from("--parent-pid"),
+            OsString::from("42"),
+            OsString::from("--parent-nonce"),
+            OsString::from("0123456789abcdef0123456789abcdef"),
+            OsString::from("--cef-root"),
+            OsString::from("/opt/roscord/cef"),
+            OsString::from("--profile-root"),
+            OsString::from("/tmp/roscord-profile"),
+        ];
+        args.extend(extra.iter().map(OsString::from));
+        args
+    }
+
+    #[test]
+    fn validation_faults_require_the_switch_and_known_names() {
+        let config =
+            HostConfig::parse(host_args(&["--cef-fault=host_crash", "--cef-validation"])).unwrap();
+        assert!(config.validation);
+        assert_eq!(config.fault, Some(FaultPoint::HostCrash));
+
+        let missing_switch = HostConfig::parse(host_args(&["--cef-fault=host_crash"]));
+        assert!(matches!(missing_switch, Err(HostError::Usage(_))));
+        let unknown = HostConfig::parse(host_args(&["--cef-validation", "--cef-fault=unknown"]));
+        assert!(matches!(unknown, Err(HostError::Usage(_))));
     }
 
     fn fake_cef_root(root: &Path) {
@@ -1209,6 +1364,11 @@ mod tests {
                 }
             }
         ));
+        assert_eq!(
+            host.dispatch(WireMessage::Heartbeat { request_id: 12 })
+                .unwrap(),
+            vec![WireMessage::HeartbeatAck { request_id: 12 }]
+        );
 
         let closed = host
             .dispatch(WireMessage::Close {
@@ -1295,6 +1455,7 @@ mod tests {
         };
         assert!(host
             .dispatch(WireMessage::Command {
+                request_id: 99,
                 surface_id: SurfaceId(1),
                 command,
             })
@@ -1308,16 +1469,167 @@ mod tests {
     }
 
     #[test]
+    fn host_core_acknowledges_the_global_transport_request_id() {
+        let root = temp_root("command-request-id");
+        let mut host = HostCore::new(root.clone());
+        host.dispatch(WireMessage::Open {
+            request_id: 1,
+            spec: spec("account-a"),
+        })
+        .unwrap();
+        let responses = host
+            .dispatch(WireMessage::Command {
+                request_id: 77,
+                surface_id: SurfaceId(1),
+                command: SurfaceCommand::Focus {
+                    sequence: 1,
+                    profile_key: Some(ProfileKey::new("account-a").unwrap()),
+                    focused: true,
+                },
+            })
+            .unwrap();
+        assert!(matches!(
+            responses.first(),
+            Some(WireMessage::Ack { request_id: 77 })
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn host_core_completes_generic_script_commands_without_echoing_app_messages() {
+        let root = temp_root("script-command");
+        let mut host = HostCore::new(root.clone());
+        host.dispatch(WireMessage::Open {
+            request_id: 1,
+            spec: spec("account-a"),
+        })
+        .unwrap();
+        let envelope = ScriptEnvelope::new(
+            ScriptSource::App,
+            "https://surface.example",
+            "test.channel",
+            "script-1",
+            json!({
+                "operation": "dispatch_script_message",
+                "storage_key": "app.toSurface:1",
+                "payload": "_{\"kind\":\"message\"}\n",
+            }),
+        )
+        .unwrap();
+        let responses = host
+            .dispatch(WireMessage::Command {
+                request_id: 9,
+                surface_id: SurfaceId(1),
+                command: SurfaceCommand::Script {
+                    sequence: 1,
+                    profile_key: Some(ProfileKey::new("account-a").unwrap()),
+                    envelope,
+                },
+            })
+            .unwrap();
+        assert!(matches!(
+            responses.first(),
+            Some(WireMessage::Ack { request_id: 9 })
+        ));
+        let WireMessage::Event {
+            event: SurfaceEvent::ScriptMessage { envelope, .. },
+        } = &responses[1]
+        else {
+            panic!("expected script completion event");
+        };
+        assert_eq!(envelope.source(), ScriptSource::Host);
+        assert_eq!(envelope.value()["status"], json!("executed"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn persistent_profiles_are_bound_by_manifest_and_private_profiles_leave_no_directory() {
         let root = temp_root("profiles");
-        let store = ProfileStore::new(root.clone());
+        let mut store = ProfileStore::new(root.clone());
         let account_a = ProfileKey::new("account-a").unwrap();
         let account_b = ProfileKey::new("account-b").unwrap();
-        store.open(&account_a, PrivacyMode::Persistent).unwrap();
-        store.open(&account_a, PrivacyMode::Persistent).unwrap();
-        assert!(store.open(&account_b, PrivacyMode::Persistent).is_ok());
-        store.open(&account_a, PrivacyMode::Private).unwrap();
-        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        let first = store.open(&account_a, PrivacyMode::Persistent).unwrap();
+        let second = store.open(&account_a, PrivacyMode::Persistent).unwrap();
+        let other = store.open(&account_b, PrivacyMode::Persistent).unwrap();
+        assert_eq!(first.context_id(), second.context_id());
+        assert_ne!(first.context_id(), other.context_id());
+        let private = store.open(&account_a, PrivacyMode::Private).unwrap();
+        assert_ne!(first.context_id(), private.context_id());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn host_core_clear_data_waits_for_quiescence_and_keeps_downloads() {
+        let root = temp_root("clear-data");
+        let mut host = HostCore::new(root.clone());
+        let key = ProfileKey::new("account-a").unwrap();
+        host.dispatch(WireMessage::Open {
+            request_id: 1,
+            spec: spec("account-a"),
+        })
+        .unwrap();
+
+        let profile_path = host
+            .profile_store
+            .persistent
+            .get(&key)
+            .and_then(|context| context.context.path())
+            .unwrap()
+            .to_owned();
+        fs::create_dir(profile_path.join("downloads")).unwrap();
+        File::create(profile_path.join("downloads").join("committed.bin")).unwrap();
+        File::create(profile_path.join("old-cache.bin")).unwrap();
+
+        assert!(matches!(host.clear_data(&key), Err(HostError::ProfileBusy)));
+        host.dispatch(WireMessage::Close {
+            surface_id: SurfaceId(1),
+        })
+        .unwrap();
+        let result = host.clear_data(&key).unwrap();
+        assert!(result.preserved_downloads());
+        assert!(profile_path
+            .join("downloads")
+            .join("committed.bin")
+            .exists());
+        assert!(!profile_path.join("old-cache.bin").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn same_account_persistent_presentations_share_one_context() {
+        let root = temp_root("presentations");
+        let mut host = HostCore::new(root.clone());
+        host.dispatch(WireMessage::Open {
+            request_id: 1,
+            spec: spec_with_presentation("account-a", PresentationMode::Embedded),
+        })
+        .unwrap();
+        host.dispatch(WireMessage::Open {
+            request_id: 2,
+            spec: spec_with_presentation("account-a", PresentationMode::Standalone),
+        })
+        .unwrap();
+        assert_eq!(
+            host.surfaces
+                .get(&SurfaceId(1))
+                .unwrap()
+                .context
+                .context_id(),
+            host.surfaces
+                .get(&SurfaceId(2))
+                .unwrap()
+                .context
+                .context_id()
+        );
+        host.dispatch(WireMessage::Close {
+            surface_id: SurfaceId(1),
+        })
+        .unwrap();
+        host.dispatch(WireMessage::Close {
+            surface_id: SurfaceId(2),
+        })
+        .unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -2,6 +2,7 @@
 #define NOMINMAX
 
 #include <windows.h>
+#include <aclapi.h>
 #include <sddl.h>
 #include <shellapi.h>
 
@@ -15,10 +16,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <tchar.h>
@@ -29,13 +33,19 @@
 #include "include/cef_app.h"
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
+#include "include/cef_cookie.h"
+#include "include/cef_process_message.h"
 #include "include/cef_parser.h"
 #include "include/cef_render_handler.h"
+#include "include/cef_render_process_handler.h"
+#include "include/cef_request_handler.h"
+#include "include/cef_request_context.h"
 #include "include/cef_request.h"
 #include "include/cef_resource_handler.h"
 #include "include/cef_sandbox_win.h"
 #include "include/cef_scheme.h"
 #include "include/cef_task.h"
+#include "include/cef_v8.h"
 #include "include/cef_version_info.h"
 #include "include/wrapper/cef_helpers.h"
 
@@ -48,6 +58,8 @@ constexpr uint32_t kMaxFrameBytes = 1024u * 1024u;
 constexpr DWORD kConnectTimeoutMs = 10000;
 constexpr wchar_t kPipePrefix[] = L"\\\\.\\pipe\\roscord-browser-";
 constexpr char kFixtureUrl[] = "commet://fixture/";
+constexpr char kEvaluateJavaScriptOperation[] = "evaluate_javascript";
+constexpr char kDispatchScriptMessageOperation[] = "dispatch_script_message";
 
 // The browser runtime owns the protocol boundary.  Keep the list here as a
 // deny-list as a second line of defence against inherited CEF command-line
@@ -90,6 +102,29 @@ bool IsValidProfileKey(std::string_view value) {
   return std::all_of(value.begin(), value.end(), [](unsigned char c) {
     return c >= 0x20 && c != 0x7f && c != '/' && c != '\\';
   });
+}
+
+std::string HexEncode(std::string_view value) {
+  constexpr char kHex[] = "0123456789abcdef";
+  std::string encoded;
+  encoded.reserve(value.size() * 2);
+  for (const unsigned char byte : value) {
+    encoded.push_back(kHex[byte >> 4]);
+    encoded.push_back(kHex[byte & 0x0f]);
+  }
+  return encoded;
+}
+
+std::wstring ProfileDirectoryName(std::string_view key) {
+  uint64_t hash = 0xcbf29ce484222325ull;
+  for (const unsigned char byte : key) {
+    hash ^= byte;
+    hash *= 0x100000001b3ull;
+  }
+  wchar_t buffer[32]{};
+  swprintf_s(buffer, L"profile-%016llx",
+             static_cast<unsigned long long>(hash));
+  return buffer;
 }
 
 std::wstring ModuleDirectory() {
@@ -157,8 +192,11 @@ bool IsPathInDirectory(const std::filesystem::path& path,
 struct HostArgs {
   DWORD parent_pid = 0;
   std::wstring pipe_name;
+  std::filesystem::path profile_root;
   std::string nonce;
   std::wstring module_name;
+  bool validation = false;
+  std::optional<std::string> fault;
 };
 
 struct ParsedCommandLine {
@@ -227,8 +265,21 @@ bool ValidatePipeName(std::wstring_view pipe_name) {
   });
 }
 
+bool IsKnownFaultPoint(std::wstring_view fault) {
+  static constexpr std::array<std::wstring_view, 11> kFaultPoints = {
+      L"host_crash",       L"host_unresponsive", L"renderer_crash",
+      L"renderer_oom",     L"renderer_hang",     L"gpu_crash",
+      L"utility_crash",    L"bad_bundle",        L"bad_protocol",
+      L"sandbox_failure",  L"profile_lock",
+  };
+  return std::find(kFaultPoints.begin(), kFaultPoints.end(), fault) !=
+         kFaultPoints.end();
+}
+
 std::optional<HostArgs> ValidateHostArgs(const ParsedCommandLine& command_line,
                                           std::wstring& error) {
+  bool validation = false;
+  std::optional<std::wstring> fault_name;
   for (const auto& value : command_line.values) {
     const std::wstring lowered = Lowercase(value);
     for (const auto forbidden : kForbiddenSwitches) {
@@ -239,26 +290,74 @@ std::optional<HostArgs> ValidateHostArgs(const ParsedCommandLine& command_line,
         return std::nullopt;
       }
     }
+    if (lowered == L"--cef-validation") {
+#ifdef NDEBUG
+      error = L"CEF validation controls are disabled in production builds";
+      return std::nullopt;
+#else
+      validation = true;
+#endif
+    } else if (StartsWith(lowered, L"--cef-fault=")) {
+#ifdef NDEBUG
+      error = L"CEF fault injection is disabled in production builds";
+      return std::nullopt;
+#else
+      const auto value_name = value.substr(std::wstring(L"--cef-fault=").size());
+      if (value_name.empty()) {
+        error = L"CEF fault point is empty";
+        return std::nullopt;
+      }
+      fault_name = value_name;
+#endif
+    }
   }
 
   const auto module = ValueForSwitch(command_line.values, L"--module");
   const auto pipe = ValueForSwitch(command_line.values, L"--pipe");
   const auto nonce = ValueForSwitch(command_line.values, L"--nonce");
   const auto parent = ValueForSwitch(command_line.values, L"--parent-pid");
+  const auto profile_root = ValueForSwitch(command_line.values, L"--profile-root");
   if (!module || Lowercase(*module) != L"client.dll" || !pipe || !nonce ||
-      !parent) {
-    error = L"cef_host requires --module=client.dll, --pipe, --nonce, and --parent-pid";
+      !parent || !profile_root) {
+    error = L"cef_host requires --module=client.dll, --pipe, --nonce, --parent-pid, and --profile-root";
     return std::nullopt;
   }
 
+#ifndef NDEBUG
+  std::optional<std::string> fault;
+  if (fault_name.has_value()) {
+    if (!validation) {
+      error = L"CEF fault injection requires --cef-validation";
+      return std::nullopt;
+    }
+    const auto lowered_fault = Lowercase(*fault_name);
+    if (!IsKnownFaultPoint(lowered_fault)) {
+      error = L"unknown CEF fault point";
+      return std::nullopt;
+    }
+    fault = std::string(fault_name->begin(), fault_name->end());
+  }
+#else
+  std::optional<std::string> fault;
+#endif
+
   HostArgs result;
   result.module_name = *module;
+  result.validation = validation;
+  result.fault = fault;
   result.pipe_name = *pipe;
+  result.profile_root = std::filesystem::path(*profile_root);
   result.nonce.assign(nonce->begin(), nonce->end());
   if (!ValidatePipeName(result.pipe_name) || result.nonce.size() < 32 ||
       result.nonce.size() > 128 || !IsHex(result.nonce) ||
       !ParseDword(*parent, result.parent_pid) ||
-      result.parent_pid == GetCurrentProcessId()) {
+      result.parent_pid == GetCurrentProcessId() ||
+      !result.profile_root.is_absolute() ||
+      std::any_of(result.profile_root.begin(), result.profile_root.end(),
+                  [](const auto& component) {
+                    return component == std::filesystem::path(L"..") ||
+                           component == std::filesystem::path(L".");
+                  })) {
     error = L"cef_host transport arguments are invalid";
     return std::nullopt;
   }
@@ -353,6 +452,228 @@ class OwnerOnlySecurityDescriptor {
  private:
   PSECURITY_DESCRIPTOR descriptor_ = nullptr;
 };
+
+bool IsOwnerControlled(const std::filesystem::path& path) {
+  const DWORD attributes = GetFileAttributesW(path.c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES ||
+      (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+    return false;
+  }
+  for (auto ancestor = path.parent_path(); !ancestor.empty();
+       ancestor = ancestor.parent_path()) {
+    const DWORD ancestor_attributes = GetFileAttributesW(ancestor.c_str());
+    if (ancestor_attributes == INVALID_FILE_ATTRIBUTES ||
+        (ancestor_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+      return false;
+    }
+    if (ancestor == ancestor.root_path()) break;
+  }
+
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  PSID owner = nullptr;
+  PACL dacl = nullptr;
+  if (GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT,
+                            OWNER_SECURITY_INFORMATION |
+                                DACL_SECURITY_INFORMATION,
+                            &owner, nullptr, &dacl, nullptr,
+                            &descriptor) != ERROR_SUCCESS ||
+      owner == nullptr || dacl == nullptr) {
+    if (descriptor != nullptr) LocalFree(descriptor);
+    return false;
+  }
+
+  HANDLE token = nullptr;
+  bool owner_matches = false;
+  if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+    DWORD size = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    std::vector<std::byte> token_data(size);
+    if (size != 0 && GetTokenInformation(token, TokenUser, token_data.data(),
+                                         size, &size)) {
+      owner_matches = EqualSid(owner,
+                               reinterpret_cast<PTOKEN_USER>(token_data.data())
+                                   ->User.Sid) != FALSE;
+    }
+    CloseHandle(token);
+  }
+  bool only_owner = owner_matches;
+  for (DWORD index = 0; only_owner && index < dacl->AceCount; ++index) {
+    LPVOID raw_ace = nullptr;
+    if (!GetAce(dacl, index, &raw_ace)) {
+      only_owner = false;
+      break;
+    }
+    const auto* header = static_cast<const ACE_HEADER*>(raw_ace);
+    if (header->AceType != ACCESS_ALLOWED_ACE_TYPE) continue;
+    const auto* ace = static_cast<const ACCESS_ALLOWED_ACE*>(raw_ace);
+    if (!owner_matches ||
+        !EqualSid(&ace->SidStart, owner)) {
+      only_owner = false;
+    }
+  }
+  LocalFree(descriptor);
+  return only_owner;
+}
+
+class CompletionLatch final : public CefCompletionCallback {
+ public:
+  void OnComplete() override {
+    {
+      std::lock_guard lock(mutex_);
+      complete_ = true;
+    }
+    condition_.notify_all();
+  }
+
+  bool Wait(std::chrono::seconds timeout) {
+    std::unique_lock lock(mutex_);
+    return condition_.wait_for(lock, timeout, [&] { return complete_; });
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  bool complete_ = false;
+  IMPLEMENT_REFCOUNTING(CompletionLatch);
+};
+
+bool FlushAndCloseContext(const CefRefPtr<CefRequestContext>& context,
+                          std::string& error) {
+  if (context == nullptr) return true;
+
+  CefRefPtr<CompletionLatch> certificates = new CompletionLatch();
+  context->ClearCertificateExceptions(certificates);
+  if (!certificates->Wait(std::chrono::seconds(5))) {
+    error = "profile certificate exceptions did not clear";
+    return false;
+  }
+
+  CefRefPtr<CompletionLatch> credentials = new CompletionLatch();
+  context->ClearHttpAuthCredentials(credentials);
+  if (!credentials->Wait(std::chrono::seconds(5))) {
+    error = "profile HTTP credentials did not clear";
+    return false;
+  }
+
+  auto cookie_manager = context->GetCookieManager(nullptr);
+  if (cookie_manager != nullptr) {
+    CefRefPtr<CompletionLatch> flushed = new CompletionLatch();
+    cookie_manager->FlushStore(flushed);
+    if (!flushed->Wait(std::chrono::seconds(5))) {
+      error = "profile cookie store did not flush";
+      return false;
+    }
+  }
+
+  CefRefPtr<CompletionLatch> closed = new CompletionLatch();
+  context->CloseAllConnections(closed);
+  if (!closed->Wait(std::chrono::seconds(5))) {
+    error = "profile connections did not close";
+    return false;
+  }
+  return true;
+}
+
+bool WriteOwnerManifest(const std::filesystem::path& path,
+                        std::string_view contents) {
+  HANDLE file = CreateFileW(
+      path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT |
+          FILE_FLAG_WRITE_THROUGH,
+      nullptr);
+  if (file == INVALID_HANDLE_VALUE) return false;
+
+  DWORD written = 0;
+  const bool wrote = WriteFile(file, contents.data(),
+                               static_cast<DWORD>(contents.size()), &written,
+                               nullptr) != FALSE &&
+                     written == static_cast<DWORD>(contents.size());
+  const bool flushed = wrote && FlushFileBuffers(file) != FALSE;
+  CloseHandle(file);
+  return flushed && IsOwnerControlled(path);
+}
+
+bool ReadOwnerManifest(const std::filesystem::path& path, std::string& contents) {
+  HANDLE file = CreateFileW(
+      path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return false;
+
+  LARGE_INTEGER size{};
+  const bool sized = GetFileSizeEx(file, &size) != FALSE && size.QuadPart >= 0 &&
+                     size.QuadPart <= 4096;
+  if (!sized) {
+    CloseHandle(file);
+    return false;
+  }
+  contents.assign(static_cast<size_t>(size.QuadPart), '\0');
+  DWORD read = 0;
+  const bool read_ok = ReadFile(file, contents.data(),
+                                static_cast<DWORD>(contents.size()), &read,
+                                nullptr) != FALSE &&
+                       read == static_cast<DWORD>(contents.size());
+  CloseHandle(file);
+  return read_ok && IsOwnerControlled(path);
+}
+
+bool MakeOwnerOnlyDirectory(const std::filesystem::path& path) {
+  std::error_code error;
+  std::filesystem::create_directories(path, error);
+  if (error) return false;
+  OwnerOnlySecurityDescriptor security;
+  if (!security.Create()) return false;
+  PACL dacl = nullptr;
+  BOOL present = FALSE;
+  BOOL defaulted = FALSE;
+  if (!GetSecurityDescriptorDacl(security.get(), &present, &dacl,
+                                 &defaulted) ||
+      !present || dacl == nullptr) {
+    return false;
+  }
+  return SetNamedSecurityInfoW(
+             const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
+             DACL_SECURITY_INFORMATION, nullptr, nullptr, dacl, nullptr) ==
+         ERROR_SUCCESS;
+}
+
+bool ValidateProfileRoot(const std::filesystem::path& path) {
+  if (!path.is_absolute() ||
+      std::any_of(path.begin(), path.end(), [](const auto& component) {
+        return component == std::filesystem::path(L"..") ||
+               component == std::filesystem::path(L".");
+      })) {
+    return false;
+  }
+  for (auto ancestor = path; !ancestor.empty(); ancestor = ancestor.parent_path()) {
+    const DWORD attributes = GetFileAttributesW(ancestor.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES &&
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+      return false;
+    }
+    if (ancestor == ancestor.root_path()) break;
+  }
+  std::error_code error;
+  const bool existed = GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+  std::filesystem::create_directories(path, error);
+  if (error) return false;
+  if (!existed) return MakeOwnerOnlyDirectory(path);
+  return IsOwnerControlled(path);
+}
+
+bool RejectReparseBelow(const std::filesystem::path& directory) {
+  const DWORD attributes = GetFileAttributesW(directory.c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES ||
+      (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+    return false;
+  }
+  if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) return true;
+
+  std::error_code error;
+  for (const auto& entry : std::filesystem::directory_iterator(directory, error)) {
+    if (error || !RejectReparseBelow(entry.path())) return false;
+  }
+  return !error;
+}
 
 class PipeChannel {
  public:
@@ -611,11 +932,53 @@ class FixtureSchemeHandlerFactory final : public CefSchemeHandlerFactory {
   IMPLEMENT_REFCOUNTING(FixtureSchemeHandlerFactory);
 };
 
-class HostApp final : public CefApp, public CefBrowserProcessHandler {
+// The renderer-side half of the generic BrowserRuntime script bridge.  It
+// deliberately accepts only a JSON string: the browser process validates and
+// wraps the opaque value as a ScriptEnvelope before it reaches Dart.  No
+// Caller-specific action or capability vocabulary crosses this CEF boundary.
+class BrowserRuntimeSendHandler final : public CefV8Handler {
+ public:
+  bool Execute(const CefString& name, CefRefPtr<CefV8Value> object,
+               const CefV8ValueList& arguments,
+               CefRefPtr<CefV8Value>& retval,
+               CefString& exception) override {
+    (void)name;
+    (void)object;
+    retval = CefV8Value::CreateUndefined();
+    if (arguments.size() != 1 || !arguments[0]->IsString()) {
+      exception = "BrowserRuntime bridge expects one JSON string";
+      return false;
+    }
+    const auto context = CefV8Context::GetCurrentContext();
+    if (context == nullptr || context->GetBrowser() == nullptr) {
+      exception = "BrowserRuntime bridge has no browser context";
+      return false;
+    }
+    auto message = CefProcessMessage::Create("roscord_browser_runtime_send");
+    message->GetArgumentList()->SetString(
+        0, arguments[0]->GetStringValue());
+    if (!context->GetBrowser()->SendProcessMessage(PID_BROWSER, message)) {
+      exception = "BrowserRuntime bridge could not reach the host";
+      return false;
+    }
+    return true;
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(BrowserRuntimeSendHandler);
+};
+
+class HostApp final : public CefApp,
+                      public CefBrowserProcessHandler,
+                      public CefRenderProcessHandler {
  public:
   HostApp() = default;
 
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override {
+    return this;
+  }
+
+  CefRefPtr<CefRenderProcessHandler> GetRenderProcessHandler() override {
     return this;
   }
 
@@ -637,6 +1000,20 @@ class HostApp final : public CefApp, public CefBrowserProcessHandler {
     condition_.notify_all();
   }
 
+  void OnContextCreated(CefRefPtr<CefBrowser> browser,
+                        CefRefPtr<CefFrame> frame,
+                        CefRefPtr<CefV8Context> context) override {
+    CEF_REQUIRE_RENDERER_THREAD();
+    (void)browser;
+    (void)frame;
+    const auto global = context->GetGlobal();
+    global->SetValue(
+        "__roscordBrowserRuntimeSend",
+        CefV8Value::CreateFunction("__roscordBrowserRuntimeSend",
+                                   new BrowserRuntimeSendHandler()),
+        V8_PROPERTY_ATTRIBUTE_NONE);
+  }
+
   bool WaitForContext(std::chrono::seconds timeout) {
     std::unique_lock lock(mutex_);
     return condition_.wait_for(lock, timeout,
@@ -650,30 +1027,342 @@ class HostApp final : public CefApp, public CefBrowserProcessHandler {
   IMPLEMENT_REFCOUNTING(HostApp);
 };
 
+// The host, rather than a caller, owns request-context creation.  This keeps
+// cookies, cache, storage, credentials, and permission decisions inside one
+// account-bound context while private surfaces receive an in-memory context.
+class ProfileManager {
+ public:
+  explicit ProfileManager(std::filesystem::path root) : root_(std::move(root)) {}
+
+  bool Open(std::string_view key, std::string_view privacy,
+            CefRefPtr<CefRequestContext>& context, uint64_t& context_id,
+            std::string& error) {
+    std::lock_guard lock(mutex_);
+    if (!IsValidProfileKey(key)) {
+      error = "profile key is invalid";
+      return false;
+    }
+    if (clearing_.find(std::string(key)) != clearing_.end()) {
+      error = "profile is busy";
+      return false;
+    }
+    if (privacy == "persistent") {
+      const auto existing = persistent_.find(std::string(key));
+      if (existing != persistent_.end()) {
+        auto iterator = contexts_.find(existing->second);
+        if (iterator == contexts_.end()) {
+          error = "profile is unavailable";
+          return false;
+        }
+        if (!EnsureExistingProfile(key, iterator->second.path, error)) {
+          return false;
+        }
+        iterator->second.active += 1;
+        context_id = iterator->second.id;
+        context = iterator->second.context;
+        return true;
+      }
+
+      std::filesystem::path profile_path;
+      if (!EnsureProfile(key, profile_path, error)) return false;
+      CefRequestContextSettings settings;
+      settings.cache_path = profile_path.wstring();
+      settings.persist_session_cookies = true;
+      settings.persist_user_preferences = true;
+      context = CefRequestContext::CreateContext(settings, nullptr);
+      if (context == nullptr) {
+        error = "persistent request context could not be created";
+        return false;
+      }
+      context_id = next_context_id_++;
+      contexts_.emplace(context_id,
+                        Context{context_id, std::string(key), false, 1,
+                                profile_path, context});
+      persistent_.emplace(std::string(key), context_id);
+      return true;
+    }
+    if (privacy != "private") {
+      error = "privacy mode is invalid";
+      return false;
+    }
+
+    CefRequestContextSettings settings;
+    settings.cache_path.clear();
+    settings.persist_session_cookies = false;
+    settings.persist_user_preferences = false;
+    context = CefRequestContext::CreateContext(settings, nullptr);
+    if (context == nullptr) {
+      error = "private request context could not be created";
+      return false;
+    }
+    context_id = next_context_id_++;
+    contexts_.emplace(context_id,
+                      Context{context_id, std::string(key), true, 1, {}, context});
+    return true;
+  }
+
+  bool Release(uint64_t context_id) {
+    std::lock_guard lock(mutex_);
+    const auto iterator = contexts_.find(context_id);
+    if (iterator == contexts_.end() || iterator->second.active <= 0) return false;
+    iterator->second.active -= 1;
+    if (iterator->second.is_private) contexts_.erase(iterator);
+    return true;
+  }
+
+  bool ClearData(std::string_view key, std::string& error) {
+    if (!IsValidProfileKey(key)) {
+      error = "profile key is invalid";
+      return false;
+    }
+    const std::string account(key);
+    std::unique_lock lock(mutex_);
+    if (clearing_.find(account) != clearing_.end()) {
+      error = "profile is busy";
+      return false;
+    }
+    for (const auto& entry : contexts_) {
+      const auto& context = entry.second;
+      if (context.key == account && context.active != 0) {
+        error = "profile is busy";
+        return false;
+      }
+    }
+    clearing_.insert(account);
+    CefRefPtr<CefRequestContext> old_context;
+    const auto persistent = persistent_.find(std::string(key));
+    if (persistent != persistent_.end()) {
+      const auto context = contexts_.find(persistent->second);
+      if (context != contexts_.end()) old_context = context->second.context;
+      if (context != contexts_.end()) contexts_.erase(context);
+      persistent_.erase(persistent);
+    }
+    lock.unlock();
+
+    const auto finish = [&]() {
+      std::lock_guard relock(mutex_);
+      clearing_.erase(account);
+    };
+    if (!FlushAndCloseContext(old_context, error)) {
+      finish();
+      return false;
+    }
+    old_context = nullptr;
+
+    std::filesystem::path profile_path;
+    if (!EnsureProfile(key, profile_path, error)) {
+      finish();
+      return false;
+    }
+    std::error_code iterator_error;
+    for (std::filesystem::directory_iterator iterator(profile_path,
+                                                       iterator_error),
+         end;
+         iterator != end; iterator.increment(iterator_error)) {
+      if (iterator_error) {
+        error = "profile data could not be enumerated";
+        finish();
+        return false;
+      }
+      const auto& entry = *iterator;
+      const auto name = entry.path().filename();
+      if (name == L"profile.manifest") continue;
+      if (name == L"downloads") {
+        const DWORD attributes = GetFileAttributesW(entry.path().c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES ||
+            (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+          error = "profile downloads entry is not a real path";
+          finish();
+          return false;
+        }
+        continue;
+      }
+      if (!RemoveTree(entry.path())) {
+        error = "profile data could not be cleared";
+        finish();
+        return false;
+      }
+    }
+    if (iterator_error) {
+      error = "profile data could not be enumerated";
+      finish();
+      return false;
+    }
+    const bool valid = EnsureProfile(key, profile_path, error);
+    finish();
+    return valid;
+  }
+
+  void Shutdown() {
+    std::lock_guard lock(mutex_);
+    std::string ignored;
+    for (const auto& entry : contexts_) {
+      const auto& context = entry.second;
+      if (!context.is_private) {
+        FlushAndCloseContext(context.context, ignored);
+      }
+    }
+    contexts_.clear();
+    persistent_.clear();
+    clearing_.clear();
+  }
+
+ private:
+  struct Context {
+    uint64_t id;
+    std::string key;
+    bool is_private;
+    int active;
+    std::filesystem::path path;
+    CefRefPtr<CefRequestContext> context;
+  };
+
+  bool EnsureProfile(std::string_view key, std::filesystem::path& profile_path,
+                     std::string& error) const {
+    if (!IsValidProfileKey(key)) {
+      error = "profile key is invalid";
+      return false;
+    }
+    profile_path = root_ / ProfileDirectoryName(key);
+    if (!IsPathInDirectory(profile_path, root_)) {
+      error = "profile path is outside the app-data root";
+      return false;
+    }
+    const DWORD attributes = GetFileAttributesW(profile_path.c_str());
+    const bool created = attributes == INVALID_FILE_ATTRIBUTES;
+    if (created) {
+      if (!MakeOwnerOnlyDirectory(profile_path)) {
+        error = "profile directory could not be created";
+        return false;
+      }
+    } else if (!IsOwnerControlled(profile_path)) {
+      error = "profile directory is not owner-controlled";
+      return false;
+    }
+    if (!RejectReparseBelow(profile_path)) {
+      error = "profile directory contains a reparse point";
+      return false;
+    }
+
+    const auto manifest = profile_path / L"profile.manifest";
+    if (!IsRegularFile(manifest)) {
+      if (!created) {
+        if (!Quarantine(profile_path)) {
+          error = "profile quarantine failed";
+          return false;
+        }
+        error = "profile migration failed";
+        return false;
+      }
+      const std::string expected =
+          "schema=1\nprofile_key=" + HexEncode(key) + "\n";
+      if (!WriteOwnerManifest(manifest, expected)) {
+        error = "profile manifest could not be created";
+        return false;
+      }
+      return true;
+    }
+
+    const std::string expected = "schema=1\nprofile_key=" + HexEncode(key) + "\n";
+    std::string actual;
+    if (!ReadOwnerManifest(manifest, actual) || actual != expected) {
+      if (!Quarantine(profile_path)) {
+        error = "profile quarantine failed";
+        return false;
+      }
+      error = "profile migration failed";
+      return false;
+    }
+    return true;
+  }
+
+  bool EnsureExistingProfile(std::string_view key,
+                             const std::filesystem::path& expected_path,
+                             std::string& error) const {
+    const DWORD attributes = GetFileAttributesW(expected_path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+      error = "profile migration failed";
+      return false;
+    }
+    std::filesystem::path profile_path;
+    if (!EnsureProfile(key, profile_path, error)) return false;
+    if (profile_path != expected_path) {
+      error = "profile is corrupt";
+      return false;
+    }
+    return true;
+  }
+
+  static bool RemoveTree(const std::filesystem::path& path) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+      return false;
+    }
+    std::error_code error;
+    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+      for (const auto& entry : std::filesystem::directory_iterator(path, error)) {
+        if (error || !RemoveTree(entry.path())) return false;
+      }
+      return std::filesystem::remove(path, error) && !error;
+    }
+    return std::filesystem::remove(path, error) && !error;
+  }
+
+  static bool Quarantine(const std::filesystem::path& path) {
+    const auto destination = path.parent_path() /
+        (L"quarantine-" + std::to_wstring(GetTickCount64()) + L"-" +
+         path.filename().wstring());
+    return MoveFileExW(path.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH) !=
+           FALSE;
+  }
+
+  std::filesystem::path root_;
+  std::mutex mutex_;
+  uint64_t next_context_id_ = 1;
+  std::map<uint64_t, Context> contexts_;
+  std::map<std::string, uint64_t> persistent_;
+  std::set<std::string> clearing_;
+};
+
 class CreateBrowserTask;
 class CloseBrowserTask;
 
 struct SurfaceState {
   uint64_t id = 0;
   std::string profile_key;
+  uint64_t context_id = 0;
+  CefRefPtr<CefRequestContext> request_context;
   std::string presentation;
   int last_command_sequence = 0;
+  uint64_t next_event_sequence = 2;
   CefRefPtr<CefBrowser> browser;
   bool close_requested = false;
 };
 
 class BrowserClient final : public CefClient,
                             public CefLifeSpanHandler,
-                            public CefRenderHandler {
+                            public CefRenderHandler,
+                            public CefRequestHandler {
  public:
   BrowserClient(HostController* controller, uint64_t surface_id)
       : controller_(controller), surface_id_(surface_id) {}
 
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefRenderHandler> GetRenderHandler() override { return this; }
+  CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
 
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override;
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override;
+  void OnRenderProcessTerminated(CefRefPtr<CefBrowser> browser,
+                                 TerminationStatus status,
+                                 int error_code,
+                                 const CefString& error_string) override;
+  void OnRenderProcessUnresponsive(CefRefPtr<CefBrowser> browser) override;
+  bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
+                                CefRefPtr<CefFrame> frame,
+                                CefProcessId source_process,
+                                CefRefPtr<CefProcessMessage> message) override;
 
   bool GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect) override {
     rect = CefRect(0, 0, 1024, 768);
@@ -710,7 +1399,7 @@ class BrowserClient final : public CefClient,
 class HostController {
  public:
   HostController(const HostArgs& args, PipeChannel& pipe)
-      : args_(args), pipe_(pipe) {}
+      : args_(args), pipe_(pipe), profiles_(args.profile_root) {}
   HostController(const HostController&) = delete;
   HostController& operator=(const HostController&) = delete;
 
@@ -721,6 +1410,24 @@ class HostController {
   void CloseBrowserOnUi(uint64_t surface_id);
   void OnBrowserCreated(uint64_t surface_id, CefRefPtr<CefBrowser> browser);
   void OnBrowserClosed(uint64_t surface_id);
+  void OnBrowserRuntimeSend(uint64_t surface_id,
+                            CefRefPtr<CefBrowser> browser,
+                            std::string payload);
+  void ExecuteScriptOnUi(uint64_t surface_id, int request_id,
+                         CefRefPtr<CefDictionaryValue> envelope);
+  void OnRendererFailure(uint64_t surface_id, std::string_view code,
+                         std::string_view message);
+  bool ClearData(std::string_view profile_key, std::string& error) {
+    std::lock_guard lock(state_mutex_);
+    if (std::any_of(surfaces_.begin(), surfaces_.end(),
+                    [&](const auto& entry) {
+                      return entry.second.profile_key == profile_key;
+                    })) {
+      error = "profile is busy";
+      return false;
+    }
+    return profiles_.ClearData(profile_key, error);
+  }
 
  private:
   bool HandleFrame(std::string_view body);
@@ -730,22 +1437,34 @@ class HostController {
   bool HandleOpen(CefRefPtr<CefDictionaryValue> payload);
   bool HandleClose(CefRefPtr<CefDictionaryValue> payload);
   bool HandleCommand(CefRefPtr<CefDictionaryValue> payload);
+  bool HandleHeartbeat(CefRefPtr<CefDictionaryValue> payload);
   void SendMessage(CefRefPtr<CefDictionaryValue> message);
   void SendError(std::optional<int> request_id, std::string_view code,
                  std::string_view message);
+  void SendAck(int request_id);
+  void SendHeartbeatAck(int request_id);
   void SendOpened(int request_id, uint64_t surface_id);
   void SendReady(const SurfaceState& surface, std::string_view url);
   void SendClosed(uint64_t surface_id, uint64_t sequence);
+  void SendScriptComplete(uint64_t surface_id,
+                          CefRefPtr<CefDictionaryValue> envelope,
+                          std::string_view operation);
+  void SendScriptMessage(uint64_t surface_id,
+                         CefRefPtr<CefDictionaryValue> envelope);
   std::optional<SurfaceState> GetSurface(uint64_t surface_id);
   bool HasSurface(uint64_t surface_id);
 
   HostArgs args_;
   PipeChannel& pipe_;
   std::mutex state_mutex_;
+  std::mutex pipe_mutex_;
   std::map<uint64_t, SurfaceState> surfaces_;
+  ProfileManager profiles_;
   uint64_t next_surface_id_ = 1;
   std::atomic<bool> stopping_ = false;
   std::condition_variable closed_condition_;
+  bool validation_fault_consumed_ = false;
+  bool shutdown_timed_out_ = false;
 };
 
 class CreateBrowserTask final : public CefTask {
@@ -783,6 +1502,28 @@ class CloseBrowserTask final : public CefTask {
   IMPLEMENT_REFCOUNTING(CloseBrowserTask);
 };
 
+class ExecuteScriptTask final : public CefTask {
+ public:
+  ExecuteScriptTask(HostController* controller, uint64_t surface_id,
+                    int request_id,
+                    CefRefPtr<CefDictionaryValue> envelope)
+      : controller_(controller),
+        surface_id_(surface_id),
+        request_id_(request_id),
+        envelope_(std::move(envelope)) {}
+
+  void Execute() override {
+    controller_->ExecuteScriptOnUi(surface_id_, request_id_, envelope_);
+  }
+
+ private:
+  HostController* controller_;
+  uint64_t surface_id_;
+  int request_id_;
+  CefRefPtr<CefDictionaryValue> envelope_;
+  IMPLEMENT_REFCOUNTING(ExecuteScriptTask);
+};
+
 CefRefPtr<CefDictionaryValue> Dictionary(CefRefPtr<CefValue> value) {
   if (value == nullptr || value->GetType() != VTYPE_DICTIONARY) {
     return nullptr;
@@ -813,6 +1554,7 @@ void HostController::SendMessage(CefRefPtr<CefDictionaryValue> message) {
   if (stopping_) {
     return;
   }
+  std::lock_guard lock(pipe_mutex_);
   const std::string body = Json(NewEnvelope(message, args_.nonce));
   if (body.empty() || !pipe_.WriteFrame(body)) {
     stopping_ = true;
@@ -832,6 +1574,24 @@ void HostController::SendError(std::optional<int> request_id,
   payload->SetString("message", std::string(message));
   auto wire = NewDictionary();
   wire->SetString("type", "error");
+  wire->SetDictionary("payload", payload);
+  SendMessage(wire);
+}
+
+void HostController::SendAck(int request_id) {
+  auto payload = NewDictionary();
+  payload->SetInt("request_id", request_id);
+  auto wire = NewDictionary();
+  wire->SetString("type", "ack");
+  wire->SetDictionary("payload", payload);
+  SendMessage(wire);
+}
+
+void HostController::SendHeartbeatAck(int request_id) {
+  auto payload = NewDictionary();
+  payload->SetInt("request_id", request_id);
+  auto wire = NewDictionary();
+  wire->SetString("type", "heartbeat_ack");
   wire->SetDictionary("payload", payload);
   SendMessage(wire);
 }
@@ -888,6 +1648,115 @@ void HostController::SendClosed(uint64_t surface_id, uint64_t sequence) {
   SendMessage(wire);
 }
 
+void HostController::SendScriptMessage(
+    uint64_t surface_id, CefRefPtr<CefDictionaryValue> envelope) {
+  if (envelope == nullptr || !HasSurface(surface_id)) return;
+  uint64_t sequence = 0;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return;
+    sequence = iterator->second.next_event_sequence++;
+  }
+  auto event_payload = NewDictionary();
+  event_payload->SetInt("surface_id", static_cast<int>(surface_id));
+  event_payload->SetInt("sequence", static_cast<int>(sequence));
+  event_payload->SetDictionary("envelope", envelope);
+
+  auto event = NewDictionary();
+  event->SetString("type", "script_message");
+  event->SetDictionary("payload", event_payload);
+
+  auto payload = NewDictionary();
+  payload->SetDictionary("event", event);
+  auto wire = NewDictionary();
+  wire->SetString("type", "event");
+  wire->SetDictionary("payload", payload);
+  SendMessage(wire);
+}
+
+void HostController::SendScriptComplete(
+    uint64_t surface_id, CefRefPtr<CefDictionaryValue> envelope,
+    std::string_view operation) {
+  if (envelope == nullptr) return;
+  auto value = NewDictionary();
+  value->SetString("operation", std::string(operation));
+  value->SetString("status", "executed");
+
+  auto completion = NewDictionary();
+  completion->SetString("source", "host");
+  completion->SetString("origin", envelope->GetString("origin"));
+  completion->SetString("channel", envelope->GetString("channel"));
+  completion->SetString(
+      "request_id", envelope->GetString("request_id").ToString() +
+                         ":complete");
+  completion->SetDictionary("value", value);
+  SendScriptMessage(surface_id, completion);
+}
+
+void HostController::OnBrowserRuntimeSend(uint64_t surface_id,
+                                           CefRefPtr<CefBrowser> browser,
+                                           std::string payload) {
+  CEF_REQUIRE_UI_THREAD();
+  if (browser == nullptr || !HasSurface(surface_id)) return;
+  auto decoded = CefParseJSON(payload, JSON_PARSER_RFC);
+  const auto value = Dictionary(decoded);
+  if (value == nullptr || value->GetType("origin") != VTYPE_STRING ||
+      value->GetType("channel") != VTYPE_STRING ||
+      value->GetType("storage_key") != VTYPE_STRING ||
+      value->GetType("payload") != VTYPE_STRING) {
+    SendError(std::nullopt, "invalid_command",
+              "BrowserRuntime page message is malformed");
+    return;
+  }
+  auto envelope = NewDictionary();
+  envelope->SetString("source", "page");
+  envelope->SetString("origin", value->GetString("origin"));
+  envelope->SetString("channel", value->GetString("channel"));
+  if (value->GetType("request_id") == VTYPE_STRING) {
+    envelope->SetString("request_id", value->GetString("request_id"));
+  } else {
+    envelope->SetString("request_id", "browser-runtime-page-message");
+  }
+  envelope->SetValue("value", decoded);
+  SendScriptMessage(surface_id, envelope);
+}
+
+void HostController::ExecuteScriptOnUi(
+    uint64_t surface_id, int request_id,
+    CefRefPtr<CefDictionaryValue> envelope) {
+  CEF_REQUIRE_UI_THREAD();
+  const auto surface = GetSurface(surface_id);
+  if (!surface || surface->browser == nullptr || envelope == nullptr) {
+    SendError(request_id, "runtime_failed", "surface browser is not ready");
+    return;
+  }
+  const auto value = envelope->GetDictionary("value");
+  if (value == nullptr || value->GetType("operation") != VTYPE_STRING) {
+    SendError(request_id, "invalid_command", "script operation is missing");
+    return;
+  }
+  const std::string operation = value->GetString("operation").ToString();
+  const auto frame = surface->browser->GetMainFrame();
+  if (frame == nullptr) {
+    SendError(request_id, "runtime_failed", "surface frame is unavailable");
+    return;
+  }
+  if (operation == kEvaluateJavaScriptOperation) {
+    frame->ExecuteJavaScript(value->GetString("script"), frame->GetURL(), 0);
+  } else if (operation == kDispatchScriptMessageOperation) {
+    auto argument = CefValue::Create();
+    argument->SetDictionary(value);
+    const std::string script =
+        "window.__roscordBrowserRuntimeReceive(" + Json(argument) + ");";
+    frame->ExecuteJavaScript(script, frame->GetURL(), 0);
+  } else {
+    SendError(request_id, "invalid_command", "script operation is not supported");
+    return;
+  }
+  SendScriptComplete(surface_id, envelope, operation);
+}
+
 bool HostController::AuthenticateEnvelope(
     CefRefPtr<CefDictionaryValue> envelope,
     CefRefPtr<CefDictionaryValue>& message,
@@ -909,7 +1778,8 @@ bool HostController::AuthenticateEnvelope(
     return false;
   }
   const std::string type = message->GetString("type").ToString();
-  if (type != "open" && type != "command" && type != "close") {
+  if (type != "open" && type != "command" && type != "close" &&
+      type != "heartbeat") {
     error = "unknown_message_type";
     return false;
   }
@@ -917,6 +1787,20 @@ bool HostController::AuthenticateEnvelope(
 }
 
 bool HostController::HandleFrame(std::string_view body) {
+  if (args_.fault.has_value() && *args_.fault == "host_crash" &&
+      !validation_fault_consumed_) {
+    validation_fault_consumed_ = true;
+    stopping_ = true;
+    return false;
+  }
+  if (args_.fault.has_value() && *args_.fault == "bad_protocol" &&
+      !validation_fault_consumed_) {
+    validation_fault_consumed_ = true;
+    SendError(std::nullopt, "malformed_message",
+              "validation protocol fault");
+    stopping_ = true;
+    return false;
+  }
   auto decoded = CefParseJSON(std::string(body), JSON_PARSER_RFC);
   auto envelope = Dictionary(decoded);
   CefRefPtr<CefDictionaryValue> message;
@@ -933,7 +1817,23 @@ bool HostController::HandleFrame(std::string_view body) {
   if (type == "close") {
     return HandleClose(payload);
   }
+  if (type == "heartbeat") {
+    return HandleHeartbeat(payload);
+  }
   return HandleCommand(payload);
+}
+
+bool HostController::HandleHeartbeat(CefRefPtr<CefDictionaryValue> payload) {
+  if (payload == nullptr || payload->GetType("request_id") != VTYPE_INT ||
+      payload->GetInt("request_id") <= 0) {
+    SendError(std::nullopt, "invalid_command", "heartbeat payload is malformed");
+    return false;
+  }
+  if (args_.fault.has_value() && *args_.fault == "host_unresponsive") {
+    return true;
+  }
+  SendHeartbeatAck(payload->GetInt("request_id"));
+  return true;
 }
 
 bool HostController::HandleOpen(CefRefPtr<CefDictionaryValue> payload) {
@@ -957,12 +1857,25 @@ bool HostController::HandleOpen(CefRefPtr<CefDictionaryValue> payload) {
       navigation == nullptr || navigation->GetType("url") != VTYPE_STRING ||
       navigation->GetType("disposition") != VTYPE_STRING ||
       navigation->GetType("user_initiated") != VTYPE_BOOL ||
-      spec->GetType("policy") != VTYPE_DICTIONARY || url != kFixtureUrl ||
-      presentation != "embedded") {
+      spec->GetType("policy") != VTYPE_DICTIONARY || url != kFixtureUrl) {
     SendError(request_id < 0 ? std::nullopt
                              : std::optional<int>(request_id),
               "invalid_spec",
-              "the Windows host smoke fixture requires an embedded commet URL");
+              "the Windows host smoke fixture requires the commet URL");
+    return true;
+  }
+
+  CefRefPtr<CefRequestContext> request_context;
+  uint64_t context_id = 0;
+  std::string profile_error;
+  if (!profiles_.Open(profile, privacy, request_context, context_id,
+                      profile_error)) {
+    const std::string code = profile_error == "profile migration failed"
+                                 ? "migration_failed"
+                                 : profile_error == "profile is busy"
+                                       ? "profile_busy"
+                                       : "profile_unavailable";
+    SendError(request_id, code, profile_error);
     return true;
   }
 
@@ -976,11 +1889,14 @@ bool HostController::HandleOpen(CefRefPtr<CefDictionaryValue> payload) {
     } else {
       surface.id = next_surface_id_++;
       surface.profile_key = profile;
+      surface.context_id = context_id;
+      surface.request_context = request_context;
       surface.presentation = presentation;
       surfaces_.emplace(surface.id, surface);
     }
   }
   if (surface_ids_exhausted) {
+    profiles_.Release(context_id);
     SendError(request_id, "runtime_failed", "surface id space is exhausted");
     return true;
   }
@@ -991,21 +1907,55 @@ bool HostController::HandleOpen(CefRefPtr<CefDictionaryValue> payload) {
 }
 
 bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
-  if (payload == nullptr || payload->GetType("surface_id") != VTYPE_INT ||
+  if (payload == nullptr || payload->GetType("request_id") != VTYPE_INT ||
+      payload->GetInt("request_id") <= 0 ||
+      payload->GetType("surface_id") != VTYPE_INT ||
       payload->GetType("command") != VTYPE_DICTIONARY) {
     SendError(std::nullopt, "invalid_command", "command payload is malformed");
     return false;
   }
+  const int request_id = payload->GetInt("request_id");
+  if (args_.fault.has_value() && *args_.fault == "profile_lock" &&
+      !validation_fault_consumed_) {
+    validation_fault_consumed_ = true;
+    SendError(request_id, "profile_locked", "validation profile lock fault");
+    return true;
+  }
   const int raw_surface_id = payload->GetInt("surface_id");
   if (raw_surface_id <= 0) {
-    SendError(std::nullopt, "invalid_command", "surface id must be positive");
+    SendError(request_id, "invalid_command", "surface id must be positive");
     return false;
   }
   const uint64_t surface_id = static_cast<uint64_t>(raw_surface_id);
+  if (args_.fault.has_value() && !validation_fault_consumed_) {
+    std::string_view code;
+    std::string_view message;
+    if (*args_.fault == "renderer_crash") {
+      code = "renderer_crash";
+      message = "validation renderer crash";
+    } else if (*args_.fault == "renderer_oom") {
+      code = "renderer_oom";
+      message = "validation renderer OOM";
+    } else if (*args_.fault == "renderer_hang") {
+      code = "renderer_unresponsive";
+      message = "validation renderer hang";
+    } else if (*args_.fault == "gpu_crash") {
+      code = "gpu_crash";
+      message = "validation GPU crash";
+    } else if (*args_.fault == "utility_crash") {
+      code = "utility_crash";
+      message = "validation utility crash";
+    }
+    if (!code.empty()) {
+      validation_fault_consumed_ = true;
+      SendError(request_id, code, message);
+      return true;
+    }
+  }
   const auto command = payload->GetDictionary("command");
   if (command->GetType("type") != VTYPE_STRING ||
       command->GetType("payload") != VTYPE_DICTIONARY) {
-    SendError(std::nullopt, "invalid_command", "command is malformed");
+    SendError(request_id, "invalid_command", "command is malformed");
     return false;
   }
   const std::string command_type = command->GetString("type").ToString();
@@ -1016,35 +1966,80 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
   if (std::find(kCommandTypes.begin(), kCommandTypes.end(),
                 std::string_view(command_type)) ==
       kCommandTypes.end()) {
-    SendError(std::nullopt, "unknown_command", "command type is not supported");
+    SendError(request_id, "unknown_command", "command type is not supported");
     return false;
   }
   const auto command_payload = command->GetDictionary("payload");
   if (command_payload->GetType("sequence") != VTYPE_INT ||
       command_payload->GetInt("sequence") <= 0) {
-    SendError(std::nullopt, "invalid_command", "command sequence is invalid");
+    SendError(request_id, "invalid_command", "command sequence is invalid");
     return false;
   }
   if (command_payload->GetType("profile_key") == VTYPE_STRING &&
       command_payload->GetString("profile_key").ToString().empty()) {
-    SendError(std::nullopt, "invalid_command", "profile key is empty");
+    SendError(request_id, "invalid_command", "profile key is empty");
     return false;
   }
   if (command_payload->GetType("profile_key") != VTYPE_STRING &&
       command_payload->GetType("profile_key") != VTYPE_NULL &&
       command_payload->GetType("profile_key") != VTYPE_INVALID) {
-    SendError(std::nullopt, "invalid_command", "profile key is malformed");
+    SendError(request_id, "invalid_command", "profile key is malformed");
     return false;
+  }
+  CefRefPtr<CefDictionaryValue> script_envelope;
+  std::string script_operation;
+  if (command_type == "script") {
+    if (command_payload->GetType("envelope") != VTYPE_DICTIONARY) {
+      SendError(request_id, "invalid_command", "script envelope is malformed");
+      return false;
+    }
+    script_envelope = command_payload->GetDictionary("envelope");
+    if (script_envelope->GetType("source") != VTYPE_STRING ||
+        script_envelope->GetType("origin") != VTYPE_STRING ||
+        script_envelope->GetType("channel") != VTYPE_STRING ||
+        script_envelope->GetType("request_id") != VTYPE_STRING ||
+        script_envelope->GetString("origin").ToString().empty() ||
+        script_envelope->GetString("channel").ToString().empty() ||
+        script_envelope->GetString("request_id").ToString().empty()) {
+      SendError(request_id, "invalid_command", "script envelope metadata is malformed");
+      return false;
+    }
+    const auto value = script_envelope->GetDictionary("value");
+    if (value == nullptr || value->GetType("operation") != VTYPE_STRING) {
+      SendError(request_id, "invalid_command", "script operation is missing");
+      return false;
+    }
+    script_operation = value->GetString("operation").ToString();
+    if (script_operation == kEvaluateJavaScriptOperation) {
+      if (value->GetType("script") != VTYPE_STRING ||
+          value->GetString("script").ToString().empty()) {
+        SendError(request_id, "invalid_command", "javascript source is missing");
+        return false;
+      }
+    } else if (script_operation == kDispatchScriptMessageOperation) {
+      if (value->GetType("storage_key") != VTYPE_STRING ||
+          value->GetType("payload") != VTYPE_STRING) {
+        SendError(request_id, "invalid_command", "script message is malformed");
+        return false;
+      }
+    } else {
+      SendError(request_id, "invalid_command", "script operation is not supported");
+      return false;
+    }
   }
   const auto surface = GetSurface(surface_id);
   if (!surface) {
-    SendError(std::nullopt, "stale_surface", "surface id is not active");
+    SendError(request_id, "stale_surface", "surface id is not active");
+    return true;
+  }
+  if (command_type == "script" && surface->browser == nullptr) {
+    SendError(request_id, "runtime_failed", "surface browser is not ready");
     return true;
   }
   if (command_payload->GetType("profile_key") == VTYPE_STRING &&
       command_payload->GetString("profile_key").ToString() !=
           surface->profile_key) {
-    SendError(std::nullopt, "profile_mismatch", "surface profile key does not match");
+    SendError(request_id, "profile_mismatch", "surface profile key does not match");
     return true;
   }
   const int sequence = command_payload->GetInt("sequence");
@@ -1052,19 +2047,25 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
     std::lock_guard lock(state_mutex_);
     const auto iterator = surfaces_.find(surface_id);
     if (iterator == surfaces_.end()) {
-      SendError(std::nullopt, "stale_surface", "surface id is not active");
+      SendError(request_id, "stale_surface", "surface id is not active");
       return true;
     }
     if (sequence <= iterator->second.last_command_sequence) {
-      SendError(std::nullopt, "sequence_violation",
+      SendError(request_id, "sequence_violation",
                 "command sequence must increase");
       return true;
     }
     iterator->second.last_command_sequence = sequence;
   }
-  // Navigation/input/frame handling is added behind this same seam by the
-  // caller tickets.  A fixture host accepts a well-formed command but never
-  // replays a side effect or exposes a CEF object over IPC.
+  // A command acknowledgement means only that the host accepted the command
+  // for execution.  The client still treats an accepted command without a
+  // terminal outcome as unknown if this process subsequently disappears.
+  SendAck(request_id);
+  if (command_type == "script") {
+    CefTaskRunner::GetForThread(TID_UI)->PostTask(
+        new ExecuteScriptTask(this, surface_id, request_id,
+                              std::move(script_envelope)));
+  }
   return true;
 }
 
@@ -1115,30 +2116,40 @@ void HostController::CreateBrowserOnUi(uint64_t surface_id, std::string url,
                                        std::string presentation) {
   CEF_REQUIRE_UI_THREAD();
   if (stopping_) {
+    auto surface = GetSurface(surface_id);
     std::lock_guard lock(state_mutex_);
     if (surfaces_.erase(surface_id) != 0) {
+      if (surface.has_value()) profiles_.Release(surface->context_id);
       closed_condition_.notify_all();
     }
     return;
   }
   auto surface = GetSurface(surface_id);
-  if (!surface || presentation != "embedded") {
+  if (!surface) {
     SendError(std::nullopt, "invalid_spec", "surface is no longer creatable");
     return;
   }
 
   CefWindowInfo window_info;
-  window_info.SetAsWindowless(nullptr, false);
+  if (presentation == "embedded") {
+    window_info.SetAsWindowless(nullptr, false);
+  } else {
+    window_info.SetAsPopup(nullptr, "roscord Browser");
+  }
   CefBrowserSettings settings;
   settings.windowless_frame_rate = 30;
   auto client = new BrowserClient(this, surface_id);
   auto browser = CefBrowserHost::CreateBrowserSync(
-      window_info, client, url, settings, nullptr, nullptr);
+      window_info, client, url, settings, nullptr, surface->request_context);
   if (browser == nullptr) {
     SendError(std::nullopt, "runtime_failed", "CEF rejected the fixture surface");
     {
       std::lock_guard lock(state_mutex_);
-      surfaces_.erase(surface_id);
+      const auto iterator = surfaces_.find(surface_id);
+      if (iterator != surfaces_.end()) {
+        profiles_.Release(iterator->second.context_id);
+        surfaces_.erase(iterator);
+      }
     }
     closed_condition_.notify_all();
     return;
@@ -1180,14 +2191,35 @@ void HostController::OnBrowserCreated(uint64_t surface_id,
 void HostController::OnBrowserClosed(uint64_t surface_id) {
   CEF_REQUIRE_UI_THREAD();
   bool was_active = false;
+  std::optional<uint64_t> context_id;
+  uint64_t close_sequence = 2;
   {
     std::lock_guard lock(state_mutex_);
-    was_active = surfaces_.erase(surface_id) != 0;
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator != surfaces_.end()) {
+      context_id = iterator->second.context_id;
+      close_sequence = iterator->second.next_event_sequence;
+      surfaces_.erase(iterator);
+      was_active = true;
+    }
+  }
+  if (context_id.has_value()) {
+    profiles_.Release(*context_id);
   }
   if (was_active) {
-    SendClosed(surface_id, 2);
+    SendClosed(surface_id, close_sequence);
     closed_condition_.notify_all();
   }
+}
+
+void HostController::OnRendererFailure(uint64_t surface_id,
+                                       std::string_view code,
+                                       std::string_view message) {
+  // Renderer callbacks are child scoped.  They are reported as correlated
+  // lifecycle failures instead of being promoted to a host crash, so other
+  // logical surfaces remain usable.
+  if (!HasSurface(surface_id)) return;
+  SendError(std::nullopt, code, message);
 }
 
 void HostController::Shutdown() {
@@ -1208,7 +2240,9 @@ void HostController::Shutdown() {
   // non-owning pointer back to this controller and CEF may deliver
   // OnBeforeClose asynchronously after CloseBrowser(true).  Keep the
   // controller alive until every surface has reached that callback.
-  closed_condition_.wait(lock, [&] { return surfaces_.empty(); });
+  shutdown_timed_out_ = !closed_condition_.wait_for(
+      lock, std::chrono::seconds(5), [&] { return surfaces_.empty(); });
+  if (!shutdown_timed_out_) profiles_.Shutdown();
 }
 
 void HostController::Run() {
@@ -1226,9 +2260,62 @@ void BrowserClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
   controller_->OnBrowserCreated(surface_id_, browser);
 }
 
+bool BrowserClient::OnProcessMessageReceived(
+    CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+    CefProcessId source_process, CefRefPtr<CefProcessMessage> message) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)frame;
+  if (source_process != PID_RENDERER || message == nullptr ||
+      message->GetName() != "roscord_browser_runtime_send") {
+    return false;
+  }
+  const auto arguments = message->GetArgumentList();
+  if (arguments == nullptr || arguments->GetType(0) != VTYPE_STRING) {
+    controller_->OnBrowserRuntimeSend(surface_id_, browser, {});
+    return true;
+  }
+  controller_->OnBrowserRuntimeSend(surface_id_, browser,
+                                     arguments->GetString(0).ToString());
+  return true;
+}
+
 void BrowserClient::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
   CEF_REQUIRE_UI_THREAD();
   controller_->OnBrowserClosed(surface_id_);
+}
+
+void BrowserClient::OnRenderProcessTerminated(
+    CefRefPtr<CefBrowser> browser, TerminationStatus status, int error_code,
+    const CefString& error_string) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)browser;
+  const int raw_status = static_cast<int>(status);
+  std::string_view code = "renderer_crash";
+  if (raw_status == 0) {
+    code = "renderer_abnormal_exit";
+  } else if (raw_status == 1) {
+    code = "renderer_killed";
+  } else if (raw_status == 3) {
+    code = "renderer_oom";
+  } else if (raw_status == 4) {
+    code = "renderer_launch_failed";
+  } else if (raw_status == 5) {
+    code = "renderer_integrity_failure";
+  }
+  const std::string detail = error_string.ToString();
+  const std::string message = detail.empty()
+                                  ? "renderer process terminated (status " +
+                                        std::to_string(raw_status) + ", error " +
+                                        std::to_string(error_code) + ")"
+                                  : detail;
+  controller_->OnRendererFailure(surface_id_, code, message);
+}
+
+void BrowserClient::OnRenderProcessUnresponsive(CefRefPtr<CefBrowser> browser) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)browser;
+  controller_->OnRendererFailure(surface_id_, "renderer_unresponsive",
+                                 "renderer process is unresponsive");
 }
 
 int RunHost(HINSTANCE instance, void* sandbox_info) {
@@ -1249,7 +2336,15 @@ int RunHost(HINSTANCE instance, void* sandbox_info) {
   if (!args) {
     return EXIT_FAILURE;
   }
-  if (sandbox_info == nullptr || !VerifyBundledRuntime(error)) {
+  if (args->fault.has_value() &&
+      (*args->fault == "bad_bundle" || *args->fault == "sandbox_failure")) {
+    // Fault injection is intentionally deterministic and validation-only.  A
+    // production binary cannot reach this branch because argument validation
+    // rejects both switches under NDEBUG.
+    return EXIT_FAILURE;
+  }
+  if (!ValidateProfileRoot(args->profile_root) || sandbox_info == nullptr ||
+      !VerifyBundledRuntime(error)) {
     return EXIT_FAILURE;
   }
 

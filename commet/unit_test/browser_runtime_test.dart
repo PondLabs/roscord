@@ -197,6 +197,22 @@ void main() {
       ),
     );
   });
+
+  test('round-trips transport heartbeat messages', () {
+    final codec = FramedCodec('nonce');
+    final heartbeat = codec.encode(const HeartbeatWireMessage(7));
+    expect(
+      codec.decode(heartbeat),
+      isA<HeartbeatWireMessage>()
+          .having((message) => message.requestId, 'id', 7),
+    );
+    final acknowledgement = codec.encode(const HeartbeatAckWireMessage(7));
+    expect(
+      codec.decode(acknowledgement),
+      isA<HeartbeatAckWireMessage>()
+          .having((message) => message.requestId, 'id', 7),
+    );
+  });
 }
 
 Uint8List _frame(List<int> body) {
