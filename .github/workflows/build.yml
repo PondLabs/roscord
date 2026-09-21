@@ -1,8 +1,8 @@
 
 name: build
 
-# Manual only: start it from the Actions tab. The Windows release build that
-# ships runs from ci.yml on every push to main.
+# Manual only: start it from the Actions tab. The Windows and Linux release
+# builds that ship run from ci.yml on every push to main.
 on:
   workflow_dispatch:
 
