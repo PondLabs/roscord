@@ -11,6 +11,15 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+// Keep the lifecycle vocabulary available from the same module as the
+// original four-operation seam.  The implementation lives in its own module
+// so platform adapters can share it without pulling in CEF types.
+pub use crate::browser_runtime_lifecycle::{
+    CommandOutcome, CommandOutcomeReason, CommandToken, FailureClass, FailureScope, FaultPoint,
+    LifecycleBrowserRuntime, LifecycleError, RuntimeEvent, RuntimeEventKind, RuntimeFailure,
+    RuntimeLifecycle, RuntimeState,
+};
+
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_PROFILE_KEY_BYTES: usize = 256;
@@ -1122,6 +1131,7 @@ pub enum WireMessage {
         spec: SurfaceSpec,
     },
     Command {
+        request_id: u64,
         surface_id: SurfaceId,
         command: SurfaceCommand,
     },
@@ -1136,6 +1146,14 @@ pub enum WireMessage {
         surface_id: SurfaceId,
     },
     Ack {
+        request_id: u64,
+    },
+    /// Transport-level liveness probe.  It carries no surface or profile
+    /// state, so a host can answer it while the browser UI is idle.
+    Heartbeat {
+        request_id: u64,
+    },
+    HeartbeatAck {
         request_id: u64,
     },
     Error {
@@ -1260,7 +1278,15 @@ impl FramedCodec {
             .ok_or_else(|| ProtocolError::InvalidMessage("message type is missing".into()))?;
         if !matches!(
             message_type,
-            "open" | "command" | "close" | "event" | "opened" | "ack" | "error"
+            "open"
+                | "command"
+                | "close"
+                | "event"
+                | "opened"
+                | "ack"
+                | "heartbeat"
+                | "heartbeat_ack"
+                | "error"
         ) {
             return Err(ProtocolError::UnknownMessageType(message_type.into()));
         }
@@ -1521,6 +1547,9 @@ mod tests {
         let message = WireMessage::Ack { request_id: 1 };
         let encoded = codec.encode(&message).unwrap();
         assert_eq!(codec.decode(&encoded).unwrap(), message);
+        let heartbeat = WireMessage::Heartbeat { request_id: 9 };
+        let encoded = codec.encode(&heartbeat).unwrap();
+        assert_eq!(codec.decode(&encoded).unwrap(), heartbeat);
 
         let mut partial = encoded[..encoded.len() - 1].to_vec();
         assert!(codec.decode_next(&mut partial).unwrap().is_none());

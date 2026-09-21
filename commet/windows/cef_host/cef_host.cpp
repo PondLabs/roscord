@@ -31,6 +31,7 @@
 #include "include/cef_client.h"
 #include "include/cef_parser.h"
 #include "include/cef_render_handler.h"
+#include "include/cef_request_handler.h"
 #include "include/cef_request.h"
 #include "include/cef_resource_handler.h"
 #include "include/cef_sandbox_win.h"
@@ -159,6 +160,8 @@ struct HostArgs {
   std::wstring pipe_name;
   std::string nonce;
   std::wstring module_name;
+  bool validation = false;
+  std::optional<std::string> fault;
 };
 
 struct ParsedCommandLine {
@@ -227,8 +230,21 @@ bool ValidatePipeName(std::wstring_view pipe_name) {
   });
 }
 
+bool IsKnownFaultPoint(std::wstring_view fault) {
+  static constexpr std::array<std::wstring_view, 11> kFaultPoints = {
+      L"host_crash",       L"host_unresponsive", L"renderer_crash",
+      L"renderer_oom",     L"renderer_hang",     L"gpu_crash",
+      L"utility_crash",    L"bad_bundle",        L"bad_protocol",
+      L"sandbox_failure",  L"profile_lock",
+  };
+  return std::find(kFaultPoints.begin(), kFaultPoints.end(), fault) !=
+         kFaultPoints.end();
+}
+
 std::optional<HostArgs> ValidateHostArgs(const ParsedCommandLine& command_line,
                                           std::wstring& error) {
+  bool validation = false;
+  std::optional<std::wstring> fault_name;
   for (const auto& value : command_line.values) {
     const std::wstring lowered = Lowercase(value);
     for (const auto forbidden : kForbiddenSwitches) {
@@ -238,6 +254,26 @@ std::optional<HostArgs> ValidateHostArgs(const ParsedCommandLine& command_line,
         error = L"insecure CEF command-line switch is forbidden";
         return std::nullopt;
       }
+    }
+    if (lowered == L"--cef-validation") {
+#ifdef NDEBUG
+      error = L"CEF validation controls are disabled in production builds";
+      return std::nullopt;
+#else
+      validation = true;
+#endif
+    } else if (StartsWith(lowered, L"--cef-fault=")) {
+#ifdef NDEBUG
+      error = L"CEF fault injection is disabled in production builds";
+      return std::nullopt;
+#else
+      const auto value_name = value.substr(std::wstring(L"--cef-fault=").size());
+      if (value_name.empty()) {
+        error = L"CEF fault point is empty";
+        return std::nullopt;
+      }
+      fault_name = value_name;
+#endif
     }
   }
 
@@ -251,8 +287,28 @@ std::optional<HostArgs> ValidateHostArgs(const ParsedCommandLine& command_line,
     return std::nullopt;
   }
 
+#ifndef NDEBUG
+  std::optional<std::string> fault;
+  if (fault_name.has_value()) {
+    if (!validation) {
+      error = L"CEF fault injection requires --cef-validation";
+      return std::nullopt;
+    }
+    const auto lowered_fault = Lowercase(*fault_name);
+    if (!IsKnownFaultPoint(lowered_fault)) {
+      error = L"unknown CEF fault point";
+      return std::nullopt;
+    }
+    fault = std::string(fault_name->begin(), fault_name->end());
+  }
+#else
+  std::optional<std::string> fault;
+#endif
+
   HostArgs result;
   result.module_name = *module;
+  result.validation = validation;
+  result.fault = fault;
   result.pipe_name = *pipe;
   result.nonce.assign(nonce->begin(), nonce->end());
   if (!ValidatePipeName(result.pipe_name) || result.nonce.size() < 32 ||
@@ -664,16 +720,23 @@ struct SurfaceState {
 
 class BrowserClient final : public CefClient,
                             public CefLifeSpanHandler,
-                            public CefRenderHandler {
+                            public CefRenderHandler,
+                            public CefRequestHandler {
  public:
   BrowserClient(HostController* controller, uint64_t surface_id)
       : controller_(controller), surface_id_(surface_id) {}
 
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefRenderHandler> GetRenderHandler() override { return this; }
+  CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
 
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override;
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override;
+  void OnRenderProcessTerminated(CefRefPtr<CefBrowser> browser,
+                                 TerminationStatus status,
+                                 int error_code,
+                                 const CefString& error_string) override;
+  void OnRenderProcessUnresponsive(CefRefPtr<CefBrowser> browser) override;
 
   bool GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect) override {
     rect = CefRect(0, 0, 1024, 768);
@@ -721,6 +784,8 @@ class HostController {
   void CloseBrowserOnUi(uint64_t surface_id);
   void OnBrowserCreated(uint64_t surface_id, CefRefPtr<CefBrowser> browser);
   void OnBrowserClosed(uint64_t surface_id);
+  void OnRendererFailure(uint64_t surface_id, std::string_view code,
+                         std::string_view message);
 
  private:
   bool HandleFrame(std::string_view body);
@@ -730,9 +795,12 @@ class HostController {
   bool HandleOpen(CefRefPtr<CefDictionaryValue> payload);
   bool HandleClose(CefRefPtr<CefDictionaryValue> payload);
   bool HandleCommand(CefRefPtr<CefDictionaryValue> payload);
+  bool HandleHeartbeat(CefRefPtr<CefDictionaryValue> payload);
   void SendMessage(CefRefPtr<CefDictionaryValue> message);
   void SendError(std::optional<int> request_id, std::string_view code,
                  std::string_view message);
+  void SendAck(int request_id);
+  void SendHeartbeatAck(int request_id);
   void SendOpened(int request_id, uint64_t surface_id);
   void SendReady(const SurfaceState& surface, std::string_view url);
   void SendClosed(uint64_t surface_id, uint64_t sequence);
@@ -746,6 +814,8 @@ class HostController {
   uint64_t next_surface_id_ = 1;
   std::atomic<bool> stopping_ = false;
   std::condition_variable closed_condition_;
+  bool validation_fault_consumed_ = false;
+  bool shutdown_timed_out_ = false;
 };
 
 class CreateBrowserTask final : public CefTask {
@@ -836,6 +906,24 @@ void HostController::SendError(std::optional<int> request_id,
   SendMessage(wire);
 }
 
+void HostController::SendAck(int request_id) {
+  auto payload = NewDictionary();
+  payload->SetInt("request_id", request_id);
+  auto wire = NewDictionary();
+  wire->SetString("type", "ack");
+  wire->SetDictionary("payload", payload);
+  SendMessage(wire);
+}
+
+void HostController::SendHeartbeatAck(int request_id) {
+  auto payload = NewDictionary();
+  payload->SetInt("request_id", request_id);
+  auto wire = NewDictionary();
+  wire->SetString("type", "heartbeat_ack");
+  wire->SetDictionary("payload", payload);
+  SendMessage(wire);
+}
+
 void HostController::SendOpened(int request_id, uint64_t surface_id) {
   auto payload = NewDictionary();
   payload->SetInt("request_id", request_id);
@@ -909,7 +997,8 @@ bool HostController::AuthenticateEnvelope(
     return false;
   }
   const std::string type = message->GetString("type").ToString();
-  if (type != "open" && type != "command" && type != "close") {
+  if (type != "open" && type != "command" && type != "close" &&
+      type != "heartbeat") {
     error = "unknown_message_type";
     return false;
   }
@@ -917,6 +1006,20 @@ bool HostController::AuthenticateEnvelope(
 }
 
 bool HostController::HandleFrame(std::string_view body) {
+  if (args_.fault.has_value() && *args_.fault == "host_crash" &&
+      !validation_fault_consumed_) {
+    validation_fault_consumed_ = true;
+    stopping_ = true;
+    return false;
+  }
+  if (args_.fault.has_value() && *args_.fault == "bad_protocol" &&
+      !validation_fault_consumed_) {
+    validation_fault_consumed_ = true;
+    SendError(std::nullopt, "malformed_message",
+              "validation protocol fault");
+    stopping_ = true;
+    return false;
+  }
   auto decoded = CefParseJSON(std::string(body), JSON_PARSER_RFC);
   auto envelope = Dictionary(decoded);
   CefRefPtr<CefDictionaryValue> message;
@@ -933,7 +1036,23 @@ bool HostController::HandleFrame(std::string_view body) {
   if (type == "close") {
     return HandleClose(payload);
   }
+  if (type == "heartbeat") {
+    return HandleHeartbeat(payload);
+  }
   return HandleCommand(payload);
+}
+
+bool HostController::HandleHeartbeat(CefRefPtr<CefDictionaryValue> payload) {
+  if (payload == nullptr || payload->GetType("request_id") != VTYPE_INT ||
+      payload->GetInt("request_id") <= 0) {
+    SendError(std::nullopt, "invalid_command", "heartbeat payload is malformed");
+    return false;
+  }
+  if (args_.fault.has_value() && *args_.fault == "host_unresponsive") {
+    return true;
+  }
+  SendHeartbeatAck(payload->GetInt("request_id"));
+  return true;
 }
 
 bool HostController::HandleOpen(CefRefPtr<CefDictionaryValue> payload) {
@@ -991,21 +1110,55 @@ bool HostController::HandleOpen(CefRefPtr<CefDictionaryValue> payload) {
 }
 
 bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
-  if (payload == nullptr || payload->GetType("surface_id") != VTYPE_INT ||
+  if (payload == nullptr || payload->GetType("request_id") != VTYPE_INT ||
+      payload->GetInt("request_id") <= 0 ||
+      payload->GetType("surface_id") != VTYPE_INT ||
       payload->GetType("command") != VTYPE_DICTIONARY) {
     SendError(std::nullopt, "invalid_command", "command payload is malformed");
     return false;
   }
+  const int request_id = payload->GetInt("request_id");
+  if (args_.fault.has_value() && *args_.fault == "profile_lock" &&
+      !validation_fault_consumed_) {
+    validation_fault_consumed_ = true;
+    SendError(request_id, "profile_locked", "validation profile lock fault");
+    return true;
+  }
   const int raw_surface_id = payload->GetInt("surface_id");
   if (raw_surface_id <= 0) {
-    SendError(std::nullopt, "invalid_command", "surface id must be positive");
+    SendError(request_id, "invalid_command", "surface id must be positive");
     return false;
   }
   const uint64_t surface_id = static_cast<uint64_t>(raw_surface_id);
+  if (args_.fault.has_value() && !validation_fault_consumed_) {
+    std::string_view code;
+    std::string_view message;
+    if (*args_.fault == "renderer_crash") {
+      code = "renderer_crash";
+      message = "validation renderer crash";
+    } else if (*args_.fault == "renderer_oom") {
+      code = "renderer_oom";
+      message = "validation renderer OOM";
+    } else if (*args_.fault == "renderer_hang") {
+      code = "renderer_unresponsive";
+      message = "validation renderer hang";
+    } else if (*args_.fault == "gpu_crash") {
+      code = "gpu_crash";
+      message = "validation GPU crash";
+    } else if (*args_.fault == "utility_crash") {
+      code = "utility_crash";
+      message = "validation utility crash";
+    }
+    if (!code.empty()) {
+      validation_fault_consumed_ = true;
+      SendError(request_id, code, message);
+      return true;
+    }
+  }
   const auto command = payload->GetDictionary("command");
   if (command->GetType("type") != VTYPE_STRING ||
       command->GetType("payload") != VTYPE_DICTIONARY) {
-    SendError(std::nullopt, "invalid_command", "command is malformed");
+    SendError(request_id, "invalid_command", "command is malformed");
     return false;
   }
   const std::string command_type = command->GetString("type").ToString();
@@ -1016,35 +1169,35 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
   if (std::find(kCommandTypes.begin(), kCommandTypes.end(),
                 std::string_view(command_type)) ==
       kCommandTypes.end()) {
-    SendError(std::nullopt, "unknown_command", "command type is not supported");
+    SendError(request_id, "unknown_command", "command type is not supported");
     return false;
   }
   const auto command_payload = command->GetDictionary("payload");
   if (command_payload->GetType("sequence") != VTYPE_INT ||
       command_payload->GetInt("sequence") <= 0) {
-    SendError(std::nullopt, "invalid_command", "command sequence is invalid");
+    SendError(request_id, "invalid_command", "command sequence is invalid");
     return false;
   }
   if (command_payload->GetType("profile_key") == VTYPE_STRING &&
       command_payload->GetString("profile_key").ToString().empty()) {
-    SendError(std::nullopt, "invalid_command", "profile key is empty");
+    SendError(request_id, "invalid_command", "profile key is empty");
     return false;
   }
   if (command_payload->GetType("profile_key") != VTYPE_STRING &&
       command_payload->GetType("profile_key") != VTYPE_NULL &&
       command_payload->GetType("profile_key") != VTYPE_INVALID) {
-    SendError(std::nullopt, "invalid_command", "profile key is malformed");
+    SendError(request_id, "invalid_command", "profile key is malformed");
     return false;
   }
   const auto surface = GetSurface(surface_id);
   if (!surface) {
-    SendError(std::nullopt, "stale_surface", "surface id is not active");
+    SendError(request_id, "stale_surface", "surface id is not active");
     return true;
   }
   if (command_payload->GetType("profile_key") == VTYPE_STRING &&
       command_payload->GetString("profile_key").ToString() !=
           surface->profile_key) {
-    SendError(std::nullopt, "profile_mismatch", "surface profile key does not match");
+    SendError(request_id, "profile_mismatch", "surface profile key does not match");
     return true;
   }
   const int sequence = command_payload->GetInt("sequence");
@@ -1052,16 +1205,20 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
     std::lock_guard lock(state_mutex_);
     const auto iterator = surfaces_.find(surface_id);
     if (iterator == surfaces_.end()) {
-      SendError(std::nullopt, "stale_surface", "surface id is not active");
+      SendError(request_id, "stale_surface", "surface id is not active");
       return true;
     }
     if (sequence <= iterator->second.last_command_sequence) {
-      SendError(std::nullopt, "sequence_violation",
+      SendError(request_id, "sequence_violation",
                 "command sequence must increase");
       return true;
     }
     iterator->second.last_command_sequence = sequence;
   }
+  // A command acknowledgement means only that the host accepted the command
+  // for execution.  The client still treats an accepted command without a
+  // terminal outcome as unknown if this process subsequently disappears.
+  SendAck(request_id);
   // Navigation/input/frame handling is added behind this same seam by the
   // caller tickets.  A fixture host accepts a well-formed command but never
   // replays a side effect or exposes a CEF object over IPC.
@@ -1190,6 +1347,16 @@ void HostController::OnBrowserClosed(uint64_t surface_id) {
   }
 }
 
+void HostController::OnRendererFailure(uint64_t surface_id,
+                                       std::string_view code,
+                                       std::string_view message) {
+  // Renderer callbacks are child scoped.  They are reported as correlated
+  // lifecycle failures instead of being promoted to a host crash, so other
+  // logical surfaces remain usable.
+  if (!HasSurface(surface_id)) return;
+  SendError(std::nullopt, code, message);
+}
+
 void HostController::Shutdown() {
   stopping_ = true;
   std::vector<uint64_t> ids;
@@ -1208,7 +1375,8 @@ void HostController::Shutdown() {
   // non-owning pointer back to this controller and CEF may deliver
   // OnBeforeClose asynchronously after CloseBrowser(true).  Keep the
   // controller alive until every surface has reached that callback.
-  closed_condition_.wait(lock, [&] { return surfaces_.empty(); });
+  shutdown_timed_out_ = !closed_condition_.wait_for(
+      lock, std::chrono::seconds(5), [&] { return surfaces_.empty(); });
 }
 
 void HostController::Run() {
@@ -1231,6 +1399,40 @@ void BrowserClient::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
   controller_->OnBrowserClosed(surface_id_);
 }
 
+void BrowserClient::OnRenderProcessTerminated(
+    CefRefPtr<CefBrowser> browser, TerminationStatus status, int error_code,
+    const CefString& error_string) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)browser;
+  const int raw_status = static_cast<int>(status);
+  std::string_view code = "renderer_crash";
+  if (raw_status == 0) {
+    code = "renderer_abnormal_exit";
+  } else if (raw_status == 1) {
+    code = "renderer_killed";
+  } else if (raw_status == 3) {
+    code = "renderer_oom";
+  } else if (raw_status == 4) {
+    code = "renderer_launch_failed";
+  } else if (raw_status == 5) {
+    code = "renderer_integrity_failure";
+  }
+  const std::string detail = error_string.ToString();
+  const std::string message = detail.empty()
+                                  ? "renderer process terminated (status " +
+                                        std::to_string(raw_status) + ", error " +
+                                        std::to_string(error_code) + ")"
+                                  : detail;
+  controller_->OnRendererFailure(surface_id_, code, message);
+}
+
+void BrowserClient::OnRenderProcessUnresponsive(CefRefPtr<CefBrowser> browser) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)browser;
+  controller_->OnRendererFailure(surface_id_, "renderer_unresponsive",
+                                 "renderer process is unresponsive");
+}
+
 int RunHost(HINSTANCE instance, void* sandbox_info) {
   const ParsedCommandLine command_line = ParseCommandLine();
   CefMainArgs main_args(instance);
@@ -1247,6 +1449,13 @@ int RunHost(HINSTANCE instance, void* sandbox_info) {
   std::wstring error;
   const auto args = ValidateHostArgs(command_line, error);
   if (!args) {
+    return EXIT_FAILURE;
+  }
+  if (args->fault.has_value() &&
+      (*args->fault == "bad_bundle" || *args->fault == "sandbox_failure")) {
+    // Fault injection is intentionally deterministic and validation-only.  A
+    // production binary cannot reach this branch because argument validation
+    // rejects both switches under NDEBUG.
     return EXIT_FAILURE;
   }
   if (sandbox_info == nullptr || !VerifyBundledRuntime(error)) {

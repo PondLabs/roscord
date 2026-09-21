@@ -12,12 +12,12 @@
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_int, c_void, CString, OsString};
 use std::fmt;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, symlink_metadata, OpenOptions};
 use std::io::{self, ErrorKind, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{
-    symlink_metadata, DirBuilderExt, MetadataExt as UnixMetadataExt, OpenOptionsExt, PermissionsExt,
+    DirBuilderExt, MetadataExt as UnixMetadataExt, OpenOptionsExt, PermissionsExt,
 };
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -28,6 +28,7 @@ use crate::browser_runtime::{
     CloseReason, FramedCodec, NavigationEvent, NavigationOutcome, ProfileKey, RuntimeError,
     SurfaceCommand, SurfaceEvent, SurfaceId, SurfaceSpec, WireMessage,
 };
+use crate::browser_runtime_lifecycle::FaultPoint;
 
 const SOCKET_PATH_MAX_BYTES: usize = 107;
 const PROFILE_SCHEMA: &str = "1";
@@ -104,6 +105,10 @@ pub struct HostConfig {
     pub cef_root: PathBuf,
     pub profile_root: PathBuf,
     pub max_frame_bytes: usize,
+    /// Validation-only controls.  Release builds reject these flags during
+    /// argument parsing, so production cannot select a fault path.
+    pub validation: bool,
+    pub fault: Option<FaultPoint>,
 }
 
 impl HostConfig {
@@ -119,6 +124,8 @@ impl HostConfig {
         let mut cef_root = None;
         let mut profile_root = None;
         let mut max_frame_bytes = crate::browser_runtime::DEFAULT_MAX_FRAME_BYTES;
+        let mut validation = false;
+        let mut fault_name = None;
 
         while let Some(argument) = args.next() {
             let argument = argument
@@ -127,12 +134,12 @@ impl HostConfig {
             match argument {
                 "--socket" => socket_path = Some(PathBuf::from(next_value(&mut args, "--socket")?)),
                 "--parent-pid" => {
-                    let value = next_value(&mut args, "--parent-pid")?;
+                    let value = next_string(&mut args, "--parent-pid")?;
                     parent_pid = Some(value.parse::<u32>().map_err(|_| {
                         HostError::Usage("--parent-pid must be a non-zero integer".to_owned())
                     })?);
                 }
-                "--parent-nonce" => parent_nonce = Some(next_value(&mut args, "--parent-nonce")?),
+                "--parent-nonce" => parent_nonce = Some(next_string(&mut args, "--parent-nonce")?),
                 "--cef-root" => {
                     cef_root = Some(PathBuf::from(next_value(&mut args, "--cef-root")?))
                 }
@@ -140,10 +147,26 @@ impl HostConfig {
                     profile_root = Some(PathBuf::from(next_value(&mut args, "--profile-root")?))
                 }
                 "--max-frame-bytes" => {
-                    let value = next_value(&mut args, "--max-frame-bytes")?;
+                    let value = next_string(&mut args, "--max-frame-bytes")?;
                     max_frame_bytes = value.parse::<usize>().map_err(|_| {
                         HostError::Usage("--max-frame-bytes must be a positive integer".to_owned())
                     })?;
+                }
+                "--cef-validation" => {
+                    if !cfg!(debug_assertions) {
+                        return Err(HostError::Usage(
+                            "--cef-validation is unavailable in production builds".to_owned(),
+                        ));
+                    }
+                    validation = true;
+                }
+                argument if argument.starts_with("--cef-fault=") => {
+                    if !cfg!(debug_assertions) {
+                        return Err(HostError::Usage(
+                            "CEF fault injection requires a debug validation build".to_owned(),
+                        ));
+                    }
+                    fault_name = Some(argument.trim_start_matches("--cef-fault=").to_owned());
                 }
                 "--no-sandbox" | "--disable-sandbox" | "--disable-setuid-sandbox" => {
                     return Err(HostError::Permission(
@@ -153,7 +176,8 @@ impl HostConfig {
                 "--help" => {
                     return Err(HostError::Usage(
                         "--socket PATH --parent-pid PID --parent-nonce NONCE --cef-root DIR \
-                         --profile-root DIR [--max-frame-bytes N]"
+                         --profile-root DIR [--max-frame-bytes N] [--cef-validation \
+                         --cef-fault=POINT]"
                             .to_owned(),
                     ));
                 }
@@ -192,6 +216,20 @@ impl HostConfig {
             ));
         }
 
+        let fault = if let Some(value) = fault_name {
+            if !validation {
+                return Err(HostError::Usage(
+                    "CEF fault injection requires --cef-validation".to_owned(),
+                ));
+            }
+            Some(
+                FaultPoint::parse(&value, true)
+                    .ok_or_else(|| HostError::Usage(format!("unknown CEF fault point {value}")))?,
+            )
+        } else {
+            None
+        };
+
         Ok(Self {
             socket_path,
             parent_pid,
@@ -199,6 +237,8 @@ impl HostConfig {
             cef_root,
             profile_root,
             max_frame_bytes,
+            validation,
+            fault,
         })
     }
 
@@ -225,6 +265,12 @@ fn next_value(
 ) -> Result<OsString, HostError> {
     args.next()
         .ok_or_else(|| HostError::Usage(format!("{name} requires a value")))
+}
+
+fn next_string(args: &mut impl Iterator<Item = OsString>, name: &str) -> Result<String, HostError> {
+    next_value(args, name)?
+        .into_string()
+        .map_err(|_| HostError::Usage("arguments must be valid UTF-8".to_owned()))
 }
 
 fn missing(argument: &str) -> HostError {
@@ -582,6 +628,13 @@ where
     // CEF.  Invalid transport inputs must not start an engine process.
     let config = HostConfig::parse(args.clone())?;
     let validated = config.validate()?;
+    let fault = validated.config.fault;
+    if matches!(
+        fault,
+        Some(FaultPoint::BadBundle | FaultPoint::SandboxFailure | FaultPoint::BadProtocol)
+    ) {
+        return Err(validation_fault_error(fault.expect("fault is present")));
+    }
     let mut cef = CEFLibrary::load(&validated.cef_root)?;
     cef.initialize(&args)?;
 
@@ -591,10 +644,32 @@ where
     )
     .map_err(|error| HostError::Protocol(error.to_string()))?;
     let endpoint = UnixEndpoint::bind(&validated.config.socket_path)?;
-    let mut core = HostCore::new(validated.config.profile_root.clone());
+    let mut core = HostCore::with_fault(validated.config.profile_root.clone(), fault);
     let result = endpoint.serve(validated.config.parent_pid, &codec, &mut core);
     cef.shutdown();
     result
+}
+
+fn validation_fault_error(fault: FaultPoint) -> HostError {
+    match fault {
+        FaultPoint::BadBundle => HostError::Cef("validation fault: bad CEF bundle".to_owned()),
+        FaultPoint::SandboxFailure => {
+            HostError::Permission("validation fault: sandbox failure".to_owned())
+        }
+        FaultPoint::ProfileLock => {
+            HostError::Permission("validation fault: profile lock".to_owned())
+        }
+        FaultPoint::BadProtocol => {
+            HostError::Protocol("validation fault: protocol violation".to_owned())
+        }
+        FaultPoint::HostCrash
+        | FaultPoint::HostUnresponsive
+        | FaultPoint::RendererCrash
+        | FaultPoint::RendererOom
+        | FaultPoint::RendererHang
+        | FaultPoint::GpuCrash
+        | FaultPoint::UtilityCrash => HostError::Runtime(format!("validation fault: {:?}", fault)),
+    }
 }
 
 fn reject_insecure_arguments(args: &[OsString]) -> Result<(), HostError> {
@@ -856,15 +931,21 @@ pub struct HostCore {
     next_surface_id: u64,
     surfaces: BTreeMap<SurfaceId, SurfaceState>,
     stopped: bool,
+    validation_fault: Option<FaultPoint>,
 }
 
 impl HostCore {
     pub fn new(profile_root: PathBuf) -> Self {
+        Self::with_fault(profile_root, None)
+    }
+
+    fn with_fault(profile_root: PathBuf, validation_fault: Option<FaultPoint>) -> Self {
         Self {
             profile_store: ProfileStore::new(profile_root),
             next_surface_id: 1,
             surfaces: BTreeMap::new(),
             stopped: false,
+            validation_fault,
         }
     }
 
@@ -873,15 +954,29 @@ impl HostCore {
             return Err(HostError::Runtime("host is stopping".to_owned()));
         }
         match message {
-            WireMessage::Open { request_id, spec } => self.open(request_id, spec),
+            WireMessage::Open { request_id, spec } => self
+                .open(request_id, spec)
+                .or_else(|error| wire_error_for(request_id, error)),
             WireMessage::Command {
+                request_id,
                 surface_id,
                 command,
-            } => self.command(surface_id, command),
-            WireMessage::Close { surface_id } => self.close(surface_id),
+            } => self
+                .command(request_id, surface_id, command)
+                .or_else(|error| wire_error_for(request_id, error)),
+            WireMessage::Close { surface_id } => self
+                .close(surface_id)
+                .or_else(|error| wire_error_for(0, error)),
+            WireMessage::Heartbeat { request_id } => {
+                if self.validation_fault == Some(FaultPoint::HostUnresponsive) {
+                    return Ok(Vec::new());
+                }
+                Ok(vec![WireMessage::HeartbeatAck { request_id }])
+            }
             WireMessage::Event { .. }
             | WireMessage::Opened { .. }
             | WireMessage::Ack { .. }
+            | WireMessage::HeartbeatAck { .. }
             | WireMessage::Error { .. } => Err(HostError::Protocol(
                 "host accepts only open, command, and close messages".to_owned(),
             )),
@@ -889,6 +984,14 @@ impl HostCore {
     }
 
     fn open(&mut self, request_id: u64, spec: SurfaceSpec) -> Result<Vec<WireMessage>, HostError> {
+        if self.validation_fault == Some(FaultPoint::ProfileLock) {
+            self.validation_fault = None;
+            return Ok(vec![WireMessage::Error {
+                request_id: Some(request_id),
+                code: "profile_locked".to_owned(),
+                message: "validation profile lock fault".to_owned(),
+            }]);
+        }
         spec.validate().map_err(runtime_error)?;
         // Deserialization does not invoke ProfileKey::new, so revalidate the
         // opaque key at the host boundary before it participates in a path.
@@ -925,9 +1028,25 @@ impl HostCore {
 
     fn command(
         &mut self,
+        request_id: u64,
         surface_id: SurfaceId,
         command: SurfaceCommand,
     ) -> Result<Vec<WireMessage>, HostError> {
+        if let Some(fault) = self.validation_fault.take() {
+            let (code, message) = match fault {
+                FaultPoint::RendererCrash => ("renderer_crash", "validation renderer crash"),
+                FaultPoint::RendererOom => ("renderer_oom", "validation renderer OOM"),
+                FaultPoint::RendererHang => ("renderer_unresponsive", "validation renderer hang"),
+                FaultPoint::GpuCrash => ("gpu_crash", "validation GPU crash"),
+                FaultPoint::UtilityCrash => ("utility_crash", "validation utility crash"),
+                _ => return Err(HostError::Runtime("validation host fault".to_owned())),
+            };
+            return Ok(vec![WireMessage::Error {
+                request_id: Some(request_id),
+                code: code.to_owned(),
+                message: message.to_owned(),
+            }]);
+        }
         command.validate().map_err(runtime_error)?;
         let surface = self
             .surfaces
@@ -997,10 +1116,9 @@ impl HostCore {
             | SurfaceCommand::Clipboard { .. }
             | SurfaceCommand::ReleaseFrame { .. } => None,
         };
-        Ok(event
-            .into_iter()
-            .map(|event| WireMessage::Event { event })
-            .collect())
+        let mut responses = vec![WireMessage::Ack { request_id }];
+        responses.extend(event.into_iter().map(|event| WireMessage::Event { event }));
+        Ok(responses)
     }
 
     fn close(&mut self, surface_id: SurfaceId) -> Result<Vec<WireMessage>, HostError> {
@@ -1021,6 +1139,20 @@ impl HostCore {
         self.surfaces.clear();
         self.stopped = true;
     }
+}
+
+fn wire_error_for(request_id: u64, error: HostError) -> Result<Vec<WireMessage>, HostError> {
+    let (code, message) = match error {
+        HostError::Runtime(message) => ("runtime_failed", message),
+        HostError::Permission(message) => ("profile_locked", message),
+        HostError::Usage(message) => ("invalid_command", message),
+        other => return Err(other),
+    };
+    Ok(vec![WireMessage::Error {
+        request_id: (request_id != 0).then_some(request_id),
+        code: code.to_owned(),
+        message,
+    }])
 }
 
 fn next_event_sequence(surface: &mut SurfaceState) -> u64 {
@@ -1165,6 +1297,37 @@ mod tests {
         .unwrap()
     }
 
+    fn host_args(extra: &[&str]) -> Vec<OsString> {
+        let mut args = vec![
+            OsString::from("cef_host"),
+            OsString::from("--socket"),
+            OsString::from("/tmp/roscord-cef.sock"),
+            OsString::from("--parent-pid"),
+            OsString::from("42"),
+            OsString::from("--parent-nonce"),
+            OsString::from("0123456789abcdef0123456789abcdef"),
+            OsString::from("--cef-root"),
+            OsString::from("/opt/roscord/cef"),
+            OsString::from("--profile-root"),
+            OsString::from("/tmp/roscord-profile"),
+        ];
+        args.extend(extra.iter().map(OsString::from));
+        args
+    }
+
+    #[test]
+    fn validation_faults_require_the_switch_and_known_names() {
+        let config =
+            HostConfig::parse(host_args(&["--cef-fault=host_crash", "--cef-validation"])).unwrap();
+        assert!(config.validation);
+        assert_eq!(config.fault, Some(FaultPoint::HostCrash));
+
+        let missing_switch = HostConfig::parse(host_args(&["--cef-fault=host_crash"]));
+        assert!(matches!(missing_switch, Err(HostError::Usage(_))));
+        let unknown = HostConfig::parse(host_args(&["--cef-validation", "--cef-fault=unknown"]));
+        assert!(matches!(unknown, Err(HostError::Usage(_))));
+    }
+
     fn fake_cef_root(root: &Path) {
         for relative in REQUIRED_CEF_FILES {
             let path = root.join(relative);
@@ -1209,6 +1372,11 @@ mod tests {
                 }
             }
         ));
+        assert_eq!(
+            host.dispatch(WireMessage::Heartbeat { request_id: 12 })
+                .unwrap(),
+            vec![WireMessage::HeartbeatAck { request_id: 12 }]
+        );
 
         let closed = host
             .dispatch(WireMessage::Close {
@@ -1295,6 +1463,7 @@ mod tests {
         };
         assert!(host
             .dispatch(WireMessage::Command {
+                request_id: 99,
                 surface_id: SurfaceId(1),
                 command,
             })
@@ -1304,6 +1473,33 @@ mod tests {
                 surface_id: SurfaceId(99),
             })
             .is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn host_core_acknowledges_the_global_transport_request_id() {
+        let root = temp_root("command-request-id");
+        let mut host = HostCore::new(root.clone());
+        host.dispatch(WireMessage::Open {
+            request_id: 1,
+            spec: spec("account-a"),
+        })
+        .unwrap();
+        let responses = host
+            .dispatch(WireMessage::Command {
+                request_id: 77,
+                surface_id: SurfaceId(1),
+                command: SurfaceCommand::Focus {
+                    sequence: 1,
+                    profile_key: Some(ProfileKey::new("account-a").unwrap()),
+                    focused: true,
+                },
+            })
+            .unwrap();
+        assert!(matches!(
+            responses.first(),
+            Some(WireMessage::Ack { request_id: 77 })
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -23,6 +23,15 @@ WINDOWS_CMAKE = (ROOT / "commet" / "windows" / "CMakeLists.txt").read_text(
 DART_RUNTIME = (
     ROOT / "commet" / "lib" / "browser_runtime" / "windows_browser_runtime.dart"
 ).read_text(encoding="utf-8")
+LIFECYCLE_RUST = (
+    ROOT / "rust" / "rust" / "src" / "browser_runtime_lifecycle.rs"
+).read_text(encoding="utf-8")
+LIFECYCLE_DART = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "runtime_lifecycle.dart"
+).read_text(encoding="utf-8")
+LINUX_RUNTIME = (
+    ROOT / "rust" / "rust" / "src" / "linux_browser_runtime.rs"
+).read_text(encoding="utf-8")
 RUNTIME_TOOL = (ROOT / "tools" / "cef_runtime.py").read_text(encoding="utf-8")
 MAIN_DART = (ROOT / "commet" / "lib" / "main.dart").read_text(encoding="utf-8")
 CEF_LOCK = (ROOT / "third_party" / "cef" / "cef.lock.json").read_text(
@@ -101,6 +110,55 @@ class CefHostContractTests(unittest.TestCase):
         self.assertIn("SendClosed", SOURCE)
         self.assertIn("CreateBrowserSync", SOURCE)
         self.assertIn("CloseBrowser(true)", SOURCE)
+
+    def test_bounded_recovery_and_observability_are_wired(self) -> None:
+        for token in (
+            "RuntimeState",
+            "runtime_epoch",
+            "event_seq",
+            "FailureScope",
+            "HostUnresponsive",
+            "CommandOutcome",
+            "MAX_AUTOMATIC_HOST_RESTARTS",
+            "HEARTBEAT_TIMEOUT_MS",
+            "HOST_TERMINATION_GRACE_MS",
+            "FaultPoint",
+        ):
+            self.assertIn(token, LIFECYCLE_RUST)
+        for token in (
+            "RuntimeState",
+            "runtimeEpoch",
+            "eventSeq",
+            "hostUnresponsive",
+            "CommandOutcome",
+            "maxAutomaticHostRestarts",
+            "heartbeatTimeoutMs",
+            "parseFaultPoint",
+        ):
+            self.assertIn(token, LIFECYCLE_DART)
+        self.assertIn('"heartbeat_ack"', SOURCE)
+        self.assertIn("SendHeartbeatAck", SOURCE)
+        self.assertIn('GetType("request_id")', SOURCE)
+        self.assertIn("SendAck(request_id)", SOURCE)
+        for token in (
+            "OnRenderProcessTerminated",
+            "OnRenderProcessUnresponsive",
+            "renderer_oom",
+            "profile_locked",
+        ):
+            self.assertIn(token, SOURCE)
+        self.assertIn("Timer.periodic", DART_RUNTIME)
+        self.assertIn("retryBrowser", DART_RUNTIME)
+        self.assertIn("retry_browser", LINUX_RUNTIME)
+        self.assertIn("held_presentation", LINUX_RUNTIME)
+        self.assertIn("beginShutdown", DART_RUNTIME)
+        for token in (
+            "reconnect_if_due",
+            "restore_surfaces",
+            "host_protocol_violation",
+            "RuntimeState::Restarting",
+        ):
+            self.assertIn(token, LINUX_RUNTIME)
 
     def test_no_runtime_download_or_backend_fallback(self) -> None:
         self.assertNotIn("URLDownloadToFile", SOURCE)

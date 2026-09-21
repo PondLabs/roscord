@@ -1,4 +1,5 @@
 import 'browser_runtime.dart';
+import 'runtime_lifecycle.dart';
 
 /// Native-only constructor surface for platforms without `dart:io`.
 ///
@@ -14,10 +15,25 @@ class WindowsBrowserRuntime implements BrowserRuntime {
     Object? random,
     Duration connectTimeout = const Duration(seconds: 15),
     int maxFrameBytes = defaultBrowserRuntimeMaxFrameBytes,
+    bool validationBuild = false,
+    Object? faultPoint,
   });
+
+  final RuntimeLifecycle lifecycle = RuntimeLifecycle();
 
   @override
   Stream<SurfaceEvent> events() => const Stream<SurfaceEvent>.empty();
+
+  Stream<RuntimeEvent> runtimeEvents() => const Stream<RuntimeEvent>.empty();
+
+  void reportSurfaceFailure(
+    SurfaceId surfaceId,
+    FailureClass kind, {
+    String? rawStatus,
+    required String message,
+  }) {
+    throw UnsupportedError('WindowsBrowserRuntime is only available on Windows');
+  }
 
   @override
   Future<SurfaceId> open(SurfaceSpec spec) => _unsupported();
@@ -30,6 +46,8 @@ class WindowsBrowserRuntime implements BrowserRuntime {
   Future<void> close(SurfaceId surfaceId) => _unsupported();
 
   Future<void> dispose() => _unsupported();
+
+  Future<void> retryBrowser() => _unsupported();
 
   Future<T> _unsupported<T>() => Future<T>.error(
         UnsupportedError('WindowsBrowserRuntime is only available on Windows'),
