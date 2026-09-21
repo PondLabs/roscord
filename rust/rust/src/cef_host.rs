@@ -23,9 +23,11 @@ use std::path::{Path, PathBuf};
 use crate::browser_profile::{ProfileContext, ProfileError, ProfileStore};
 use crate::browser_runtime::{
     CloseReason, FramedCodec, NavigationEvent, NavigationOutcome, ProfileKey, RuntimeError,
-    SurfaceCommand, SurfaceEvent, SurfaceId, SurfaceSpec, WireMessage,
+    ScriptEnvelope, ScriptSource, SurfaceCommand, SurfaceEvent, SurfaceId, SurfaceSpec,
+    WireMessage,
 };
 use crate::browser_runtime_lifecycle::FaultPoint;
+use serde_json::json;
 
 const SOCKET_PATH_MAX_BYTES: usize = 107;
 const CEF_RELEASE: &str = "Release";
@@ -1115,7 +1117,7 @@ impl HostCore {
             SurfaceCommand::Script { envelope, .. } => Some(SurfaceEvent::ScriptMessage {
                 surface_id,
                 sequence: next_event_sequence(surface),
-                envelope,
+                envelope: script_completion_envelope(&envelope).map_err(runtime_error)?,
             }),
             SurfaceCommand::Input { .. }
             | SurfaceCommand::Permission { .. }
@@ -1172,6 +1174,30 @@ impl HostCore {
             .clear_data(profile_key)
             .map_err(profile_error)
     }
+}
+
+/// Script commands are a generic BrowserRuntime execution seam.  The native
+/// CEF bridge evaluates the operation in the page; the transport-only Linux
+/// host still emits a host-sourced terminal event so command acknowledgements
+/// cannot remain pending or be mistaken for a page-originated Matrix message.
+fn script_completion_envelope(envelope: &ScriptEnvelope) -> Result<ScriptEnvelope, RuntimeError> {
+    let operation = envelope
+        .value()
+        .get("operation")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| RuntimeError::InvalidCommand("script operation is missing".into()))?;
+    if operation != "evaluate_javascript" && operation != "dispatch_script_message" {
+        return Err(RuntimeError::InvalidCommand(
+            "script operation is not supported".into(),
+        ));
+    }
+    ScriptEnvelope::new(
+        ScriptSource::Host,
+        envelope.origin().to_owned(),
+        envelope.channel().to_owned(),
+        format!("{}:complete", envelope.request_id()),
+        json!({"operation": operation, "status": "executed"}),
+    )
 }
 
 fn wire_error_for(request_id: u64, error: HostError) -> Result<Vec<WireMessage>, HostError> {
@@ -1466,6 +1492,53 @@ mod tests {
             responses.first(),
             Some(WireMessage::Ack { request_id: 77 })
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn host_core_completes_generic_script_commands_without_echoing_app_messages() {
+        let root = temp_root("script-command");
+        let mut host = HostCore::new(root.clone());
+        host.dispatch(WireMessage::Open {
+            request_id: 1,
+            spec: spec("account-a"),
+        })
+        .unwrap();
+        let envelope = ScriptEnvelope::new(
+            ScriptSource::App,
+            "commet://widget",
+            "test.channel",
+            "script-1",
+            json!({
+                "operation": "dispatch_script_message",
+                "storage_key": "chat.commet.toWidget:1",
+                "payload": "_{\"api\":\"toWidget\"}\n",
+            }),
+        )
+        .unwrap();
+        let responses = host
+            .dispatch(WireMessage::Command {
+                request_id: 9,
+                surface_id: SurfaceId(1),
+                command: SurfaceCommand::Script {
+                    sequence: 1,
+                    profile_key: Some(ProfileKey::new("account-a").unwrap()),
+                    envelope,
+                },
+            })
+            .unwrap();
+        assert!(matches!(
+            responses.first(),
+            Some(WireMessage::Ack { request_id: 9 })
+        ));
+        let WireMessage::Event {
+            event: SurfaceEvent::ScriptMessage { envelope, .. },
+        } = &responses[1]
+        else {
+            panic!("expected script completion event");
+        };
+        assert_eq!(envelope.source(), ScriptSource::Host);
+        assert_eq!(envelope.value()["status"], json!("executed"));
         fs::remove_dir_all(root).unwrap();
     }
 

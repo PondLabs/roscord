@@ -25,9 +25,11 @@ parent origins, and capability policy.
 ## Widget bridge
 
 `MatrixWidgetBrowserRuntimeTransceiver` adapts the old `WidgetTransceiver`
-interface to BrowserRuntime script envelopes. Opening a session first sends a
-generic `evaluate_javascript` command containing the adapter-owned bridge
-script. The script is the BrowserRuntime equivalent of `widgets_ipc.js` and
+interface to BrowserRuntime script envelopes. Opening a session waits for the
+typed `ReadyEvent`, then sends a generic `evaluate_javascript` command
+containing the adapter-owned bridge script. The native host evaluates that
+command in the page and completes it with a host-sourced terminal script event.
+The script is the BrowserRuntime equivalent of `widgets_ipc.js` and
 the Rust `call_ipc.js` fallback: it installs the `window.parent.postMessage`
 shim, recursive binary conversion, `sessionStorage` rendezvous, and the
 `__roscordBrowserRuntimeReceive`/`__roscordBrowserRuntimeSend` callbacks.
@@ -40,9 +42,18 @@ The bridge intentionally retains the old wire details:
 - outbound values use `chat.commet.toWidget:<counter>` storage keys;
 - inbound values must use `chat.commet.fromWidget:<counter>` keys;
 - each payload is an underscore-prefixed, newline-delimited UTF-8 frame;
+- both directions remove their session-storage key after the handoff, matching
+  the existing in-app transceiver behavior;
 - page/app origin checks are applied before a frame is delivered;
 - recursive `ArrayBuffer` and `Blob` values are decoded by
   `MatrixWidgetTransport`, including nested lists and maps.
+
+App-to-page messages use a generic `dispatch_script_message` command. The
+host invokes `window.__roscordBrowserRuntimeReceive` in the ready page, while
+the renderer callback sends page-to-app JSON back as a `ScriptMessageEvent`
+with `source: page`. The host never parses Matrix actions, capabilities, or
+storage-key prefixes; the adapter performs those protocol and origin checks.
+Bridge installation errors close the just-opened surface and remain retryable.
 
 `MatrixWidgetBrowserRuntimeRunner` reuses `MatrixWidgetMessageHandler` and
 `MatrixWidgetCapabilitiesManager`, so capability prompts, accepted/rejected

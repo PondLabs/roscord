@@ -57,6 +57,7 @@ void main() {
     expect(value['script'], contains('window.__roscordBrowserRuntimeReceive'));
     expect(value['script'], contains(matrixWidgetFromWidgetStoragePrefix));
     expect(value['script'], contains(matrixWidgetToWidgetStoragePrefix));
+    expect(value['script'], contains('sessionStorage.removeItem'));
     expect(value['script'], contains('window.ipc.postMessage'));
 
     await adapter.dispose();
@@ -218,6 +219,19 @@ void main() {
 
     await adapter.dispose();
   });
+
+  test('bridge installation failure closes the surface and can be retried',
+      () async {
+    final runtime = _RecordingRuntime()..failNextCommand = true;
+    final adapter = MatrixWidgetAdapter(runtime: runtime);
+
+    await expectLater(adapter.openSession(_launch()), throwsA(isA<Object>()));
+    expect(runtime.closedSurfaceIds, [const SurfaceId(1)]);
+
+    final session = await adapter.openSession(_launch(widgetId: 'retry'));
+    expect(session.surfaceId, const SurfaceId(2));
+    await adapter.dispose();
+  });
 }
 
 MatrixWidgetAdapterLaunch _launch({
@@ -251,6 +265,7 @@ class _RecordingRuntime implements BrowserRuntime {
   final List<SurfaceCommand> commands = [];
   final List<SurfaceId> closedSurfaceIds = [];
   final List<SurfaceSpec> openedSpecs = [];
+  bool failNextCommand = false;
   int _nextSurfaceId = 1;
 
   @override
@@ -259,11 +274,20 @@ class _RecordingRuntime implements BrowserRuntime {
   @override
   Future<SurfaceId> open(SurfaceSpec spec) async {
     openedSpecs.add(spec);
-    return SurfaceId(_nextSurfaceId++);
+    final id = SurfaceId(_nextSurfaceId++);
+    Future<void>.delayed(
+      Duration.zero,
+      () => _events.add(ReadyEvent(id, 1, spec.initialNavigation)),
+    );
+    return id;
   }
 
   @override
   Future<void> command(SurfaceId surfaceId, SurfaceCommand command) async {
+    if (failNextCommand) {
+      failNextCommand = false;
+      throw StateError('simulated bridge installation failure');
+    }
     commands.add(command);
   }
 

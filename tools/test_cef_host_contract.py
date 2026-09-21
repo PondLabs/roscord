@@ -117,6 +117,19 @@ class CefHostContractTests(unittest.TestCase):
         self.assertIn("CreateBrowserSync", SOURCE)
         self.assertIn("CloseBrowser(true)", SOURCE)
 
+    def test_script_commands_execute_in_cef_and_page_messages_return_as_events(self) -> None:
+        for token in (
+            "BrowserRuntimeSendHandler",
+            "__roscordBrowserRuntimeSend",
+            "roscord_browser_runtime_send",
+            "ExecuteJavaScript",
+            "__roscordBrowserRuntimeReceive",
+            "SendScriptComplete",
+            "OnProcessMessageReceived",
+            "script_message",
+        ):
+            self.assertIn(token, SOURCE)
+
     def test_bounded_recovery_and_observability_are_wired(self) -> None:
         for token in (
             "RuntimeState",

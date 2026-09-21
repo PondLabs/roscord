@@ -130,19 +130,26 @@ const String matrixWidgetBridgeScript = r'''
       storage_key: storageKey,
       payload: payload,
       newline_delimited: true,
+      origin: window.location.origin,
+      channel: "chat.commet.matrix_widget",
+      request_id: storageKey,
     };
 
     // BrowserRuntime host bridge. Keep the old Rust/Wry IPC shape as the
     // fallback for retained subprocess callers.
-    if (typeof window.__roscordBrowserRuntimeSend === "function") {
-      window.__roscordBrowserRuntimeSend(envelope);
-    } else if (window.ipc && typeof window.ipc.postMessage === "function") {
-      window.ipc.postMessage(JSON.stringify({
-        type: "Widget",
-        data: JSON.stringify({ type: "PostMessage", message: message }),
-      }));
-    } else {
-      window.dispatchEvent(new CustomEvent(BRIDGE_EVENT, { detail: envelope }));
+    try {
+      if (typeof window.__roscordBrowserRuntimeSend === "function") {
+        window.__roscordBrowserRuntimeSend(JSON.stringify(envelope));
+      } else if (window.ipc && typeof window.ipc.postMessage === "function") {
+        window.ipc.postMessage(JSON.stringify({
+          type: "Widget",
+          data: JSON.stringify({ type: "PostMessage", message: message }),
+        }));
+      } else {
+        window.dispatchEvent(new CustomEvent(BRIDGE_EVENT, { detail: envelope }));
+      }
+    } finally {
+      sessionStorage.removeItem(storageKey);
     }
   }
 
@@ -175,13 +182,17 @@ const String matrixWidgetBridgeScript = r'''
     if (storageKey && typeof payload === "string") {
       sessionStorage.setItem(storageKey, payload);
     }
-    const text = typeof payload === "string" && payload.startsWith("_")
-      ? payload.substring(1)
-      : payload;
-    const value = await decodeArrayBuffers(JSON.parse(text));
-    const event = { origin: APP_ORIGIN, data: value, source: window };
-    if (typeof window.onmessage === "function") window.onmessage(event);
-    for (const callback of messageListeners) callback(event);
+    try {
+      const text = typeof payload === "string" && payload.startsWith("_")
+        ? payload.substring(1)
+        : payload;
+      const value = await decodeArrayBuffers(JSON.parse(text));
+      const event = { origin: APP_ORIGIN, data: value, source: window };
+      if (typeof window.onmessage === "function") window.onmessage(event);
+      for (const callback of messageListeners) callback(event);
+    } finally {
+      if (storageKey) sessionStorage.removeItem(storageKey);
+    }
   };
 
   window.__roscordMatrixWidgetBridgeInstalled = {
@@ -367,22 +378,27 @@ class MatrixWidgetBrowserRuntimeTransceiver implements WidgetTransceiver {
   /// actions remain in the Dart message and capability handlers.
   Future<void> initializeBridge() async {
     if (_disposed || _bridgeInitialized) return;
-    _bridgeInitialized = true;
-    _enqueueCommand(
-      ScriptEnvelope(
-        source: ScriptSource.app,
-        origin: appOrigin,
-        channel: matrixWidgetScriptChannel,
-        requestId: 'matrix-widget-bridge-install',
-        value: {
-          'operation': matrixWidgetBridgeInstallOperation,
-          'protocol_version': matrixWidgetBridgeProtocolVersion,
-          'script': matrixWidgetBridgeScript,
-          'app_origin': appOrigin,
-        },
-      ),
-    );
-    await _commandTail;
+    try {
+      await _enqueueCommand(
+        ScriptEnvelope(
+          source: ScriptSource.app,
+          origin: appOrigin,
+          channel: matrixWidgetScriptChannel,
+          requestId: 'matrix-widget-bridge-install',
+          value: {
+            'operation': matrixWidgetBridgeInstallOperation,
+            'protocol_version': matrixWidgetBridgeProtocolVersion,
+            'script': matrixWidgetBridgeScript,
+            'app_origin': appOrigin,
+          },
+        ),
+      );
+      _bridgeInitialized = true;
+    } catch (error, stack) {
+      _bridgeInitialized = false;
+      Log.onError(error, stack, content: 'Installing Matrix widget bridge');
+      rethrow;
+    }
   }
 
   @override
@@ -404,10 +420,15 @@ class MatrixWidgetBrowserRuntimeTransceiver implements WidgetTransceiver {
         'newline_delimited': true,
       },
     );
-    _enqueueCommand(envelope);
+    unawaited(
+      _enqueueCommand(envelope).then<void>(
+        (_) {},
+        onError: (Object _, StackTrace __) {},
+      ),
+    );
   }
 
-  void _enqueueCommand(ScriptEnvelope envelope) {
+  Future<void> _enqueueCommand(ScriptEnvelope envelope) {
     final command = ScriptCommand(
       sequence: _nextCommandSequence++,
       profileKey: profileKey,
@@ -417,12 +438,14 @@ class MatrixWidgetBrowserRuntimeTransceiver implements WidgetTransceiver {
     // WidgetMessageTransport.send is intentionally fire-and-forget.  Queue
     // commands here so the BrowserRuntime's ordered-command invariant is
     // maintained even when a page emits a burst of messages.
-    _commandTail = _commandTail.then(
+    final commandFuture = _commandTail.then<void>(
       (_) => runtime.command(surfaceId, command),
     );
-    _commandTail = _commandTail.catchError((Object error, StackTrace stack) {
+    _commandTail = commandFuture.then<void>((_) {},
+        onError: (Object error, StackTrace stack) {
       Log.onError(error, stack, content: 'Matrix widget BrowserRuntime send');
     });
+    return commandFuture;
   }
 
   void _handleEvent(SurfaceEvent event) {
@@ -508,6 +531,8 @@ class MatrixWidgetBrowserRuntimeSession {
       StreamController<SurfaceEvent>.broadcast();
   final StreamController<void> _onClosed = StreamController<void>.broadcast();
   final Completer<void> _closed = Completer<void>();
+  final Completer<void> _ready = Completer<void>();
+  Object? _readyFailure;
   late final StreamSubscription<SurfaceEvent> _runtimeSubscription;
 
   Future<void>? _disposeFuture;
@@ -531,12 +556,38 @@ class MatrixWidgetBrowserRuntimeSession {
 
   Stream<void> get onClosed => _onClosed.stream;
 
-  Future<void> initialize() => transceiver.initializeBridge();
+  Future<void> initialize() async {
+    await waitUntilReady();
+    await transceiver.initializeBridge();
+  }
+
+  Future<void> waitUntilReady() {
+    final failure = _readyFailure;
+    if (failure != null) return Future<void>.error(failure);
+    if (_closedState && !_ready.isCompleted) {
+      return Future<void>.error(
+        StateError('Matrix widget surface closed before ready'),
+      );
+    }
+    return _ready.future;
+  }
 
   void _handleEvent(SurfaceEvent event) {
     if (event.surfaceId != surfaceId || _closedState) return;
     _events.add(event);
-    if (event is ClosedEvent || event is FailedEvent) _finishClosed();
+    if (event is ReadyEvent) {
+      if (!_ready.isCompleted) _ready.complete();
+    } else if (event is FailedEvent) {
+      if (!_ready.isCompleted) {
+        _readyFailure = StateError(event.failure.message);
+      }
+      _finishClosed();
+    } else if (event is ClosedEvent) {
+      if (!_ready.isCompleted) {
+        _readyFailure = StateError('Matrix widget surface closed before ready');
+      }
+      _finishClosed();
+    }
   }
 
   void _finishClosed() {
@@ -705,7 +756,12 @@ class MatrixWidgetAdapter {
       profileKey: ProfileKey(launch.profileKey),
       pageOrigin: _originOf(launch.initialUrl.toString()) ?? '',
     );
-    await session.initialize();
+    try {
+      await session.initialize();
+    } catch (_) {
+      await session.dispose();
+      rethrow;
+    }
     _activeSession = session;
     session.onClosed.listen((_) {
       if (identical(_activeSession, session)) _activeSession = null;

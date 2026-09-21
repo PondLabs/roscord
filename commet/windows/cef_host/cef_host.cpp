@@ -34,8 +34,10 @@
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
 #include "include/cef_cookie.h"
+#include "include/cef_process_message.h"
 #include "include/cef_parser.h"
 #include "include/cef_render_handler.h"
+#include "include/cef_render_process_handler.h"
 #include "include/cef_request_handler.h"
 #include "include/cef_request_context.h"
 #include "include/cef_request.h"
@@ -43,6 +45,7 @@
 #include "include/cef_sandbox_win.h"
 #include "include/cef_scheme.h"
 #include "include/cef_task.h"
+#include "include/cef_v8.h"
 #include "include/cef_version_info.h"
 #include "include/wrapper/cef_helpers.h"
 
@@ -55,6 +58,8 @@ constexpr uint32_t kMaxFrameBytes = 1024u * 1024u;
 constexpr DWORD kConnectTimeoutMs = 10000;
 constexpr wchar_t kPipePrefix[] = L"\\\\.\\pipe\\roscord-browser-";
 constexpr char kFixtureUrl[] = "commet://fixture/";
+constexpr char kEvaluateJavaScriptOperation[] = "evaluate_javascript";
+constexpr char kDispatchScriptMessageOperation[] = "dispatch_script_message";
 
 // The browser runtime owns the protocol boundary.  Keep the list here as a
 // deny-list as a second line of defence against inherited CEF command-line
@@ -927,11 +932,53 @@ class FixtureSchemeHandlerFactory final : public CefSchemeHandlerFactory {
   IMPLEMENT_REFCOUNTING(FixtureSchemeHandlerFactory);
 };
 
-class HostApp final : public CefApp, public CefBrowserProcessHandler {
+// The renderer-side half of the generic BrowserRuntime script bridge.  It
+// deliberately accepts only a JSON string: the browser process validates and
+// wraps the opaque value as a ScriptEnvelope before it reaches Dart.  No
+// Matrix action or capability vocabulary crosses this CEF boundary.
+class BrowserRuntimeSendHandler final : public CefV8Handler {
+ public:
+  bool Execute(const CefString& name, CefRefPtr<CefV8Value> object,
+               const CefV8ValueList& arguments,
+               CefRefPtr<CefV8Value>& retval,
+               CefString& exception) override {
+    (void)name;
+    (void)object;
+    retval = CefV8Value::CreateUndefined();
+    if (arguments.size() != 1 || !arguments[0]->IsString()) {
+      exception = "BrowserRuntime bridge expects one JSON string";
+      return false;
+    }
+    const auto context = CefV8Context::GetCurrentContext();
+    if (context == nullptr || context->GetBrowser() == nullptr) {
+      exception = "BrowserRuntime bridge has no browser context";
+      return false;
+    }
+    auto message = CefProcessMessage::Create("roscord_browser_runtime_send");
+    message->GetArgumentList()->SetString(
+        0, arguments[0]->GetStringValue());
+    if (!context->GetBrowser()->SendProcessMessage(PID_BROWSER, message)) {
+      exception = "BrowserRuntime bridge could not reach the host";
+      return false;
+    }
+    return true;
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(BrowserRuntimeSendHandler);
+};
+
+class HostApp final : public CefApp,
+                      public CefBrowserProcessHandler,
+                      public CefRenderProcessHandler {
  public:
   HostApp() = default;
 
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override {
+    return this;
+  }
+
+  CefRefPtr<CefRenderProcessHandler> GetRenderProcessHandler() override {
     return this;
   }
 
@@ -951,6 +998,20 @@ class HostApp final : public CefApp, public CefBrowserProcessHandler {
       context_initialized_ = true;
     }
     condition_.notify_all();
+  }
+
+  void OnContextCreated(CefRefPtr<CefBrowser> browser,
+                        CefRefPtr<CefFrame> frame,
+                        CefRefPtr<CefV8Context> context) override {
+    CEF_REQUIRE_RENDERER_THREAD();
+    (void)browser;
+    (void)frame;
+    const auto global = context->GetGlobal();
+    global->SetValue(
+        "__roscordBrowserRuntimeSend",
+        CefV8Value::CreateFunction("__roscordBrowserRuntimeSend",
+                                   new BrowserRuntimeSendHandler()),
+        V8_PROPERTY_ATTRIBUTE_NONE);
   }
 
   bool WaitForContext(std::chrono::seconds timeout) {
@@ -1274,6 +1335,7 @@ struct SurfaceState {
   CefRefPtr<CefRequestContext> request_context;
   std::string presentation;
   int last_command_sequence = 0;
+  uint64_t next_event_sequence = 2;
   CefRefPtr<CefBrowser> browser;
   bool close_requested = false;
 };
@@ -1297,6 +1359,10 @@ class BrowserClient final : public CefClient,
                                  int error_code,
                                  const CefString& error_string) override;
   void OnRenderProcessUnresponsive(CefRefPtr<CefBrowser> browser) override;
+  bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
+                                CefRefPtr<CefFrame> frame,
+                                CefProcessId source_process,
+                                CefRefPtr<CefProcessMessage> message) override;
 
   bool GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect) override {
     rect = CefRect(0, 0, 1024, 768);
@@ -1344,6 +1410,11 @@ class HostController {
   void CloseBrowserOnUi(uint64_t surface_id);
   void OnBrowserCreated(uint64_t surface_id, CefRefPtr<CefBrowser> browser);
   void OnBrowserClosed(uint64_t surface_id);
+  void OnBrowserRuntimeSend(uint64_t surface_id,
+                            CefRefPtr<CefBrowser> browser,
+                            std::string payload);
+  void ExecuteScriptOnUi(uint64_t surface_id, int request_id,
+                         CefRefPtr<CefDictionaryValue> envelope);
   void OnRendererFailure(uint64_t surface_id, std::string_view code,
                          std::string_view message);
   bool ClearData(std::string_view profile_key, std::string& error) {
@@ -1375,12 +1446,18 @@ class HostController {
   void SendOpened(int request_id, uint64_t surface_id);
   void SendReady(const SurfaceState& surface, std::string_view url);
   void SendClosed(uint64_t surface_id, uint64_t sequence);
+  void SendScriptComplete(uint64_t surface_id,
+                          CefRefPtr<CefDictionaryValue> envelope,
+                          std::string_view operation);
+  void SendScriptMessage(uint64_t surface_id,
+                         CefRefPtr<CefDictionaryValue> envelope);
   std::optional<SurfaceState> GetSurface(uint64_t surface_id);
   bool HasSurface(uint64_t surface_id);
 
   HostArgs args_;
   PipeChannel& pipe_;
   std::mutex state_mutex_;
+  std::mutex pipe_mutex_;
   std::map<uint64_t, SurfaceState> surfaces_;
   ProfileManager profiles_;
   uint64_t next_surface_id_ = 1;
@@ -1425,6 +1502,28 @@ class CloseBrowserTask final : public CefTask {
   IMPLEMENT_REFCOUNTING(CloseBrowserTask);
 };
 
+class ExecuteScriptTask final : public CefTask {
+ public:
+  ExecuteScriptTask(HostController* controller, uint64_t surface_id,
+                    int request_id,
+                    CefRefPtr<CefDictionaryValue> envelope)
+      : controller_(controller),
+        surface_id_(surface_id),
+        request_id_(request_id),
+        envelope_(std::move(envelope)) {}
+
+  void Execute() override {
+    controller_->ExecuteScriptOnUi(surface_id_, request_id_, envelope_);
+  }
+
+ private:
+  HostController* controller_;
+  uint64_t surface_id_;
+  int request_id_;
+  CefRefPtr<CefDictionaryValue> envelope_;
+  IMPLEMENT_REFCOUNTING(ExecuteScriptTask);
+};
+
 CefRefPtr<CefDictionaryValue> Dictionary(CefRefPtr<CefValue> value) {
   if (value == nullptr || value->GetType() != VTYPE_DICTIONARY) {
     return nullptr;
@@ -1455,6 +1554,7 @@ void HostController::SendMessage(CefRefPtr<CefDictionaryValue> message) {
   if (stopping_) {
     return;
   }
+  std::lock_guard lock(pipe_mutex_);
   const std::string body = Json(NewEnvelope(message, args_.nonce));
   if (body.empty() || !pipe_.WriteFrame(body)) {
     stopping_ = true;
@@ -1546,6 +1646,115 @@ void HostController::SendClosed(uint64_t surface_id, uint64_t sequence) {
   wire->SetString("type", "event");
   wire->SetDictionary("payload", payload);
   SendMessage(wire);
+}
+
+void HostController::SendScriptMessage(
+    uint64_t surface_id, CefRefPtr<CefDictionaryValue> envelope) {
+  if (envelope == nullptr || !HasSurface(surface_id)) return;
+  uint64_t sequence = 0;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return;
+    sequence = iterator->second.next_event_sequence++;
+  }
+  auto event_payload = NewDictionary();
+  event_payload->SetInt("surface_id", static_cast<int>(surface_id));
+  event_payload->SetInt("sequence", static_cast<int>(sequence));
+  event_payload->SetDictionary("envelope", envelope);
+
+  auto event = NewDictionary();
+  event->SetString("type", "script_message");
+  event->SetDictionary("payload", event_payload);
+
+  auto payload = NewDictionary();
+  payload->SetDictionary("event", event);
+  auto wire = NewDictionary();
+  wire->SetString("type", "event");
+  wire->SetDictionary("payload", payload);
+  SendMessage(wire);
+}
+
+void HostController::SendScriptComplete(
+    uint64_t surface_id, CefRefPtr<CefDictionaryValue> envelope,
+    std::string_view operation) {
+  if (envelope == nullptr) return;
+  auto value = NewDictionary();
+  value->SetString("operation", std::string(operation));
+  value->SetString("status", "executed");
+
+  auto completion = NewDictionary();
+  completion->SetString("source", "host");
+  completion->SetString("origin", envelope->GetString("origin"));
+  completion->SetString("channel", envelope->GetString("channel"));
+  completion->SetString(
+      "request_id", envelope->GetString("request_id").ToString() +
+                         ":complete");
+  completion->SetDictionary("value", value);
+  SendScriptMessage(surface_id, completion);
+}
+
+void HostController::OnBrowserRuntimeSend(uint64_t surface_id,
+                                           CefRefPtr<CefBrowser> browser,
+                                           std::string payload) {
+  CEF_REQUIRE_UI_THREAD();
+  if (browser == nullptr || !HasSurface(surface_id)) return;
+  auto decoded = CefParseJSON(payload, JSON_PARSER_RFC);
+  const auto value = Dictionary(decoded);
+  if (value == nullptr || value->GetType("origin") != VTYPE_STRING ||
+      value->GetType("channel") != VTYPE_STRING ||
+      value->GetType("storage_key") != VTYPE_STRING ||
+      value->GetType("payload") != VTYPE_STRING) {
+    SendError(std::nullopt, "invalid_command",
+              "BrowserRuntime page message is malformed");
+    return;
+  }
+  auto envelope = NewDictionary();
+  envelope->SetString("source", "page");
+  envelope->SetString("origin", value->GetString("origin"));
+  envelope->SetString("channel", value->GetString("channel"));
+  if (value->GetType("request_id") == VTYPE_STRING) {
+    envelope->SetString("request_id", value->GetString("request_id"));
+  } else {
+    envelope->SetString("request_id", "browser-runtime-page-message");
+  }
+  envelope->SetValue("value", decoded);
+  SendScriptMessage(surface_id, envelope);
+}
+
+void HostController::ExecuteScriptOnUi(
+    uint64_t surface_id, int request_id,
+    CefRefPtr<CefDictionaryValue> envelope) {
+  CEF_REQUIRE_UI_THREAD();
+  const auto surface = GetSurface(surface_id);
+  if (!surface || surface->browser == nullptr || envelope == nullptr) {
+    SendError(request_id, "runtime_failed", "surface browser is not ready");
+    return;
+  }
+  const auto value = envelope->GetDictionary("value");
+  if (value == nullptr || value->GetType("operation") != VTYPE_STRING) {
+    SendError(request_id, "invalid_command", "script operation is missing");
+    return;
+  }
+  const std::string operation = value->GetString("operation").ToString();
+  const auto frame = surface->browser->GetMainFrame();
+  if (frame == nullptr) {
+    SendError(request_id, "runtime_failed", "surface frame is unavailable");
+    return;
+  }
+  if (operation == kEvaluateJavaScriptOperation) {
+    frame->ExecuteJavaScript(value->GetString("script"), frame->GetURL(), 0);
+  } else if (operation == kDispatchScriptMessageOperation) {
+    auto argument = CefValue::Create();
+    argument->SetDictionary(value);
+    const std::string script =
+        "window.__roscordBrowserRuntimeReceive(" + Json(argument) + ");";
+    frame->ExecuteJavaScript(script, frame->GetURL(), 0);
+  } else {
+    SendError(request_id, "invalid_command", "script operation is not supported");
+    return;
+  }
+  SendScriptComplete(surface_id, envelope, operation);
 }
 
 bool HostController::AuthenticateEnvelope(
@@ -1777,9 +1986,54 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
     SendError(request_id, "invalid_command", "profile key is malformed");
     return false;
   }
+  CefRefPtr<CefDictionaryValue> script_envelope;
+  std::string script_operation;
+  if (command_type == "script") {
+    if (command_payload->GetType("envelope") != VTYPE_DICTIONARY) {
+      SendError(request_id, "invalid_command", "script envelope is malformed");
+      return false;
+    }
+    script_envelope = command_payload->GetDictionary("envelope");
+    if (script_envelope->GetType("source") != VTYPE_STRING ||
+        script_envelope->GetType("origin") != VTYPE_STRING ||
+        script_envelope->GetType("channel") != VTYPE_STRING ||
+        script_envelope->GetType("request_id") != VTYPE_STRING ||
+        script_envelope->GetString("origin").ToString().empty() ||
+        script_envelope->GetString("channel").ToString().empty() ||
+        script_envelope->GetString("request_id").ToString().empty()) {
+      SendError(request_id, "invalid_command", "script envelope metadata is malformed");
+      return false;
+    }
+    const auto value = script_envelope->GetDictionary("value");
+    if (value == nullptr || value->GetType("operation") != VTYPE_STRING) {
+      SendError(request_id, "invalid_command", "script operation is missing");
+      return false;
+    }
+    script_operation = value->GetString("operation").ToString();
+    if (script_operation == kEvaluateJavaScriptOperation) {
+      if (value->GetType("script") != VTYPE_STRING ||
+          value->GetString("script").ToString().empty()) {
+        SendError(request_id, "invalid_command", "javascript source is missing");
+        return false;
+      }
+    } else if (script_operation == kDispatchScriptMessageOperation) {
+      if (value->GetType("storage_key") != VTYPE_STRING ||
+          value->GetType("payload") != VTYPE_STRING) {
+        SendError(request_id, "invalid_command", "script message is malformed");
+        return false;
+      }
+    } else {
+      SendError(request_id, "invalid_command", "script operation is not supported");
+      return false;
+    }
+  }
   const auto surface = GetSurface(surface_id);
   if (!surface) {
     SendError(request_id, "stale_surface", "surface id is not active");
+    return true;
+  }
+  if (command_type == "script" && surface->browser == nullptr) {
+    SendError(request_id, "runtime_failed", "surface browser is not ready");
     return true;
   }
   if (command_payload->GetType("profile_key") == VTYPE_STRING &&
@@ -1807,9 +2061,11 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
   // for execution.  The client still treats an accepted command without a
   // terminal outcome as unknown if this process subsequently disappears.
   SendAck(request_id);
-  // Navigation/input/frame handling is added behind this same seam by the
-  // caller tickets.  A fixture host accepts a well-formed command but never
-  // replays a side effect or exposes a CEF object over IPC.
+  if (command_type == "script") {
+    CefTaskRunner::GetForThread(TID_UI)->PostTask(
+        new ExecuteScriptTask(this, surface_id, request_id,
+                              std::move(script_envelope)));
+  }
   return true;
 }
 
@@ -1936,11 +2192,13 @@ void HostController::OnBrowserClosed(uint64_t surface_id) {
   CEF_REQUIRE_UI_THREAD();
   bool was_active = false;
   std::optional<uint64_t> context_id;
+  uint64_t close_sequence = 2;
   {
     std::lock_guard lock(state_mutex_);
     const auto iterator = surfaces_.find(surface_id);
     if (iterator != surfaces_.end()) {
       context_id = iterator->second.context_id;
+      close_sequence = iterator->second.next_event_sequence;
       surfaces_.erase(iterator);
       was_active = true;
     }
@@ -1949,7 +2207,7 @@ void HostController::OnBrowserClosed(uint64_t surface_id) {
     profiles_.Release(*context_id);
   }
   if (was_active) {
-    SendClosed(surface_id, 2);
+    SendClosed(surface_id, close_sequence);
     closed_condition_.notify_all();
   }
 }
@@ -2000,6 +2258,25 @@ void HostController::Run() {
 void BrowserClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
   CEF_REQUIRE_UI_THREAD();
   controller_->OnBrowserCreated(surface_id_, browser);
+}
+
+bool BrowserClient::OnProcessMessageReceived(
+    CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+    CefProcessId source_process, CefRefPtr<CefProcessMessage> message) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)frame;
+  if (source_process != PID_RENDERER || message == nullptr ||
+      message->GetName() != "roscord_browser_runtime_send") {
+    return false;
+  }
+  const auto arguments = message->GetArgumentList();
+  if (arguments == nullptr || arguments->GetType(0) != VTYPE_STRING) {
+    controller_->OnBrowserRuntimeSend(surface_id_, browser, {});
+    return true;
+  }
+  controller_->OnBrowserRuntimeSend(surface_id_, browser,
+                                     arguments->GetString(0).ToString());
+  return true;
 }
 
 void BrowserClient::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
