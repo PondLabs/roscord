@@ -563,6 +563,50 @@ DownloadDecision _downloadDecisionFromJson(Map<String, dynamic> json) {
 
 enum ClipboardDecision { deny, allow, cancel }
 
+/// Upload handoff decision.  `AcceptUpload` means "show the OS/portal
+/// chooser"; the host stages the user's explicit selection as read-only
+/// copies and never reveals the real filesystem paths to the page.  There
+/// is intentionally no destination or path field: uploads never grant the
+/// page a persistent path or directory enumeration.
+sealed class UploadDecision {
+  const UploadDecision();
+
+  Map<String, Object?> toJson();
+}
+
+class DenyUpload extends UploadDecision {
+  const DenyUpload();
+
+  @override
+  Map<String, Object?> toJson() => {'kind': 'deny'};
+}
+
+class CancelUpload extends UploadDecision {
+  const CancelUpload();
+
+  @override
+  Map<String, Object?> toJson() => {'kind': 'cancel'};
+}
+
+class AcceptUpload extends UploadDecision {
+  const AcceptUpload();
+
+  @override
+  Map<String, Object?> toJson() => {'kind': 'accept'};
+}
+
+UploadDecision _uploadDecisionFromJson(Map<String, dynamic> json) {
+  return switch (_requiredString(json, 'kind')) {
+    'deny' => const DenyUpload(),
+    'cancel' => const CancelUpload(),
+    'accept' => const AcceptUpload(),
+    final value => throw ProtocolException(
+        'unknown_upload_decision',
+        'unknown upload decision $value',
+      ),
+  };
+}
+
 sealed class SurfaceCommand {
   final int sequence;
   final ProfileKey? profileKey;
@@ -628,6 +672,13 @@ sealed class SurfaceCommand {
     required String requestId,
     required ClipboardDecision decision,
   }) = ClipboardCommand;
+
+  factory SurfaceCommand.upload({
+    required int sequence,
+    ProfileKey? profileKey,
+    required String requestId,
+    required UploadDecision decision,
+  }) = UploadCommand;
 
   factory SurfaceCommand.releaseFrame({
     required int sequence,
@@ -703,6 +754,13 @@ sealed class SurfaceCommand {
             ClipboardDecision.values,
             _requiredString(payload, 'decision'),
           ),
+        ),
+      'upload' => UploadCommand(
+          sequence: sequence,
+          profileKey: profile,
+          requestId: _requiredString(payload, 'request_id'),
+          decision:
+              _uploadDecisionFromJson(_requiredMap(payload, 'decision')),
         ),
       'release_frame' => ReleaseFrameCommand(
           sequence: sequence,
@@ -921,6 +979,29 @@ class ClipboardCommand extends _CommandBase {
         'type': 'clipboard',
         'payload':
             payload({'request_id': requestId, 'decision': decision.name}),
+      };
+}
+
+class UploadCommand extends _CommandBase {
+  final String requestId;
+  final UploadDecision decision;
+
+  UploadCommand({
+    required int sequence,
+    ProfileKey? profileKey,
+    required this.requestId,
+    required this.decision,
+  }) : super(sequence, profileKey) {
+    _requireRequestId(requestId);
+  }
+
+  @override
+  Map<String, Object?> toJson() => {
+        'type': 'upload',
+        'payload': payload({
+          'request_id': requestId,
+          'decision': decision.toJson(),
+        }),
       };
 }
 
@@ -1197,6 +1278,13 @@ sealed class SurfaceEvent {
           write: _requiredBool(payload, 'write'),
           userGesture: _requiredBool(payload, 'user_gesture'),
         ),
+      'upload_request' => UploadRequestEvent(
+          id,
+          sequence,
+          requestId: _requiredString(payload, 'request_id'),
+          multiple: _requiredBool(payload, 'multiple'),
+          accept: _stringList(payload, 'accept'),
+        ),
       'window_changed' => WindowChangedEvent(
           id,
           sequence,
@@ -1397,6 +1485,36 @@ class ClipboardRequestEvent extends SurfaceEvent {
       };
 }
 
+/// Page-initiated file-upload request.  `accept` carries only the page's
+/// advisory filter list; the host never enumerates the filesystem to satisfy
+/// it.  The app decision (`UploadCommand`) chooses deny/cancel/accept, where
+/// accept shows exactly one OS/portal chooser.  The chooser result is staged
+/// as read-only copies; the page receives staged bytes/handles, never a real
+/// path or a persistent grant.
+class UploadRequestEvent extends SurfaceEvent {
+  final String requestId;
+  final bool multiple;
+  final List<String> accept;
+
+  const UploadRequestEvent(
+    super.surfaceId,
+    super.sequence, {
+    required this.requestId,
+    required this.multiple,
+    this.accept = const [],
+  });
+
+  @override
+  Map<String, Object?> toJson() => {
+        'type': 'upload_request',
+        'payload': _eventPayload(surfaceId, sequence, {
+          'request_id': requestId,
+          'multiple': multiple,
+          'accept': accept,
+        }),
+      };
+}
+
 class WindowChangedEvent extends SurfaceEvent {
   final WindowChange change;
 
@@ -1521,6 +1639,7 @@ class FakeBrowserRuntime implements BrowserRuntime {
             PopupCommand() ||
             DownloadCommand() ||
             ClipboardCommand() ||
+            UploadCommand() ||
             ReleaseFrameCommand():
         // These are accepted by the fake; the real host produces the
         // corresponding request events from CEF callbacks.
@@ -2247,6 +2366,23 @@ Map<String, dynamic> _requiredMap(Map<String, dynamic> json, String key) {
     throw ProtocolException('invalid_message', 'field $key must be an object');
   }
   return Map<String, dynamic>.from(value);
+}
+
+List<String> _stringList(Map<String, dynamic> json, String key) {
+  final value = json[key];
+  if (value == null) return const [];
+  if (value is! List) {
+    throw ProtocolException('invalid_message', 'field $key must be a list');
+  }
+  return List<String>.unmodifiable(
+    value.map((entry) {
+      if (entry is! String) {
+        throw ProtocolException(
+            'invalid_message', 'field $key must contain strings');
+      }
+      return entry;
+    }),
+  );
 }
 
 T _enumValue<T extends Enum>(List<T> values, String name) {

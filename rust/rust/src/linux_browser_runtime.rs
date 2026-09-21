@@ -1155,6 +1155,19 @@ fn remap_surface_event(
             write,
             user_gesture,
         },
+        SurfaceEvent::UploadRequest {
+            sequence,
+            request_id,
+            multiple,
+            accept,
+            ..
+        } => SurfaceEvent::UploadRequest {
+            surface_id: logical_surface_id,
+            sequence,
+            request_id,
+            multiple,
+            accept,
+        },
         SurfaceEvent::WindowChanged {
             sequence, change, ..
         } => SurfaceEvent::WindowChanged {

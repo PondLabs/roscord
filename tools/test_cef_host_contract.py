@@ -41,6 +41,21 @@ LIFECYCLE_DART = (
 LINUX_RUNTIME = (
     ROOT / "rust" / "rust" / "src" / "linux_browser_runtime.rs"
 ).read_text(encoding="utf-8")
+FILE_ACCESS_RUST = (ROOT / "rust" / "rust" / "src" / "browser_file_access.rs").read_text(
+    encoding="utf-8"
+)
+FILE_ACCESS_DART = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "file_access.dart"
+).read_text(encoding="utf-8")
+FILE_ACCESS_DOC = (ROOT / "docs" / "cef-browser-runtime-file-access.md").read_text(
+    encoding="utf-8"
+)
+BROWSER_RUNTIME_RUST = (ROOT / "rust" / "rust" / "src" / "browser_runtime.rs").read_text(
+    encoding="utf-8"
+)
+BROWSER_RUNTIME_DART = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "browser_runtime.dart"
+).read_text(encoding="utf-8")
 RUNTIME_TOOL = (ROOT / "tools" / "cef_runtime.py").read_text(encoding="utf-8")
 MAIN_DART = (ROOT / "commet" / "lib" / "main.dart").read_text(encoding="utf-8")
 CEF_LOCK = (ROOT / "third_party" / "cef" / "cef.lock.json").read_text(
@@ -247,6 +262,81 @@ class CefHostContractTests(unittest.TestCase):
             self.assertIn(token, SOURCE)
         self.assertNotIn("ignore_certificate_errors", SOURCE)
         self.assertNotIn("--ignore-certificate-errors", SOURCE)
+
+    def test_file_access_clipboard_and_uploads_are_mediated(self) -> None:
+        for token in (
+            "OnBeforeDownload",
+            "OnDownloadUpdated",
+            "OnFileDialog",
+            "FILE_DIALOG_OPEN",
+            "GetDownloadHandler",
+            "GetDialogHandler",
+            "SendDownloadRequest",
+            "SendClipboardRequest",
+            "SendUploadRequest",
+            "CancelPendingFileAccess",
+            "CancelAllPendingFileAccess",
+            "ResolveFileAccessCommand",
+            "SanitizeDownloadName",
+            "ResolveNonOverwritingLeaf",
+            "AtomicCommitDownload",
+            "StagedUpload",
+            "AllowClipboardRead",
+            "AllowClipboardWrite",
+            "AllowStagedUpload",
+            '"download_request"',
+            '"clipboard_request"',
+            '"upload_request"',
+            "pending_downloads",
+            "pending_clipboards",
+            "pending_uploads",
+        ):
+            self.assertIn(token, SOURCE)
+        for token in (
+            "sanitizeSuggestedDownloadName",
+            "resolveNonOverwritingLeaf",
+            "decideClipboardRead",
+            "decideClipboardWrite",
+            "decideUpload",
+            "PendingFileAccessRegistry",
+            "cancelForNavigation",
+            "cancelForClose",
+            "cancelForHostLoss",
+            "cancelForUnavailableUi",
+            "fileAccessRequestTimeoutMs",
+            "UploadDecision",
+            "FileAccessCancelReason",
+        ):
+            self.assertIn(token, FILE_ACCESS_DART)
+        for token in (
+            "sanitize_suggested_download_name",
+            "resolve_non_overwriting_leaf",
+            "decide_clipboard_read",
+            "decide_clipboard_write",
+            "decide_upload",
+            "PendingFileAccessRegistry",
+            "cancel_for_navigation",
+            "cancel_for_close",
+            "cancel_for_host_loss",
+            "cancel_for_unavailable_ui",
+            "FILE_ACCESS_REQUEST_TIMEOUT_MS",
+            "UploadDecision",
+            "FileAccessKind",
+        ):
+            self.assertIn(token, FILE_ACCESS_RUST)
+        for token in ("UploadDecision", "UploadRequest", "Upload {"):
+            self.assertIn(token, BROWSER_RUNTIME_RUST)
+        for token in ("UploadDecision", "UploadRequestEvent", "'upload'"):
+            self.assertIn(token, BROWSER_RUNTIME_DART)
+        self.assertIn("UploadRequest", LINUX_RUNTIME)
+        for token in (
+            "AtomicCommitDownload",
+            "one-shot",
+            "read-only staging",
+            "CancelPendingFileAccess",
+            "PendingFileAccessRegistry",
+        ):
+            self.assertIn(token, FILE_ACCESS_DOC)
 
     def test_policy_contract_is_shared_with_typed_runtime(self) -> None:
         browser_runtime = (

@@ -1132,6 +1132,7 @@ impl HostCore {
             | SurfaceCommand::Popup { .. }
             | SurfaceCommand::Download { .. }
             | SurfaceCommand::Clipboard { .. }
+            | SurfaceCommand::Upload { .. }
             | SurfaceCommand::ReleaseFrame { .. } => None,
         };
         let mut responses = vec![WireMessage::Ack { request_id }];
