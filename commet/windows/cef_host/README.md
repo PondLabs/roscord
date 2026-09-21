@@ -35,11 +35,12 @@ and the parent connects to it:
 
 The host validates the pipe prefix, parent PID, same-user token, nonce,
 protocol version, and a four-byte big-endian length prefix before accepting a
-message.  Frames are capped at the BrowserRuntime limit (1 MiB).  The first
-fixture `open` creates an embedded windowless or standalone owned CEF browser
-at `commet://fixture/` and emits `opened` followed by `event/ready`; `close`
-emits `event/closed` after CEF closes the browser.  CEF-owned pointers and
-buffers never cross this transport.
+message.  Frames are capped at the BrowserRuntime limit (1 MiB).  An `open`
+creates an embedded windowless or standalone owned CEF browser at the
+caller-declared URL and emits `opened` followed by `event/ready`; `close`
+emits `event/closed` after CEF closes the browser.  Navigation, redirects,
+TLS errors, and popups are mediated by the surface policy; CEF-owned pointers
+and buffers never cross this transport.
 
 The fixture is a development/smoke-test surface.  It does not provide a
 production fallback or a second browser engine; CEF initialization and the
@@ -55,3 +56,7 @@ mismatched manifests are moved to `quarantine-*` and reported as migration
 failures; no legacy browser directory is imported.  Clear-data is exposed to
 the account-data bridge only after all account surfaces are quiescent and
 preserves committed downloads.
+
+Navigation and popup policy details, including the exact HTTPS/loopback rules
+and fail-closed certificate handling, live in
+[`docs/cef-browser-runtime-navigation.md`](../../../docs/cef-browser-runtime-navigation.md).

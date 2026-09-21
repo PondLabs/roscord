@@ -1122,12 +1122,14 @@ fn remap_surface_event(
             sequence,
             request_id,
             url,
+            user_gesture,
             ..
         } => SurfaceEvent::PopupRequest {
             surface_id: logical_surface_id,
             sequence,
             request_id,
             url,
+            user_gesture,
         },
         SurfaceEvent::DownloadRequest {
             sequence,

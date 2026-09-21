@@ -118,9 +118,20 @@ impl NavigationRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NavigationPolicyDecision {
+    InProcess,
+    External,
+    Blocked,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SurfacePolicy {
     allowed_origins: Vec<String>,
+    #[serde(default)]
+    allowed_loopback_origins: Vec<String>,
+    #[serde(default)]
+    allow_external_navigation: bool,
     capabilities: BTreeMap<String, bool>,
 }
 
@@ -146,29 +157,109 @@ impl SurfacePolicy {
                 "policy contains an invalid capability".into(),
             ));
         }
-        Ok(Self {
+        let policy = Self {
             allowed_origins,
+            allowed_loopback_origins: Vec::new(),
+            allow_external_navigation: false,
             capabilities,
-        })
+        };
+        policy.validate()?;
+        Ok(policy)
+    }
+
+    /// Builds a policy with the controlled loopback and explicit external
+    /// routing controls used by desktop surfaces.  Keeping `new` above small
+    /// preserves the original call sites while making the security-sensitive
+    /// fields impossible to omit accidentally at their dedicated seam.
+    pub fn with_navigation(
+        allowed_origins: impl IntoIterator<Item = String>,
+        allowed_loopback_origins: impl IntoIterator<Item = String>,
+        allow_external_navigation: bool,
+        capabilities: impl IntoIterator<Item = (String, bool)>,
+    ) -> Result<Self, RuntimeError> {
+        let policy = Self {
+            allowed_origins: allowed_origins.into_iter().collect(),
+            allowed_loopback_origins: allowed_loopback_origins.into_iter().collect(),
+            allow_external_navigation,
+            capabilities: capabilities.into_iter().collect(),
+        };
+        policy.validate()?;
+        Ok(policy)
     }
 
     pub fn allowed_origins(&self) -> &[String] {
         &self.allowed_origins
     }
 
+    pub fn allowed_loopback_origins(&self) -> &[String] {
+        &self.allowed_loopback_origins
+    }
+
+    pub fn allow_external_navigation(&self) -> bool {
+        self.allow_external_navigation
+    }
+
     pub fn capabilities(&self) -> &BTreeMap<String, bool> {
         &self.capabilities
     }
 
-    pub fn allows_url(&self, url: &str) -> bool {
-        if self.allowed_origins.is_empty() {
-            return true;
+    pub(crate) fn validate(&self) -> Result<(), RuntimeError> {
+        for origin in &self.allowed_origins {
+            validate_declared_origin(origin, false)?;
         }
+        for origin in &self.allowed_loopback_origins {
+            validate_declared_origin(origin, true)?;
+        }
+        if self
+            .capabilities
+            .keys()
+            .any(|capability| capability.is_empty() || capability.chars().any(char::is_control))
+        {
+            return Err(RuntimeError::InvalidSpec(
+                "policy contains an invalid capability".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn allows_url(&self, url: &str) -> bool {
         let Some(origin) = url_origin(url) else {
             return false;
         };
-        self.allowed_origins.iter().any(|allowed| allowed == origin)
+        if is_controlled_fixture(url) {
+            // The host-owned validation fixture is a controlled roscord
+            // destination even when a smoke-test policy is intentionally
+            // empty.  All other roscord destinations must be declared.
+            return true;
+        }
+        self.allowed_origins
+            .iter()
+            .chain(self.allowed_loopback_origins.iter())
+            .filter_map(|allowed| url_origin(allowed))
+            .any(|allowed| allowed == origin)
     }
+
+    pub fn navigation_decision(&self, navigation: &NavigationRequest) -> NavigationPolicyDecision {
+        if navigation.disposition() == NavigationDisposition::External {
+            return if navigation.user_initiated() && self.allow_external_navigation {
+                NavigationPolicyDecision::External
+            } else {
+                NavigationPolicyDecision::Blocked
+            };
+        }
+        if self.allows_url(navigation.url()) {
+            NavigationPolicyDecision::InProcess
+        } else if navigation.user_initiated() && self.allow_external_navigation {
+            NavigationPolicyDecision::External
+        } else {
+            NavigationPolicyDecision::Blocked
+        }
+    }
+}
+
+fn is_controlled_fixture(url: &str) -> bool {
+    const FIXTURE_ORIGIN: &str = "commet://fixture";
+    url == FIXTURE_ORIGIN || url.starts_with("commet://fixture/")
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -220,12 +311,15 @@ impl SurfaceSpec {
     }
 
     pub(crate) fn validate(&self) -> Result<(), RuntimeError> {
+        self.policy.validate()?;
         if self.privacy == PrivacyMode::Private && self.profile_key.as_str().is_empty() {
             return Err(RuntimeError::InvalidSpec(
                 "private surfaces still require an opaque profile key".into(),
             ));
         }
-        if !self.policy.allows_url(self.initial_navigation.url()) {
+        if self.policy.navigation_decision(&self.initial_navigation)
+            != NavigationPolicyDecision::InProcess
+        {
             return Err(RuntimeError::InvalidSpec(
                 "initial navigation is outside the declared policy".into(),
             ));
@@ -666,6 +760,7 @@ impl NavigationEvent {
 #[serde(rename_all = "snake_case")]
 pub enum NavigationOutcome {
     Allowed,
+    External,
     Blocked,
     Cancelled,
 }
@@ -685,6 +780,9 @@ pub enum FailureKind {
     ProfileMismatch,
     ProtocolViolation,
     NavigationBlocked,
+    CertificateDenied,
+    ClientCertificateDenied,
+    PolicyViolation,
     MalformedMessage,
     OversizedMessage,
     UnknownMessage,
@@ -776,6 +874,7 @@ pub enum SurfaceEvent {
         sequence: u64,
         request_id: String,
         url: String,
+        user_gesture: bool,
     },
     DownloadRequest {
         surface_id: SurfaceId,
@@ -995,21 +1094,28 @@ impl BrowserRuntime for FakeBrowserRuntime {
 
         let event = match command {
             SurfaceCommand::Navigate { navigation, .. } => {
-                let outcome = if surface.spec.policy().allows_url(navigation.url()) {
-                    NavigationOutcome::Allowed
-                } else {
-                    NavigationOutcome::Blocked
+                let outcome = match surface.spec.policy().navigation_decision(&navigation) {
+                    NavigationPolicyDecision::InProcess => NavigationOutcome::Allowed,
+                    NavigationPolicyDecision::External => NavigationOutcome::External,
+                    NavigationPolicyDecision::Blocked => {
+                        if navigation.disposition() == NavigationDisposition::External {
+                            NavigationOutcome::Cancelled
+                        } else {
+                            NavigationOutcome::Blocked
+                        }
+                    }
                 };
                 let event_sequence = surface.next_event_sequence;
                 surface.next_event_sequence += 1;
                 SurfaceEvent::Navigation {
                     surface_id,
                     sequence: event_sequence,
-                    navigation: NavigationEvent {
-                        url: navigation.url().to_owned(),
-                        disposition: navigation.disposition(),
+                    navigation: NavigationEvent::new(
+                        navigation.url().to_owned(),
+                        navigation.disposition(),
                         outcome,
-                    },
+                    )
+                    .expect("validated navigation request"),
                 }
             }
             SurfaceCommand::Script { envelope, .. } => {
@@ -1327,30 +1433,123 @@ fn validate_url(url: &str) -> Result<(), RuntimeError> {
             "navigation URL is invalid".into(),
         ));
     }
-    let allowed = ["http://", "https://", "about:", "commet://"];
-    if !allowed.iter().any(|scheme| url.starts_with(scheme)) {
+    let scheme = url
+        .split_once("://")
+        .map(|(scheme, _)| scheme.to_ascii_lowercase());
+    if !matches!(scheme.as_deref(), Some("http" | "https" | "commet")) {
         return Err(RuntimeError::InvalidSpec(
             "navigation scheme is not declared by the runtime".into(),
+        ));
+    }
+    if url_origin(url).is_none() {
+        return Err(RuntimeError::InvalidSpec(
+            "navigation URL has no valid authority".into(),
         ));
     }
     Ok(())
 }
 
-fn url_origin(url: &str) -> Option<&str> {
-    for scheme in ["https://", "http://"] {
-        if let Some(rest) = url.strip_prefix(scheme) {
-            let authority_length = rest.find('/').unwrap_or(rest.len());
-            return Some(&url[..scheme.len() + authority_length]);
+fn url_origin(url: &str) -> Option<String> {
+    let (raw_scheme, rest) = url.split_once("://")?;
+    let scheme = raw_scheme.to_ascii_lowercase();
+    if !matches!(scheme.as_str(), "http" | "https" | "commet") {
+        return None;
+    }
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty()
+        || authority.contains('@')
+        || (!authority.starts_with('[') && authority.matches(':').count() > 1)
+        || authority
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return None;
+    }
+    // A port, when present, must be numeric.  IPv6 authorities keep their
+    // brackets so the origin remains unambiguous.
+    let (host, port) = if authority.starts_with('[') {
+        let close = authority.find(']')?;
+        let host = authority.get(1..close)?;
+        if host.is_empty() {
+            return None;
+        }
+        let suffix = authority.get(close + 1..)?;
+        let port = if suffix.is_empty() {
+            None
+        } else {
+            let port = suffix.strip_prefix(':')?;
+            if port.is_empty() || !port.chars().all(|character| character.is_ascii_digit()) {
+                return None;
+            }
+            Some(port)
+        };
+        (host, port)
+    } else if let Some((host, port)) = authority.rsplit_once(':') {
+        if host.is_empty() || port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        (host, Some(port))
+    } else {
+        (authority, None)
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let host = host.to_ascii_lowercase();
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    Some(format!(
+        "{}://{}{}",
+        scheme,
+        host,
+        port.map(|value| format!(":{value}")).unwrap_or_default()
+    ))
+}
+
+fn validate_declared_origin(origin: &str, loopback: bool) -> Result<(), RuntimeError> {
+    let normalized = url_origin(origin)
+        .ok_or_else(|| RuntimeError::InvalidSpec("policy contains an invalid origin".into()))?;
+    if origin.to_ascii_lowercase() != normalized {
+        return Err(RuntimeError::InvalidSpec(
+            "policy origin must contain only an origin".into(),
+        ));
+    }
+    let expected = if loopback { "http" } else { "https" };
+    if !normalized.starts_with(&format!("{expected}://"))
+        && !(expected == "https" && normalized.starts_with("commet://"))
+    {
+        return Err(RuntimeError::InvalidSpec(
+            "policy origin uses an undeclared scheme".into(),
+        ));
+    }
+    if loopback {
+        let authority = normalized.strip_prefix("http://").unwrap_or_default();
+        let (host, has_port) = if let Some(close) = authority.find(']') {
+            (
+                authority
+                    .get(1..close)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase(),
+                authority
+                    .get(close + 1..)
+                    .is_some_and(|value| value.starts_with(':')),
+            )
+        } else if let Some((host, _port)) = authority.rsplit_once(':') {
+            (host.to_ascii_lowercase(), true)
+        } else {
+            (authority.to_ascii_lowercase(), false)
+        };
+        if !matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1") || !has_port {
+            return Err(RuntimeError::InvalidSpec(
+                "loopback policy origin must name localhost with a port".into(),
+            ));
         }
     }
-    if let Some(rest) = url.strip_prefix("commet://") {
-        let authority_length = rest.find('/').unwrap_or(rest.len());
-        return Some(&url[.."commet://".len() + authority_length]);
-    }
-    if url.starts_with("about:") {
-        return url.split('/').next();
-    }
-    None
+    Ok(())
 }
 
 fn validate_script_value(value: &Value) -> Result<(), RuntimeError> {
@@ -1396,7 +1595,7 @@ mod tests {
                 false,
             )
             .unwrap(),
-            SurfacePolicy::default(),
+            SurfacePolicy::new(["https://widget.test".to_owned()], std::iter::empty()).unwrap(),
         )
         .unwrap()
     }
@@ -1539,6 +1738,127 @@ mod tests {
         assert!(policy.allows_url("https://widget.test/index"));
         assert!(!policy.allows_url("http://widget.test/index"));
         assert!(!policy.allows_url("https://other.test/index"));
+    }
+
+    #[test]
+    fn policy_allows_declared_https_roscord_and_controlled_loopback_only() {
+        let policy = SurfacePolicy::with_navigation(
+            [
+                "https://widget.test".to_owned(),
+                "commet://widget".to_owned(),
+            ],
+            ["http://127.0.0.1:43123".to_owned()],
+            true,
+            std::iter::empty(),
+        )
+        .unwrap();
+        assert!(policy.allows_url("https://widget.test/path"));
+        assert!(policy.allows_url("commet://widget/bridge"));
+        assert!(policy.allows_url("http://127.0.0.1:43123/bootstrap"));
+        assert!(policy.allows_url("commet://fixture"));
+        assert!(policy.allows_url("commet://fixture/health"));
+        assert!(!policy.allows_url("commet://fixture?redirect=https://evil"));
+        assert!(SurfacePolicy::with_navigation(
+            std::iter::empty(),
+            ["http://[::1]:43123".to_owned()],
+            false,
+            std::iter::empty(),
+        )
+        .unwrap()
+        .allows_url("http://[::1]:43123/bootstrap"));
+        assert!(policy.allows_url("commet://fixture/"));
+        assert!(!policy.allows_url("http://widget.test/path"));
+        assert!(!policy.allows_url("http://127.0.0.1:43124/bootstrap"));
+        assert!(!policy.allows_url("file:///C:/secret"));
+        assert!(!policy.allows_url("javascript:alert(1)"));
+        assert!(!policy.allows_url("data:text/html,unsafe"));
+    }
+
+    #[test]
+    fn navigation_policy_requires_explicit_user_externalization() {
+        let policy = SurfacePolicy::with_navigation(
+            ["https://widget.test".to_owned()],
+            std::iter::empty(),
+            true,
+            std::iter::empty(),
+        )
+        .unwrap();
+        let external = NavigationRequest::new(
+            "https://sso.example/login",
+            NavigationDisposition::External,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.navigation_decision(&external),
+            NavigationPolicyDecision::External
+        );
+        let automatic = NavigationRequest::new(
+            "https://sso.example/login",
+            NavigationDisposition::External,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.navigation_decision(&automatic),
+            NavigationPolicyDecision::Blocked
+        );
+        let unsafe_redirect = NavigationRequest::new(
+            "https://evil.example/redirect",
+            NavigationDisposition::Current,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.navigation_decision(&unsafe_redirect),
+            NavigationPolicyDecision::Blocked
+        );
+        let deliberate_link = NavigationRequest::new(
+            "https://sso.example/login",
+            NavigationDisposition::Current,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.navigation_decision(&deliberate_link),
+            NavigationPolicyDecision::External
+        );
+    }
+
+    #[test]
+    fn policy_rejects_non_https_and_non_loopback_declarations() {
+        assert!(SurfacePolicy::new(["http://widget.test".to_owned()], std::iter::empty()).is_err());
+        assert!(
+            SurfacePolicy::new(["https://widget.test/path".to_owned()], std::iter::empty())
+                .is_err()
+        );
+        assert!(SurfacePolicy::new(["https://evil:1:2".to_owned()], std::iter::empty()).is_err());
+        assert!(NavigationRequest::new(
+            "https://widget.test:",
+            NavigationDisposition::Current,
+            false,
+        )
+        .is_err());
+        assert!(NavigationRequest::new(
+            "https://widget.test:not-a-port",
+            NavigationDisposition::Current,
+            false,
+        )
+        .is_err());
+        assert!(SurfacePolicy::with_navigation(
+            std::iter::empty(),
+            ["http://10.0.0.1:43123".to_owned()],
+            false,
+            std::iter::empty(),
+        )
+        .is_err());
+        assert!(SurfacePolicy::with_navigation(
+            std::iter::empty(),
+            ["http://127.0.0.1".to_owned()],
+            false,
+            std::iter::empty(),
+        )
+        .is_err());
     }
 
     #[test]

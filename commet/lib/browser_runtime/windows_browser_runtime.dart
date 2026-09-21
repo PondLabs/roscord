@@ -1046,6 +1046,11 @@ class WindowsBrowserRuntime implements BrowserRuntime {
         'profile_corrupt' => BrowserRuntimeErrorCode.profileCorrupt,
         'profile_unavailable' => BrowserRuntimeErrorCode.profileUnavailable,
         'migration_failed' => BrowserRuntimeErrorCode.migrationFailed,
+        'certificate_error' => BrowserRuntimeErrorCode.certificateDenied,
+        'client_certificate_denied' =>
+          BrowserRuntimeErrorCode.clientCertificateDenied,
+        'policy_violation' || 'popup_blocked' || 'stale_popup' =>
+          BrowserRuntimeErrorCode.policyViolation,
         _ => BrowserRuntimeErrorCode.protocol,
       };
 
@@ -1055,6 +1060,10 @@ class WindowsBrowserRuntime implements BrowserRuntime {
         'invalid_command' =>
           FailureKind.protocolViolation,
         'invalid_spec' || 'navigation_blocked' => FailureKind.navigationBlocked,
+        'certificate_error' => FailureKind.certificateDenied,
+        'client_certificate_denied' => FailureKind.clientCertificateDenied,
+        'policy_violation' || 'popup_blocked' || 'stale_popup' =>
+          FailureKind.policyViolation,
         'malformed_message' => FailureKind.malformedMessage,
         'frame_too_large' => FailureKind.oversizedMessage,
         'unknown_message' => FailureKind.unknownMessage,

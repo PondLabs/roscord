@@ -11,6 +11,7 @@ SurfaceSpec _spec({PrivacyMode privacy = PrivacyMode.persistent}) {
     presentation: PresentationMode.embedded,
     privacy: privacy,
     initialNavigation: NavigationRequest(url: 'https://widget.test/index'),
+    policy: SurfacePolicy(allowedOrigins: ['https://widget.test']),
   );
 }
 
@@ -112,6 +113,135 @@ void main() {
         ),
       ),
     );
+  });
+
+  test('enforces navigation policy and normalizes external routing', () async {
+    final runtime = FakeBrowserRuntime();
+    final events = <SurfaceEvent>[];
+    final subscription = runtime.events().listen(events.add);
+    final surface = await runtime.open(
+      SurfaceSpec(
+        profileKey: ProfileKey('account-a'),
+        presentation: PresentationMode.embedded,
+        privacy: PrivacyMode.persistent,
+        initialNavigation: NavigationRequest(url: 'https://widget.test/index'),
+        policy: SurfacePolicy(
+          allowedOrigins: ['https://widget.test'],
+          allowedLoopbackOrigins: [
+            'http://127.0.0.1:43123',
+            'http://[::1]:43123',
+          ],
+          allowExternalNavigation: true,
+        ),
+      ),
+    );
+    await _flushEvents();
+    events.clear();
+
+    await runtime.command(
+      surface,
+      NavigateCommand(
+        sequence: 1,
+        navigation: NavigationRequest(url: 'https://widget.test/path'),
+      ),
+    );
+    await runtime.command(
+      surface,
+      NavigateCommand(
+        sequence: 2,
+        navigation: NavigationRequest(
+          url: 'https://sso.example/login',
+          disposition: NavigationDisposition.external,
+          userInitiated: true,
+        ),
+      ),
+    );
+    await runtime.command(
+      surface,
+      NavigateCommand(
+        sequence: 3,
+        navigation: NavigationRequest(url: 'https://evil.example/redirect'),
+      ),
+    );
+    await runtime.command(
+      surface,
+      NavigateCommand(
+        sequence: 4,
+        navigation: NavigationRequest(
+          url: 'https://sso.example/login',
+          userInitiated: true,
+        ),
+      ),
+    );
+    await _flushEvents();
+
+    expect(events, hasLength(4));
+    expect(
+      (events[0] as NavigationEvent).navigation.outcome,
+      NavigationOutcome.allowed,
+    );
+    expect(
+      (events[1] as NavigationEvent).navigation.outcome,
+      NavigationOutcome.external,
+    );
+    expect(
+      (events[2] as NavigationEvent).navigation.outcome,
+      NavigationOutcome.blocked,
+    );
+    expect(
+      (events[3] as NavigationEvent).navigation.outcome,
+      NavigationOutcome.external,
+    );
+    await subscription.cancel();
+  });
+
+  test('rejects unsafe URLs and undeclared policy origins', () {
+    expect(
+      () => NavigationRequest(url: 'file:///C:/secret'),
+      throwsA(
+        isA<BrowserRuntimeException>().having(
+          (error) => error.code,
+          'code',
+          BrowserRuntimeErrorCode.invalidSpec,
+        ),
+      ),
+    );
+    expect(
+      () => NavigationRequest(url: 'https://widget.test:'),
+      throwsA(isA<BrowserRuntimeException>()),
+    );
+    expect(
+      () => SurfacePolicy(allowedOrigins: ['http://widget.test']),
+      throwsA(isA<BrowserRuntimeException>()),
+    );
+    expect(
+      () => SurfacePolicy(allowedLoopbackOrigins: ['http://127.0.0.1']),
+      throwsA(isA<BrowserRuntimeException>()),
+    );
+    expect(
+      SurfacePolicy().allowsUrl('commet://fixture'),
+      isTrue,
+    );
+    expect(
+      SurfacePolicy().allowsUrl('commet://fixture?redirect=https://evil'),
+      isFalse,
+    );
+  });
+
+  test('round-trips popup request user gesture metadata', () {
+    final event = SurfaceEvent.fromJson({
+      'type': 'popup_request',
+      'payload': {
+        'surface_id': 4,
+        'sequence': 2,
+        'request_id': 'popup-4-1',
+        'url': 'https://sso.example/login',
+        'user_gesture': true,
+      },
+    });
+    expect(event, isA<PopupRequestEvent>());
+    expect((event as PopupRequestEvent).userGesture, isTrue);
+    expect(event.toJson()['payload'], containsPair('user_gesture', true));
   });
 
   test(

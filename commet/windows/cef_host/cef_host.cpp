@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -34,6 +35,8 @@
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
 #include "include/cef_cookie.h"
+#include "include/cef_callback.h"
+#include "include/cef_life_span_handler.h"
 #include "include/cef_process_message.h"
 #include "include/cef_parser.h"
 #include "include/cef_render_handler.h"
@@ -41,10 +44,12 @@
 #include "include/cef_request_handler.h"
 #include "include/cef_request_context.h"
 #include "include/cef_request.h"
+#include "include/cef_ssl_info.h"
 #include "include/cef_resource_handler.h"
 #include "include/cef_sandbox_win.h"
 #include "include/cef_scheme.h"
 #include "include/cef_task.h"
+#include "include/cef_values.h"
 #include "include/cef_v8.h"
 #include "include/cef_version_info.h"
 #include "include/wrapper/cef_helpers.h"
@@ -1327,6 +1332,158 @@ class ProfileManager {
 
 class CreateBrowserTask;
 class CloseBrowserTask;
+class NavigateBrowserTask;
+
+struct NavigationPolicy {
+  std::vector<std::string> allowed_origins;
+  std::vector<std::string> allowed_loopback_origins;
+  bool allow_external_navigation = false;
+};
+
+enum class NavigationDecision { InProcess, External, Cancel };
+
+std::string Lowercase(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return value;
+}
+
+std::optional<std::string> UrlOrigin(std::string_view url) {
+  CefURLParts parts;
+  if (!CefParseURL(std::string(url), parts)) return std::nullopt;
+  const std::string scheme = Lowercase(parts.scheme.ToString());
+  if (scheme != "https" && scheme != "http" && scheme != "commet") {
+    return std::nullopt;
+  }
+  if (parts.host.empty() || !parts.username.empty() || !parts.password.empty()) {
+    return std::nullopt;
+  }
+  std::string host = Lowercase(parts.host.ToString());
+  if (host.find(':') != std::string::npos && host.front() != '[') {
+    host = "[" + host + "]";
+  }
+  std::string origin = scheme + "://" + host;
+  const std::string port = parts.port.ToString();
+  if (!port.empty()) origin += ":" + port;
+  return origin;
+}
+
+bool IsLoopbackOrigin(std::string_view origin) {
+  CefURLParts parts;
+  if (!CefParseURL(std::string(origin), parts) ||
+      Lowercase(parts.scheme.ToString()) != "http" || parts.port.empty()) {
+    return false;
+  }
+  std::string host = Lowercase(parts.host.ToString());
+  if (host.size() >= 2 && host.front() == '[' && host.back() == ']') {
+    host = host.substr(1, host.size() - 2);
+  }
+  return host == "localhost" || host == "127.0.0.1" || host == "::1";
+}
+
+bool IsExactOrigin(std::string_view declared) {
+  const auto origin = UrlOrigin(declared);
+  if (!origin.has_value()) return false;
+  return Lowercase(std::string(declared)) == *origin;
+}
+
+bool IsControlledFixture(std::string_view url) {
+  constexpr std::string_view fixture_origin = "commet://fixture";
+  constexpr std::string_view fixture = kFixtureUrl;
+  return url == fixture_origin || url == fixture ||
+         (url.size() > fixture.size() && url.substr(0, fixture.size()) == fixture);
+}
+
+bool ParseNavigationPolicy(CefRefPtr<CefDictionaryValue> value,
+                           NavigationPolicy& policy) {
+  if (value == nullptr) {
+    return false;
+  }
+  const auto origins_type = value->GetType("allowed_origins");
+  const auto loopback_type = value->GetType("allowed_loopback_origins");
+  if ((origins_type != VTYPE_LIST && origins_type != VTYPE_INVALID &&
+       origins_type != VTYPE_NULL) ||
+      (loopback_type != VTYPE_LIST && loopback_type != VTYPE_INVALID &&
+       loopback_type != VTYPE_NULL)) {
+    return false;
+  }
+  CefRefPtr<CefListValue> origins;
+  CefRefPtr<CefListValue> loopback_origins;
+  if (origins_type == VTYPE_LIST) {
+    origins = value->GetList("allowed_origins");
+  }
+  if (loopback_type == VTYPE_LIST) {
+    loopback_origins = value->GetList("allowed_loopback_origins");
+  }
+  if (origins_type == VTYPE_LIST && origins == nullptr) return false;
+  if (loopback_type == VTYPE_LIST && loopback_origins == nullptr) return false;
+  const auto external_type = value->GetType("allow_external_navigation");
+  if (external_type != VTYPE_BOOL && external_type != VTYPE_INVALID &&
+      external_type != VTYPE_NULL) {
+    return false;
+  }
+  for (size_t index = 0; origins != nullptr && index < origins->GetSize(); ++index) {
+    if (origins->GetType(index) != VTYPE_STRING) return false;
+    const std::string origin = origins->GetString(index).ToString();
+    const auto normalized = UrlOrigin(origin);
+    if (!normalized.has_value() || !IsExactOrigin(origin) ||
+        (normalized->rfind("https://", 0) != 0 &&
+         normalized->rfind("commet://", 0) != 0)) {
+      return false;
+    }
+    policy.allowed_origins.push_back(*normalized);
+  }
+  for (size_t index = 0;
+       loopback_origins != nullptr && index < loopback_origins->GetSize();
+       ++index) {
+    if (loopback_origins->GetType(index) != VTYPE_STRING) return false;
+    const std::string origin = loopback_origins->GetString(index).ToString();
+    const auto normalized = UrlOrigin(origin);
+    if (!normalized.has_value() || !IsExactOrigin(origin) ||
+        !IsLoopbackOrigin(*normalized)) {
+      return false;
+    }
+    policy.allowed_loopback_origins.push_back(*normalized);
+  }
+  policy.allow_external_navigation = external_type == VTYPE_BOOL &&
+                                     value->GetBool("allow_external_navigation");
+  return true;
+}
+
+bool PolicyAllowsInProcess(const NavigationPolicy& policy,
+                           std::string_view url) {
+  if (IsControlledFixture(url)) return true;
+  const auto origin = UrlOrigin(url);
+  if (!origin.has_value()) return false;
+  return std::find(policy.allowed_origins.begin(), policy.allowed_origins.end(),
+                   *origin) != policy.allowed_origins.end() ||
+         std::find(policy.allowed_loopback_origins.begin(),
+                   policy.allowed_loopback_origins.end(),
+                   *origin) != policy.allowed_loopback_origins.end();
+}
+
+NavigationDecision EvaluateNavigation(const NavigationPolicy& policy,
+                                       std::string_view url,
+                                       std::string_view disposition,
+                                       bool user_gesture) {
+  if (disposition == "external") {
+    return user_gesture && policy.allow_external_navigation &&
+                   (UrlOrigin(url).has_value() || IsControlledFixture(url))
+               ? NavigationDecision::External
+               : NavigationDecision::Cancel;
+  }
+  if (disposition != "current" && disposition != "new_surface") {
+    return NavigationDecision::Cancel;
+  }
+  if (PolicyAllowsInProcess(policy, url)) return NavigationDecision::InProcess;
+  if (!UrlOrigin(url).has_value() && !IsControlledFixture(url)) {
+    return NavigationDecision::Cancel;
+  }
+  return user_gesture && policy.allow_external_navigation
+             ? NavigationDecision::External
+             : NavigationDecision::Cancel;
+}
 
 struct SurfaceState {
   uint64_t id = 0;
@@ -1334,10 +1491,19 @@ struct SurfaceState {
   uint64_t context_id = 0;
   CefRefPtr<CefRequestContext> request_context;
   std::string presentation;
+  std::string initial_url;
+  NavigationPolicy policy;
   int last_command_sequence = 0;
   uint64_t next_event_sequence = 2;
   CefRefPtr<CefBrowser> browser;
   bool close_requested = false;
+  struct PendingPopup {
+    int popup_id = 0;
+    std::string url;
+    bool user_gesture = false;
+  };
+  std::map<std::string, PendingPopup> pending_popups;
+  uint64_t next_popup_request = 1;
 };
 
 class BrowserClient final : public CefClient,
@@ -1354,6 +1520,41 @@ class BrowserClient final : public CefClient,
 
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override;
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override;
+  bool OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
+                      CefRefPtr<CefFrame> frame,
+                      CefRefPtr<CefRequest> request,
+                      bool user_gesture,
+                      bool is_redirect) override;
+  bool OnOpenURLFromTab(CefRefPtr<CefBrowser> browser,
+                        CefRefPtr<CefFrame> frame,
+                        const CefString& target_url,
+                        CefRequestHandler::WindowOpenDisposition target_disposition,
+                        bool user_gesture) override;
+  bool OnCertificateError(CefRefPtr<CefBrowser> browser,
+                          cef_errorcode_t cert_error,
+                          const CefString& request_url,
+                          CefRefPtr<CefSSLInfo> ssl_info,
+                          CefRefPtr<CefCallback> callback) override;
+  bool OnSelectClientCertificate(
+      CefRefPtr<CefBrowser> browser,
+      bool is_proxy,
+      const CefString& host,
+      int port,
+      const X509CertificateList& certificates,
+      CefRefPtr<CefSelectClientCertificateCallback> callback) override;
+  bool OnBeforePopup(CefRefPtr<CefBrowser> browser,
+                     CefRefPtr<CefFrame> frame,
+                     int popup_id,
+                     const CefString& target_url,
+                     const CefString& target_frame_name,
+                     CefLifeSpanHandler::WindowOpenDisposition target_disposition,
+                     bool user_gesture,
+                     const CefPopupFeatures& popup_features,
+                     CefWindowInfo& window_info,
+                     CefRefPtr<CefClient>& client,
+                     CefBrowserSettings& settings,
+                     CefRefPtr<CefDictionaryValue>& extra_info,
+                     bool* no_javascript_access) override;
   void OnRenderProcessTerminated(CefRefPtr<CefBrowser> browser,
                                  TerminationStatus status,
                                  int error_code,
@@ -1407,12 +1608,21 @@ class HostController {
   void Shutdown();
   void CreateBrowserOnUi(uint64_t surface_id, std::string url,
                          std::string presentation);
+  void NavigateBrowserOnUi(uint64_t surface_id, std::string url);
   void CloseBrowserOnUi(uint64_t surface_id);
   void OnBrowserCreated(uint64_t surface_id, CefRefPtr<CefBrowser> browser);
   void OnBrowserClosed(uint64_t surface_id);
   void OnBrowserRuntimeSend(uint64_t surface_id,
                             CefRefPtr<CefBrowser> browser,
                             std::string payload);
+  bool OnNavigationRequested(uint64_t surface_id, std::string_view url,
+                             std::string_view disposition, bool user_gesture,
+                             bool is_redirect);
+  bool OnPopupRequested(uint64_t surface_id, int popup_id,
+                        std::string_view url, bool user_gesture);
+  void OnCertificateError(uint64_t surface_id, std::string_view request_url,
+                          int cert_error);
+  void OnClientCertificateRequest(uint64_t surface_id);
   void ExecuteScriptOnUi(uint64_t surface_id, int request_id,
                          CefRefPtr<CefDictionaryValue> envelope);
   void OnRendererFailure(uint64_t surface_id, std::string_view code,
@@ -1446,6 +1656,13 @@ class HostController {
   void SendOpened(int request_id, uint64_t surface_id);
   void SendReady(const SurfaceState& surface, std::string_view url);
   void SendClosed(uint64_t surface_id, uint64_t sequence);
+  void SendNavigation(uint64_t surface_id, std::string_view url,
+                      std::string_view disposition,
+                      std::string_view outcome);
+  void SendSurfaceFailure(uint64_t surface_id, std::string_view kind,
+                          std::string_view message);
+  void SendPopupRequest(uint64_t surface_id, std::string_view request_id,
+                        std::string_view url, bool user_gesture);
   void SendScriptComplete(uint64_t surface_id,
                           CefRefPtr<CefDictionaryValue> envelope,
                           std::string_view operation);
@@ -1501,6 +1718,25 @@ class CloseBrowserTask final : public CefTask {
   uint64_t surface_id_;
   IMPLEMENT_REFCOUNTING(CloseBrowserTask);
 };
+
+class NavigateBrowserTask final : public CefTask {
+ public:
+  NavigateBrowserTask(HostController* controller, uint64_t surface_id,
+                      std::string url)
+      : controller_(controller), surface_id_(surface_id), url_(std::move(url)) {}
+
+  void Execute() override;
+
+ private:
+  HostController* controller_;
+  uint64_t surface_id_;
+  std::string url_;
+  IMPLEMENT_REFCOUNTING(NavigateBrowserTask);
+};
+
+void NavigateBrowserTask::Execute() {
+  controller_->NavigateBrowserOnUi(surface_id_, std::move(url_));
+}
 
 class ExecuteScriptTask final : public CefTask {
  public:
@@ -1648,6 +1884,92 @@ void HostController::SendClosed(uint64_t surface_id, uint64_t sequence) {
   SendMessage(wire);
 }
 
+void HostController::SendNavigation(uint64_t surface_id, std::string_view url,
+                                     std::string_view disposition,
+                                     std::string_view outcome) {
+  uint64_t sequence = 0;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return;
+    sequence = iterator->second.next_event_sequence++;
+  }
+  auto navigation = NewDictionary();
+  navigation->SetString("url", std::string(url));
+  navigation->SetString("disposition", std::string(disposition));
+  navigation->SetString("outcome", std::string(outcome));
+
+  auto event_payload = NewDictionary();
+  event_payload->SetInt("surface_id", static_cast<int>(surface_id));
+  event_payload->SetInt("sequence", static_cast<int>(sequence));
+  event_payload->SetDictionary("navigation", navigation);
+  auto event = NewDictionary();
+  event->SetString("type", "navigation");
+  event->SetDictionary("payload", event_payload);
+  auto payload = NewDictionary();
+  payload->SetDictionary("event", event);
+  auto wire = NewDictionary();
+  wire->SetString("type", "event");
+  wire->SetDictionary("payload", payload);
+  SendMessage(wire);
+}
+
+void HostController::SendSurfaceFailure(uint64_t surface_id,
+                                         std::string_view kind,
+                                         std::string_view message) {
+  uint64_t sequence = 0;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return;
+    sequence = iterator->second.next_event_sequence++;
+  }
+  auto failure = NewDictionary();
+  failure->SetString("kind", std::string(kind));
+  failure->SetString("message", std::string(message));
+  auto event_payload = NewDictionary();
+  event_payload->SetInt("surface_id", static_cast<int>(surface_id));
+  event_payload->SetInt("sequence", static_cast<int>(sequence));
+  event_payload->SetDictionary("failure", failure);
+  auto event = NewDictionary();
+  event->SetString("type", "failed");
+  event->SetDictionary("payload", event_payload);
+  auto payload = NewDictionary();
+  payload->SetDictionary("event", event);
+  auto wire = NewDictionary();
+  wire->SetString("type", "event");
+  wire->SetDictionary("payload", payload);
+  SendMessage(wire);
+}
+
+void HostController::SendPopupRequest(uint64_t surface_id,
+                                      std::string_view request_id,
+                                      std::string_view url,
+                                      bool user_gesture) {
+  uint64_t sequence = 0;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return;
+    sequence = iterator->second.next_event_sequence++;
+  }
+  auto event_payload = NewDictionary();
+  event_payload->SetInt("surface_id", static_cast<int>(surface_id));
+  event_payload->SetInt("sequence", static_cast<int>(sequence));
+  event_payload->SetString("request_id", std::string(request_id));
+  event_payload->SetString("url", std::string(url));
+  event_payload->SetBool("user_gesture", user_gesture);
+  auto event = NewDictionary();
+  event->SetString("type", "popup_request");
+  event->SetDictionary("payload", event_payload);
+  auto payload = NewDictionary();
+  payload->SetDictionary("event", event);
+  auto wire = NewDictionary();
+  wire->SetString("type", "event");
+  wire->SetDictionary("payload", payload);
+  SendMessage(wire);
+}
+
 void HostController::SendScriptMessage(
     uint64_t surface_id, CefRefPtr<CefDictionaryValue> envelope) {
   if (envelope == nullptr || !HasSurface(surface_id)) return;
@@ -1720,6 +2042,70 @@ void HostController::OnBrowserRuntimeSend(uint64_t surface_id,
   }
   envelope->SetValue("value", decoded);
   SendScriptMessage(surface_id, envelope);
+}
+
+bool HostController::OnNavigationRequested(uint64_t surface_id,
+                                            std::string_view url,
+                                            std::string_view disposition,
+                                            bool user_gesture,
+                                            bool is_redirect) {
+  const auto surface = GetSurface(surface_id);
+  if (!surface) return true;
+  if (is_redirect && !PolicyAllowsInProcess(surface->policy, url)) {
+    SendNavigation(surface_id, url, disposition, "cancelled");
+    return true;
+  }
+  const auto decision = EvaluateNavigation(surface->policy, url, disposition,
+                                            user_gesture);
+  switch (decision) {
+    case NavigationDecision::InProcess:
+      SendNavigation(surface_id, url, disposition, "allowed");
+      return false;
+    case NavigationDecision::External:
+      // The app owns the external action.  Returning true prevents CEF from
+      // silently opening an unowned browser or native window.
+      SendNavigation(surface_id, url, "external", "external");
+      return true;
+    case NavigationDecision::Cancel:
+      SendNavigation(surface_id, url, disposition, "cancelled");
+      return true;
+  }
+  return true;
+}
+
+bool HostController::OnPopupRequested(uint64_t surface_id, int popup_id,
+                                      std::string_view url,
+                                      bool user_gesture) {
+  std::string request_id;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return true;
+    request_id = "popup-" + std::to_string(surface_id) + "-" +
+                 std::to_string(iterator->second.next_popup_request++);
+    iterator->second.pending_popups.emplace(
+        request_id, SurfaceState::PendingPopup{popup_id, std::string(url),
+                                               user_gesture});
+  }
+  // Popups are always canceled synchronously.  The app can explicitly choose
+  // the external action through a later PopupCommand; no native popup is ever
+  // created behind the policy boundary.
+  SendPopupRequest(surface_id, request_id, url, user_gesture);
+  return true;
+}
+
+void HostController::OnCertificateError(uint64_t surface_id,
+                                        std::string_view request_url,
+                                        int cert_error) {
+  (void)cert_error;
+  SendNavigation(surface_id, request_url, "current", "cancelled");
+  SendSurfaceFailure(surface_id, "certificate_denied",
+                     "certificate validation failed; navigation was denied");
+}
+
+void HostController::OnClientCertificateRequest(uint64_t surface_id) {
+  SendSurfaceFailure(surface_id, "client_certificate_denied",
+                     "client-certificate selection is disabled by policy");
 }
 
 void HostController::ExecuteScriptOnUi(
@@ -1845,6 +2231,7 @@ bool HostController::HandleOpen(CefRefPtr<CefDictionaryValue> payload) {
   const int request_id = payload->GetInt("request_id");
   const auto spec = payload->GetDictionary("spec");
   const auto navigation = spec->GetDictionary("initial_navigation");
+  const auto policy_value = spec->GetDictionary("policy");
   const std::string profile = spec->GetString("profile_key").ToString();
   const std::string presentation = spec->GetString("presentation").ToString();
   const std::string privacy = spec->GetString("privacy").ToString();
@@ -1857,11 +2244,22 @@ bool HostController::HandleOpen(CefRefPtr<CefDictionaryValue> payload) {
       navigation == nullptr || navigation->GetType("url") != VTYPE_STRING ||
       navigation->GetType("disposition") != VTYPE_STRING ||
       navigation->GetType("user_initiated") != VTYPE_BOOL ||
-      spec->GetType("policy") != VTYPE_DICTIONARY || url != kFixtureUrl) {
+      policy_value == nullptr) {
     SendError(request_id < 0 ? std::nullopt
                              : std::optional<int>(request_id),
               "invalid_spec",
-              "the Windows host smoke fixture requires the commet URL");
+              "surface policy or initial navigation is malformed");
+    return true;
+  }
+
+  NavigationPolicy policy;
+  if (!ParseNavigationPolicy(policy_value, policy) ||
+      EvaluateNavigation(
+          policy, url,
+          navigation->GetString("disposition").ToString(),
+          navigation->GetBool("user_initiated")) != NavigationDecision::InProcess) {
+    SendError(request_id, "invalid_spec",
+              "initial navigation is outside the declared policy");
     return true;
   }
 
@@ -1892,6 +2290,8 @@ bool HostController::HandleOpen(CefRefPtr<CefDictionaryValue> payload) {
       surface.context_id = context_id;
       surface.request_context = request_context;
       surface.presentation = presentation;
+      surface.initial_url = url;
+      surface.policy = policy;
       surfaces_.emplace(surface.id, surface);
     }
   }
@@ -1970,6 +2370,10 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
     return false;
   }
   const auto command_payload = command->GetDictionary("payload");
+  if (command_payload == nullptr) {
+    SendError(request_id, "invalid_command", "command payload is malformed");
+    return false;
+  }
   if (command_payload->GetType("sequence") != VTYPE_INT ||
       command_payload->GetInt("sequence") <= 0) {
     SendError(request_id, "invalid_command", "command sequence is invalid");
@@ -1985,6 +2389,43 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
       command_payload->GetType("profile_key") != VTYPE_INVALID) {
     SendError(request_id, "invalid_command", "profile key is malformed");
     return false;
+  }
+  CefRefPtr<CefDictionaryValue> navigation_command;
+  std::string navigation_url;
+  std::string navigation_disposition;
+  bool navigation_user_gesture = false;
+  if (command_type == "navigate") {
+    if (command_payload->GetType("navigation") != VTYPE_DICTIONARY) {
+      SendError(request_id, "invalid_command", "navigation command is malformed");
+      return false;
+    }
+    navigation_command = command_payload->GetDictionary("navigation");
+    if (navigation_command->GetType("url") != VTYPE_STRING ||
+        navigation_command->GetType("disposition") != VTYPE_STRING ||
+        navigation_command->GetType("user_initiated") != VTYPE_BOOL) {
+      SendError(request_id, "invalid_command", "navigation request is malformed");
+      return false;
+    }
+    navigation_url = navigation_command->GetString("url").ToString();
+    navigation_disposition =
+        navigation_command->GetString("disposition").ToString();
+    navigation_user_gesture = navigation_command->GetBool("user_initiated");
+    if (!UrlOrigin(navigation_url).has_value() &&
+        !IsControlledFixture(navigation_url)) {
+      SendError(request_id, "invalid_command", "navigation URL is invalid");
+      return false;
+    }
+  }
+  std::string popup_request_id;
+  std::string popup_action;
+  if (command_type == "popup") {
+    if (command_payload->GetType("request_id") != VTYPE_STRING ||
+        command_payload->GetType("action") != VTYPE_STRING) {
+      SendError(request_id, "invalid_command", "popup command is malformed");
+      return false;
+    }
+    popup_request_id = command_payload->GetString("request_id").ToString();
+    popup_action = command_payload->GetString("action").ToString();
   }
   CefRefPtr<CefDictionaryValue> script_envelope;
   std::string script_operation;
@@ -2061,6 +2502,51 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
   // for execution.  The client still treats an accepted command without a
   // terminal outcome as unknown if this process subsequently disappears.
   SendAck(request_id);
+  if (command_type == "navigate") {
+    const auto decision = EvaluateNavigation(surface->policy, navigation_url,
+                                              navigation_disposition,
+                                              navigation_user_gesture);
+    if (decision == NavigationDecision::InProcess) {
+      CefTaskRunner::GetForThread(TID_UI)->PostTask(
+          new NavigateBrowserTask(this, surface_id, std::move(navigation_url)));
+    } else if (decision == NavigationDecision::External) {
+      SendNavigation(surface_id, navigation_url, "external", "external");
+    } else {
+      SendNavigation(surface_id, navigation_url, navigation_disposition,
+                     navigation_disposition == "external" ? "cancelled"
+                                                             : "blocked");
+    }
+    return true;
+  }
+  if (command_type == "popup") {
+    SurfaceState::PendingPopup pending_popup;
+    bool found_popup = false;
+    {
+      std::lock_guard lock(state_mutex_);
+      const auto iterator = surfaces_.find(surface_id);
+      if (iterator != surfaces_.end()) {
+        const auto popup = iterator->second.pending_popups.find(popup_request_id);
+        if (popup != iterator->second.pending_popups.end()) {
+          pending_popup = popup->second;
+          iterator->second.pending_popups.erase(popup);
+          found_popup = true;
+        }
+      }
+    }
+    if (!found_popup) {
+      SendError(request_id, "stale_popup", "popup request is no longer pending");
+      return true;
+    }
+    if (popup_action == "open_external" &&
+        EvaluateNavigation(surface->policy, pending_popup.url, "external",
+                           pending_popup.user_gesture) ==
+            NavigationDecision::External) {
+      SendNavigation(surface_id, pending_popup.url, "external", "external");
+    } else {
+      SendNavigation(surface_id, pending_popup.url, "new_surface", "cancelled");
+    }
+    return true;
+  }
   if (command_type == "script") {
     CefTaskRunner::GetForThread(TID_UI)->PostTask(
         new ExecuteScriptTask(this, surface_id, request_id,
@@ -2161,6 +2647,21 @@ void HostController::CreateBrowserOnUi(uint64_t surface_id, std::string url,
   }
 }
 
+void HostController::NavigateBrowserOnUi(uint64_t surface_id, std::string url) {
+  CEF_REQUIRE_UI_THREAD();
+  const auto surface = GetSurface(surface_id);
+  if (!surface || surface->browser == nullptr) {
+    SendError(std::nullopt, "runtime_failed", "surface browser is not ready");
+    return;
+  }
+  const auto frame = surface->browser->GetMainFrame();
+  if (frame == nullptr) {
+    SendError(std::nullopt, "runtime_failed", "surface frame is unavailable");
+    return;
+  }
+  frame->LoadURL(url);
+}
+
 void HostController::CloseBrowserOnUi(uint64_t surface_id) {
   CEF_REQUIRE_UI_THREAD();
   auto surface = GetSurface(surface_id);
@@ -2185,7 +2686,7 @@ void HostController::OnBrowserCreated(uint64_t surface_id,
     iterator->second.browser = browser;
     surface = iterator->second;
   }
-  SendReady(*surface, kFixtureUrl);
+  SendReady(*surface, surface->initial_url);
 }
 
 void HostController::OnBrowserClosed(uint64_t surface_id) {
@@ -2258,6 +2759,86 @@ void HostController::Run() {
 void BrowserClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
   CEF_REQUIRE_UI_THREAD();
   controller_->OnBrowserCreated(surface_id_, browser);
+}
+
+bool BrowserClient::OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
+                                   CefRefPtr<CefFrame> frame,
+                                   CefRefPtr<CefRequest> request,
+                                   bool user_gesture,
+                                   bool is_redirect) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)browser;
+  if (frame == nullptr || request == nullptr) return true;
+  return controller_->OnNavigationRequested(surface_id_,
+                                             request->GetURL().ToString(),
+                                             "current", user_gesture,
+                                             is_redirect);
+}
+
+bool BrowserClient::OnOpenURLFromTab(
+    CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+    const CefString& target_url,
+    CefRequestHandler::WindowOpenDisposition target_disposition,
+    bool user_gesture) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)browser;
+  (void)frame;
+  (void)target_disposition;
+  return controller_->OnNavigationRequested(surface_id_, target_url.ToString(),
+                                             "external", user_gesture, false);
+}
+
+bool BrowserClient::OnCertificateError(CefRefPtr<CefBrowser> browser,
+                                       cef_errorcode_t cert_error,
+                                       const CefString& request_url,
+                                       CefRefPtr<CefSSLInfo> ssl_info,
+                                       CefRefPtr<CefCallback> callback) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)browser;
+  (void)request_url;
+  (void)ssl_info;
+  if (callback != nullptr) callback->Cancel();
+  controller_->OnCertificateError(surface_id_, request_url.ToString(),
+                                  static_cast<int>(cert_error));
+  return true;
+}
+
+bool BrowserClient::OnSelectClientCertificate(
+    CefRefPtr<CefBrowser> browser, bool is_proxy, const CefString& host,
+    int port, const X509CertificateList& certificates,
+    CefRefPtr<CefSelectClientCertificateCallback> callback) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)browser;
+  (void)is_proxy;
+  (void)host;
+  (void)port;
+  (void)certificates;
+  if (callback != nullptr) callback->Select(nullptr);
+  controller_->OnClientCertificateRequest(surface_id_);
+  return true;
+}
+
+bool BrowserClient::OnBeforePopup(
+    CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, int popup_id,
+    const CefString& target_url, const CefString& target_frame_name,
+    CefLifeSpanHandler::WindowOpenDisposition target_disposition,
+    bool user_gesture,
+    const CefPopupFeatures& popup_features, CefWindowInfo& window_info,
+    CefRefPtr<CefClient>& client, CefBrowserSettings& settings,
+    CefRefPtr<CefDictionaryValue>& extra_info, bool* no_javascript_access) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)browser;
+  (void)frame;
+  (void)target_frame_name;
+  (void)target_disposition;
+  (void)popup_features;
+  (void)window_info;
+  (void)client;
+  (void)settings;
+  (void)extra_info;
+  (void)no_javascript_access;
+  return controller_->OnPopupRequested(surface_id_, popup_id,
+                                       target_url.ToString(), user_gesture);
 }
 
 bool BrowserClient::OnProcessMessageReceived(

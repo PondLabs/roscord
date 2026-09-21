@@ -231,6 +231,7 @@ class MatrixWidgetAdapterLaunch {
 
   /// Optional host-facing policy flags use only generic BrowserRuntime names.
   final Map<String, bool> hostCapabilities;
+  final bool allowExternalNavigation;
 
   MatrixWidgetAdapterLaunch({
     required this.widgetUrl,
@@ -249,6 +250,7 @@ class MatrixWidgetAdapterLaunch {
     this.parentUrl = matrixWidgetAppOrigin,
     Map<String, bool> capabilities = const {},
     Map<String, bool> hostCapabilities = const {},
+    this.allowExternalNavigation = true,
   })  : capabilities = Map.unmodifiable(capabilities),
         hostCapabilities = Map.unmodifiable(hostCapabilities) {
     _requireNonEmpty(widgetUrl, 'widgetUrl');
@@ -324,6 +326,7 @@ class MatrixWidgetAdapterLaunch {
       initialNavigation: NavigationRequest(url: url),
       policy: SurfacePolicy(
         allowedOrigins: origins.cast<String>(),
+        allowExternalNavigation: allowExternalNavigation,
         capabilities: hostCapabilities,
       ),
     );

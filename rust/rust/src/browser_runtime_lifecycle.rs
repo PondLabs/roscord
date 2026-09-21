@@ -1072,7 +1072,7 @@ mod tests {
                 false,
             )
             .unwrap(),
-            SurfacePolicy::default(),
+            SurfacePolicy::new(["https://widget.test".to_owned()], std::iter::empty()).unwrap(),
         )
         .unwrap()
     }

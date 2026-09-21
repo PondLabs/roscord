@@ -22,9 +22,9 @@ use std::path::{Path, PathBuf};
 
 use crate::browser_profile::{ProfileContext, ProfileError, ProfileStore};
 use crate::browser_runtime::{
-    CloseReason, FramedCodec, NavigationEvent, NavigationOutcome, ProfileKey, RuntimeError,
-    ScriptEnvelope, ScriptSource, SurfaceCommand, SurfaceEvent, SurfaceId, SurfaceSpec,
-    WireMessage,
+    CloseReason, FramedCodec, NavigationEvent, NavigationOutcome, NavigationPolicyDecision,
+    ProfileKey, RuntimeError, ScriptEnvelope, ScriptSource, SurfaceCommand, SurfaceEvent,
+    SurfaceId, SurfaceSpec, WireMessage,
 };
 use crate::browser_runtime_lifecycle::FaultPoint;
 use serde_json::json;
@@ -1079,10 +1079,18 @@ impl HostCore {
         surface.last_command_sequence = sequence;
         let event = match command {
             SurfaceCommand::Navigate { navigation, .. } => {
-                let outcome = if surface.spec.policy().allows_url(navigation.url()) {
-                    NavigationOutcome::Allowed
-                } else {
-                    NavigationOutcome::Blocked
+                let outcome = match surface.spec.policy().navigation_decision(&navigation) {
+                    NavigationPolicyDecision::InProcess => NavigationOutcome::Allowed,
+                    NavigationPolicyDecision::External => NavigationOutcome::External,
+                    NavigationPolicyDecision::Blocked => {
+                        if navigation.disposition()
+                            == crate::browser_runtime::NavigationDisposition::External
+                        {
+                            NavigationOutcome::Cancelled
+                        } else {
+                            NavigationOutcome::Blocked
+                        }
+                    }
                 };
                 Some(SurfaceEvent::Navigation {
                     surface_id,
@@ -1280,7 +1288,7 @@ mod tests {
                 false,
             )
             .unwrap(),
-            SurfacePolicy::default(),
+            SurfacePolicy::new(["https://widget.test".to_owned()], std::iter::empty()).unwrap(),
         )
         .unwrap()
     }
