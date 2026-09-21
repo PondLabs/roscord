@@ -104,6 +104,17 @@ LINUX_EMBEDDED_TEST = (
 EMBEDDED_DART = (
     ROOT / "commet" / "lib" / "browser_runtime" / "embedded_browser_surface.dart"
 ).read_text(encoding="utf-8")
+LINUX_STANDALONE_DART = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "linux_standalone_presenter.dart"
+).read_text(encoding="utf-8")
+LINUX_STANDALONE_RUST = (
+    ROOT / "rust" / "rust" / "src" / "browser_linux_standalone.rs"
+).read_text(encoding="utf-8")
+LINUX_STANDALONE_DOC = (
+    ROOT / "docs" / "cef-browser-runtime-linux-standalone.md"
+).read_text(encoding="utf-8")
+LINUX_STANDALONE_TEST = (
+    ROOT / "commet" / "unit_test" / "linux_standalone_presenter_test.dart"
 ).read_text(encoding="utf-8")
 
 
@@ -733,6 +744,142 @@ class CefHostContractTests(unittest.TestCase):
         self.assertNotIn("CefBrowser;", EMBEDDED_DART)
         self.assertIn("never selects another engine", SOURCE)
         self.assertIn("only ever builds a Flutter texture", EMBEDDED_DART)
+
+    def test_linux_standalone_cells_use_owned_window_osr_cpu(self) -> None:
+        for token in (
+            "LinuxStandaloneCompositor",
+            "parseLinuxStandaloneCompositor",
+            "linuxStandalonePresentationPath",
+            "osr-cpu-owned-window",
+            "linuxStandaloneUsesOsrCpuFrames",
+            "linuxStandaloneUsesOwnedWindow",
+            "linuxStandaloneUsesNativeChildEmbedding",
+            "LinuxStandalonePresenter",
+            "validateLinuxStandaloneFrame",
+            "validateLinuxStandaloneGeometry",
+            "presentationPath",
+            "takeFrame",
+            "bringToFront",
+            "sendToBack",
+        ):
+            self.assertIn(token, LINUX_STANDALONE_DART)
+        for token in (
+            "LinuxCompositor",
+            "parse_linux_compositor",
+            "STANDALONE_PRESENTATION_PATH",
+            "osr-cpu-owned-window",
+            "uses_osr_cpu_frames",
+            "uses_owned_window",
+            "uses_native_child_embedding",
+            "validate_standalone_frame",
+            "validate_standalone_geometry",
+            "resolve_standalone_backend",
+            "StandaloneWindowState",
+        ):
+            self.assertIn(token, LINUX_STANDALONE_RUST)
+        self.assertIn("browser_linux_standalone", RUST_LIB)
+        self.assertIn("linux_standalone_presenter", DART_BARREL)
+        for token in (
+            "osr-cpu-owned-window",
+            "forced cpu",
+            "no fallback",
+            "webkitgtk",
+        ):
+            self.assertIn(token, LINUX_STANDALONE_DOC.lower())
+
+    def test_linux_standalone_owned_window_behavior_on_both_compositors(
+        self,
+    ) -> None:
+        for token in (
+            "LinuxStandaloneGeometry",
+            "LinuxStandaloneZOrder",
+            "ResizeCommand",
+            "FocusCommand",
+            "InputCommand",
+            "ReleaseFrameCommand",
+            "runtime.close",
+            "stale surface",
+            "ownedPopupSpec",
+            "noteHostLost",
+            "isReconnecting",
+        ):
+            self.assertIn(token, LINUX_STANDALONE_DART)
+        for token in (
+            "PresentationMode.standalone",
+            "Matrix launch builds the same spec except presentation",
+            "owned-window geometry, z-order, focus",
+            "profiles, navigation, and command ordering match embedded",
+            "profileMismatch",
+            "sequenceViolation",
+            "navigationDecision",
+            "host loss",
+        ):
+            self.assertIn(token, LINUX_STANDALONE_TEST)
+        self.assertIn("cpuOsr", LINUX_STANDALONE_DART)
+        self.assertIn("CpuOsr", LINUX_STANDALONE_RUST)
+        self.assertIn("forced_cpu_rendering", LINUX_STANDALONE_RUST)
+        for source in (LINUX_STANDALONE_DART, LINUX_STANDALONE_RUST):
+            self.assertIn("native child embedding", source.lower().replace("_", " "))
+            self.assertIn("unowned", source.lower())
+            for token in ("GDK_BACKEND", "gtk_window", "GtkWidget"):
+                self.assertNotIn(token, source)
+
+    def test_linux_standalone_shares_account_state_without_new_host(
+        self,
+    ) -> None:
+        # Standalone reuses the same four-operation seam, profile key, and
+        # policy vocabulary as embedded; no second host is started.
+        for token in (
+            "ProfileKey('account-record-1')",
+            "PresentationMode.standalone",
+            "allowExternalNavigation",
+            "FakeBrowserRuntime",
+        ):
+            self.assertIn(token, LINUX_STANDALONE_TEST)
+        self.assertIn("same_account", RUST_HOST_SOURCE + BROWSER_RUNTIME_RUST)
+        self.assertIn("Standalone", RUST_HOST_SOURCE)
+
+    def test_linux_standalone_has_no_child_embedding_or_unowned_window(
+        self,
+    ) -> None:
+        for token in (
+            "isForbiddenStandaloneBackend",
+            "assertNoStandaloneFallback",
+            "resolveLinuxStandaloneBackend",
+            "cef-osr-cpu",
+            "native child",
+            "child embedding",
+            "unowned window",
+            "unowned browser",
+            "webkit",
+            "wry",
+            "system cef",
+            "external chromium",
+            "WebView2",
+        ):
+            self.assertIn(token.lower(), LINUX_STANDALONE_DART.lower())
+        for token in (
+            "is_forbidden_backend",
+            "assert_no_fallback_engine",
+            "resolve_standalone_backend",
+            "cef-osr-cpu",
+            "native child",
+            "child embedding",
+            "unowned window",
+            "unowned browser",
+            "webkit",
+            "wry",
+            "system cef",
+            "external chromium",
+            "webview2",
+        ):
+            self.assertIn(token.lower(), LINUX_STANDALONE_RUST.lower())
+        for source in (LINUX_STANDALONE_DART, LINUX_STANDALONE_RUST):
+            lowered = source.lower()
+            self.assertNotIn("import 'package:webview", lowered)
+            self.assertNotIn("desktop_webview_window", lowered)
+            self.assertNotIn("system cef lookup", lowered)
+            self.assertNotIn("external cef download", lowered)
 
 
 if __name__ == "__main__":
