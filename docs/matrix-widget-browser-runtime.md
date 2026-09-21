@@ -69,8 +69,31 @@ the previous one. Closing sends
 the typed BrowserRuntime close operation, waits for the closed event (with a
 bounded timeout), and then tears down the transceiver and event subscriptions.
 
-This issue introduces the contract adapter; presentation work (including the
-Windows and Linux OSR texture surfaces) consumes it in the follow-up issues.
 Android, web, iOS, macOS, remote HTTP, and deliberate external-browser flows
 continue to use their existing runners until those platform-specific
 presenters migrate. The adapter does not add a fallback browser backend.
+
+## Windows embedded presentation (#121)
+
+`EmbeddedBrowserSurface` (`commet/lib/browser_runtime/embedded_browser_surface.dart`)
+owns one `PresentationMode.embedded` surface through the four-operation seam.
+The Windows host renders windowless OSR; CPU `OnPaint` is copied synchronously
+into client-owned memory (`SurfaceState::frame_pixels`) and published as a
+`frame_ready` event carrying only slot/size/stride/format/sequence. The Dart
+`ClientFrameRing` keeps the newest frame, coalescing older frames, and
+acknowledges presentation with `release_frame`. The Flutter `EmbeddedBrowserView`
+presents the newest reference through a `Texture` in normal composition (or
+frame metadata in tests without a native binding). No host buffer is ever
+retained past the paint callback and no host handle crosses into Dart.
+
+Input, resize/DPI, focus, and close travel as ordered typed commands:
+pointer down/up/move/enter/leave, wheel deltas, keyboard press/release,
+IME start/update/commit/cancel with ordered selection, `WasResized` plus
+`GetScreenInfo` for DPI, `SetFocus`, and deterministic `CloseBrowser`. Page
+selection stays owned by the page; the host only delivers ordered input.
+
+Forced software rendering (`WindowsBrowserRuntime(forceSoftwareRendering: true)`
+→ `--cef-software-rendering` → `--disable-gpu --disable-gpu-compositing`)
+keeps the same CPU frame/input/resize/focus contract; it never selects another
+engine. Failures remain typed and bounded, and no legacy, system, or unowned
+browser backend is reachable from the embedded path.
