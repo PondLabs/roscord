@@ -56,6 +56,9 @@ This repo has a monorepo structure, containing two flutter projects: roscord and
 The bundled desktop CEF host lifecycle, recovery budgets, command outcome
 rules, and validation-only fault controls are documented in
 [`docs/cef-browser-runtime-lifecycle.md`](docs/cef-browser-runtime-lifecycle.md).
+Account profile sharing, private contexts, clear-data transitions, and
+migration quarantine are documented in
+[`docs/cef-browser-runtime-profiles.md`](docs/cef-browser-runtime-profiles.md).
 
 ### 1. [Install Flutter](https://docs.flutter.dev/get-started/install)
 

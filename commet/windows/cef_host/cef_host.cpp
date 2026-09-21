@@ -2,6 +2,7 @@
 #define NOMINMAX
 
 #include <windows.h>
+#include <aclapi.h>
 #include <sddl.h>
 #include <shellapi.h>
 
@@ -15,10 +16,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <tchar.h>
@@ -29,9 +33,11 @@
 #include "include/cef_app.h"
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
+#include "include/cef_cookie.h"
 #include "include/cef_parser.h"
 #include "include/cef_render_handler.h"
 #include "include/cef_request_handler.h"
+#include "include/cef_request_context.h"
 #include "include/cef_request.h"
 #include "include/cef_resource_handler.h"
 #include "include/cef_sandbox_win.h"
@@ -91,6 +97,29 @@ bool IsValidProfileKey(std::string_view value) {
   return std::all_of(value.begin(), value.end(), [](unsigned char c) {
     return c >= 0x20 && c != 0x7f && c != '/' && c != '\\';
   });
+}
+
+std::string HexEncode(std::string_view value) {
+  constexpr char kHex[] = "0123456789abcdef";
+  std::string encoded;
+  encoded.reserve(value.size() * 2);
+  for (const unsigned char byte : value) {
+    encoded.push_back(kHex[byte >> 4]);
+    encoded.push_back(kHex[byte & 0x0f]);
+  }
+  return encoded;
+}
+
+std::wstring ProfileDirectoryName(std::string_view key) {
+  uint64_t hash = 0xcbf29ce484222325ull;
+  for (const unsigned char byte : key) {
+    hash ^= byte;
+    hash *= 0x100000001b3ull;
+  }
+  wchar_t buffer[32]{};
+  swprintf_s(buffer, L"profile-%016llx",
+             static_cast<unsigned long long>(hash));
+  return buffer;
 }
 
 std::wstring ModuleDirectory() {
@@ -158,6 +187,7 @@ bool IsPathInDirectory(const std::filesystem::path& path,
 struct HostArgs {
   DWORD parent_pid = 0;
   std::wstring pipe_name;
+  std::filesystem::path profile_root;
   std::string nonce;
   std::wstring module_name;
   bool validation = false;
@@ -281,9 +311,10 @@ std::optional<HostArgs> ValidateHostArgs(const ParsedCommandLine& command_line,
   const auto pipe = ValueForSwitch(command_line.values, L"--pipe");
   const auto nonce = ValueForSwitch(command_line.values, L"--nonce");
   const auto parent = ValueForSwitch(command_line.values, L"--parent-pid");
+  const auto profile_root = ValueForSwitch(command_line.values, L"--profile-root");
   if (!module || Lowercase(*module) != L"client.dll" || !pipe || !nonce ||
-      !parent) {
-    error = L"cef_host requires --module=client.dll, --pipe, --nonce, and --parent-pid";
+      !parent || !profile_root) {
+    error = L"cef_host requires --module=client.dll, --pipe, --nonce, --parent-pid, and --profile-root";
     return std::nullopt;
   }
 
@@ -310,11 +341,18 @@ std::optional<HostArgs> ValidateHostArgs(const ParsedCommandLine& command_line,
   result.validation = validation;
   result.fault = fault;
   result.pipe_name = *pipe;
+  result.profile_root = std::filesystem::path(*profile_root);
   result.nonce.assign(nonce->begin(), nonce->end());
   if (!ValidatePipeName(result.pipe_name) || result.nonce.size() < 32 ||
       result.nonce.size() > 128 || !IsHex(result.nonce) ||
       !ParseDword(*parent, result.parent_pid) ||
-      result.parent_pid == GetCurrentProcessId()) {
+      result.parent_pid == GetCurrentProcessId() ||
+      !result.profile_root.is_absolute() ||
+      std::any_of(result.profile_root.begin(), result.profile_root.end(),
+                  [](const auto& component) {
+                    return component == std::filesystem::path(L"..") ||
+                           component == std::filesystem::path(L".");
+                  })) {
     error = L"cef_host transport arguments are invalid";
     return std::nullopt;
   }
@@ -409,6 +447,228 @@ class OwnerOnlySecurityDescriptor {
  private:
   PSECURITY_DESCRIPTOR descriptor_ = nullptr;
 };
+
+bool IsOwnerControlled(const std::filesystem::path& path) {
+  const DWORD attributes = GetFileAttributesW(path.c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES ||
+      (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+    return false;
+  }
+  for (auto ancestor = path.parent_path(); !ancestor.empty();
+       ancestor = ancestor.parent_path()) {
+    const DWORD ancestor_attributes = GetFileAttributesW(ancestor.c_str());
+    if (ancestor_attributes == INVALID_FILE_ATTRIBUTES ||
+        (ancestor_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+      return false;
+    }
+    if (ancestor == ancestor.root_path()) break;
+  }
+
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  PSID owner = nullptr;
+  PACL dacl = nullptr;
+  if (GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT,
+                            OWNER_SECURITY_INFORMATION |
+                                DACL_SECURITY_INFORMATION,
+                            &owner, nullptr, &dacl, nullptr,
+                            &descriptor) != ERROR_SUCCESS ||
+      owner == nullptr || dacl == nullptr) {
+    if (descriptor != nullptr) LocalFree(descriptor);
+    return false;
+  }
+
+  HANDLE token = nullptr;
+  bool owner_matches = false;
+  if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+    DWORD size = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    std::vector<std::byte> token_data(size);
+    if (size != 0 && GetTokenInformation(token, TokenUser, token_data.data(),
+                                         size, &size)) {
+      owner_matches = EqualSid(owner,
+                               reinterpret_cast<PTOKEN_USER>(token_data.data())
+                                   ->User.Sid) != FALSE;
+    }
+    CloseHandle(token);
+  }
+  bool only_owner = owner_matches;
+  for (DWORD index = 0; only_owner && index < dacl->AceCount; ++index) {
+    LPVOID raw_ace = nullptr;
+    if (!GetAce(dacl, index, &raw_ace)) {
+      only_owner = false;
+      break;
+    }
+    const auto* header = static_cast<const ACE_HEADER*>(raw_ace);
+    if (header->AceType != ACCESS_ALLOWED_ACE_TYPE) continue;
+    const auto* ace = static_cast<const ACCESS_ALLOWED_ACE*>(raw_ace);
+    if (!owner_matches ||
+        !EqualSid(&ace->SidStart, owner)) {
+      only_owner = false;
+    }
+  }
+  LocalFree(descriptor);
+  return only_owner;
+}
+
+class CompletionLatch final : public CefCompletionCallback {
+ public:
+  void OnComplete() override {
+    {
+      std::lock_guard lock(mutex_);
+      complete_ = true;
+    }
+    condition_.notify_all();
+  }
+
+  bool Wait(std::chrono::seconds timeout) {
+    std::unique_lock lock(mutex_);
+    return condition_.wait_for(lock, timeout, [&] { return complete_; });
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  bool complete_ = false;
+  IMPLEMENT_REFCOUNTING(CompletionLatch);
+};
+
+bool FlushAndCloseContext(const CefRefPtr<CefRequestContext>& context,
+                          std::string& error) {
+  if (context == nullptr) return true;
+
+  CefRefPtr<CompletionLatch> certificates = new CompletionLatch();
+  context->ClearCertificateExceptions(certificates);
+  if (!certificates->Wait(std::chrono::seconds(5))) {
+    error = "profile certificate exceptions did not clear";
+    return false;
+  }
+
+  CefRefPtr<CompletionLatch> credentials = new CompletionLatch();
+  context->ClearHttpAuthCredentials(credentials);
+  if (!credentials->Wait(std::chrono::seconds(5))) {
+    error = "profile HTTP credentials did not clear";
+    return false;
+  }
+
+  auto cookie_manager = context->GetCookieManager(nullptr);
+  if (cookie_manager != nullptr) {
+    CefRefPtr<CompletionLatch> flushed = new CompletionLatch();
+    cookie_manager->FlushStore(flushed);
+    if (!flushed->Wait(std::chrono::seconds(5))) {
+      error = "profile cookie store did not flush";
+      return false;
+    }
+  }
+
+  CefRefPtr<CompletionLatch> closed = new CompletionLatch();
+  context->CloseAllConnections(closed);
+  if (!closed->Wait(std::chrono::seconds(5))) {
+    error = "profile connections did not close";
+    return false;
+  }
+  return true;
+}
+
+bool WriteOwnerManifest(const std::filesystem::path& path,
+                        std::string_view contents) {
+  HANDLE file = CreateFileW(
+      path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT |
+          FILE_FLAG_WRITE_THROUGH,
+      nullptr);
+  if (file == INVALID_HANDLE_VALUE) return false;
+
+  DWORD written = 0;
+  const bool wrote = WriteFile(file, contents.data(),
+                               static_cast<DWORD>(contents.size()), &written,
+                               nullptr) != FALSE &&
+                     written == static_cast<DWORD>(contents.size());
+  const bool flushed = wrote && FlushFileBuffers(file) != FALSE;
+  CloseHandle(file);
+  return flushed && IsOwnerControlled(path);
+}
+
+bool ReadOwnerManifest(const std::filesystem::path& path, std::string& contents) {
+  HANDLE file = CreateFileW(
+      path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return false;
+
+  LARGE_INTEGER size{};
+  const bool sized = GetFileSizeEx(file, &size) != FALSE && size.QuadPart >= 0 &&
+                     size.QuadPart <= 4096;
+  if (!sized) {
+    CloseHandle(file);
+    return false;
+  }
+  contents.assign(static_cast<size_t>(size.QuadPart), '\0');
+  DWORD read = 0;
+  const bool read_ok = ReadFile(file, contents.data(),
+                                static_cast<DWORD>(contents.size()), &read,
+                                nullptr) != FALSE &&
+                       read == static_cast<DWORD>(contents.size());
+  CloseHandle(file);
+  return read_ok && IsOwnerControlled(path);
+}
+
+bool MakeOwnerOnlyDirectory(const std::filesystem::path& path) {
+  std::error_code error;
+  std::filesystem::create_directories(path, error);
+  if (error) return false;
+  OwnerOnlySecurityDescriptor security;
+  if (!security.Create()) return false;
+  PACL dacl = nullptr;
+  BOOL present = FALSE;
+  BOOL defaulted = FALSE;
+  if (!GetSecurityDescriptorDacl(security.get(), &present, &dacl,
+                                 &defaulted) ||
+      !present || dacl == nullptr) {
+    return false;
+  }
+  return SetNamedSecurityInfoW(
+             const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
+             DACL_SECURITY_INFORMATION, nullptr, nullptr, dacl, nullptr) ==
+         ERROR_SUCCESS;
+}
+
+bool ValidateProfileRoot(const std::filesystem::path& path) {
+  if (!path.is_absolute() ||
+      std::any_of(path.begin(), path.end(), [](const auto& component) {
+        return component == std::filesystem::path(L"..") ||
+               component == std::filesystem::path(L".");
+      })) {
+    return false;
+  }
+  for (auto ancestor = path; !ancestor.empty(); ancestor = ancestor.parent_path()) {
+    const DWORD attributes = GetFileAttributesW(ancestor.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES &&
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+      return false;
+    }
+    if (ancestor == ancestor.root_path()) break;
+  }
+  std::error_code error;
+  const bool existed = GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+  std::filesystem::create_directories(path, error);
+  if (error) return false;
+  if (!existed) return MakeOwnerOnlyDirectory(path);
+  return IsOwnerControlled(path);
+}
+
+bool RejectReparseBelow(const std::filesystem::path& directory) {
+  const DWORD attributes = GetFileAttributesW(directory.c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES ||
+      (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+    return false;
+  }
+  if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) return true;
+
+  std::error_code error;
+  for (const auto& entry : std::filesystem::directory_iterator(directory, error)) {
+    if (error || !RejectReparseBelow(entry.path())) return false;
+  }
+  return !error;
+}
 
 class PipeChannel {
  public:
@@ -706,12 +966,312 @@ class HostApp final : public CefApp, public CefBrowserProcessHandler {
   IMPLEMENT_REFCOUNTING(HostApp);
 };
 
+// The host, rather than a caller, owns request-context creation.  This keeps
+// cookies, cache, storage, credentials, and permission decisions inside one
+// account-bound context while private surfaces receive an in-memory context.
+class ProfileManager {
+ public:
+  explicit ProfileManager(std::filesystem::path root) : root_(std::move(root)) {}
+
+  bool Open(std::string_view key, std::string_view privacy,
+            CefRefPtr<CefRequestContext>& context, uint64_t& context_id,
+            std::string& error) {
+    std::lock_guard lock(mutex_);
+    if (!IsValidProfileKey(key)) {
+      error = "profile key is invalid";
+      return false;
+    }
+    if (clearing_.find(std::string(key)) != clearing_.end()) {
+      error = "profile is busy";
+      return false;
+    }
+    if (privacy == "persistent") {
+      const auto existing = persistent_.find(std::string(key));
+      if (existing != persistent_.end()) {
+        auto iterator = contexts_.find(existing->second);
+        if (iterator == contexts_.end()) {
+          error = "profile is unavailable";
+          return false;
+        }
+        if (!EnsureExistingProfile(key, iterator->second.path, error)) {
+          return false;
+        }
+        iterator->second.active += 1;
+        context_id = iterator->second.id;
+        context = iterator->second.context;
+        return true;
+      }
+
+      std::filesystem::path profile_path;
+      if (!EnsureProfile(key, profile_path, error)) return false;
+      CefRequestContextSettings settings;
+      settings.cache_path = profile_path.wstring();
+      settings.persist_session_cookies = true;
+      settings.persist_user_preferences = true;
+      context = CefRequestContext::CreateContext(settings, nullptr);
+      if (context == nullptr) {
+        error = "persistent request context could not be created";
+        return false;
+      }
+      context_id = next_context_id_++;
+      contexts_.emplace(context_id,
+                        Context{context_id, std::string(key), false, 1,
+                                profile_path, context});
+      persistent_.emplace(std::string(key), context_id);
+      return true;
+    }
+    if (privacy != "private") {
+      error = "privacy mode is invalid";
+      return false;
+    }
+
+    CefRequestContextSettings settings;
+    settings.cache_path.clear();
+    settings.persist_session_cookies = false;
+    settings.persist_user_preferences = false;
+    context = CefRequestContext::CreateContext(settings, nullptr);
+    if (context == nullptr) {
+      error = "private request context could not be created";
+      return false;
+    }
+    context_id = next_context_id_++;
+    contexts_.emplace(context_id,
+                      Context{context_id, std::string(key), true, 1, {}, context});
+    return true;
+  }
+
+  bool Release(uint64_t context_id) {
+    std::lock_guard lock(mutex_);
+    const auto iterator = contexts_.find(context_id);
+    if (iterator == contexts_.end() || iterator->second.active <= 0) return false;
+    iterator->second.active -= 1;
+    if (iterator->second.is_private) contexts_.erase(iterator);
+    return true;
+  }
+
+  bool ClearData(std::string_view key, std::string& error) {
+    if (!IsValidProfileKey(key)) {
+      error = "profile key is invalid";
+      return false;
+    }
+    const std::string account(key);
+    std::unique_lock lock(mutex_);
+    if (clearing_.find(account) != clearing_.end()) {
+      error = "profile is busy";
+      return false;
+    }
+    for (const auto& entry : contexts_) {
+      const auto& context = entry.second;
+      if (context.key == account && context.active != 0) {
+        error = "profile is busy";
+        return false;
+      }
+    }
+    clearing_.insert(account);
+    CefRefPtr<CefRequestContext> old_context;
+    const auto persistent = persistent_.find(std::string(key));
+    if (persistent != persistent_.end()) {
+      const auto context = contexts_.find(persistent->second);
+      if (context != contexts_.end()) old_context = context->second.context;
+      if (context != contexts_.end()) contexts_.erase(context);
+      persistent_.erase(persistent);
+    }
+    lock.unlock();
+
+    const auto finish = [&]() {
+      std::lock_guard relock(mutex_);
+      clearing_.erase(account);
+    };
+    if (!FlushAndCloseContext(old_context, error)) {
+      finish();
+      return false;
+    }
+    old_context = nullptr;
+
+    std::filesystem::path profile_path;
+    if (!EnsureProfile(key, profile_path, error)) {
+      finish();
+      return false;
+    }
+    std::error_code iterator_error;
+    for (std::filesystem::directory_iterator iterator(profile_path,
+                                                       iterator_error),
+         end;
+         iterator != end; iterator.increment(iterator_error)) {
+      if (iterator_error) {
+        error = "profile data could not be enumerated";
+        finish();
+        return false;
+      }
+      const auto& entry = *iterator;
+      const auto name = entry.path().filename();
+      if (name == L"profile.manifest") continue;
+      if (name == L"downloads") {
+        const DWORD attributes = GetFileAttributesW(entry.path().c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES ||
+            (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+          error = "profile downloads entry is not a real path";
+          finish();
+          return false;
+        }
+        continue;
+      }
+      if (!RemoveTree(entry.path())) {
+        error = "profile data could not be cleared";
+        finish();
+        return false;
+      }
+    }
+    if (iterator_error) {
+      error = "profile data could not be enumerated";
+      finish();
+      return false;
+    }
+    const bool valid = EnsureProfile(key, profile_path, error);
+    finish();
+    return valid;
+  }
+
+  void Shutdown() {
+    std::lock_guard lock(mutex_);
+    std::string ignored;
+    for (const auto& entry : contexts_) {
+      const auto& context = entry.second;
+      if (!context.is_private) {
+        FlushAndCloseContext(context.context, ignored);
+      }
+    }
+    contexts_.clear();
+    persistent_.clear();
+    clearing_.clear();
+  }
+
+ private:
+  struct Context {
+    uint64_t id;
+    std::string key;
+    bool is_private;
+    int active;
+    std::filesystem::path path;
+    CefRefPtr<CefRequestContext> context;
+  };
+
+  bool EnsureProfile(std::string_view key, std::filesystem::path& profile_path,
+                     std::string& error) const {
+    if (!IsValidProfileKey(key)) {
+      error = "profile key is invalid";
+      return false;
+    }
+    profile_path = root_ / ProfileDirectoryName(key);
+    if (!IsPathInDirectory(profile_path, root_)) {
+      error = "profile path is outside the app-data root";
+      return false;
+    }
+    const DWORD attributes = GetFileAttributesW(profile_path.c_str());
+    const bool created = attributes == INVALID_FILE_ATTRIBUTES;
+    if (created) {
+      if (!MakeOwnerOnlyDirectory(profile_path)) {
+        error = "profile directory could not be created";
+        return false;
+      }
+    } else if (!IsOwnerControlled(profile_path)) {
+      error = "profile directory is not owner-controlled";
+      return false;
+    }
+    if (!RejectReparseBelow(profile_path)) {
+      error = "profile directory contains a reparse point";
+      return false;
+    }
+
+    const auto manifest = profile_path / L"profile.manifest";
+    if (!IsRegularFile(manifest)) {
+      if (!created) {
+        if (!Quarantine(profile_path)) {
+          error = "profile quarantine failed";
+          return false;
+        }
+        error = "profile migration failed";
+        return false;
+      }
+      const std::string expected =
+          "schema=1\nprofile_key=" + HexEncode(key) + "\n";
+      if (!WriteOwnerManifest(manifest, expected)) {
+        error = "profile manifest could not be created";
+        return false;
+      }
+      return true;
+    }
+
+    const std::string expected = "schema=1\nprofile_key=" + HexEncode(key) + "\n";
+    std::string actual;
+    if (!ReadOwnerManifest(manifest, actual) || actual != expected) {
+      if (!Quarantine(profile_path)) {
+        error = "profile quarantine failed";
+        return false;
+      }
+      error = "profile migration failed";
+      return false;
+    }
+    return true;
+  }
+
+  bool EnsureExistingProfile(std::string_view key,
+                             const std::filesystem::path& expected_path,
+                             std::string& error) const {
+    const DWORD attributes = GetFileAttributesW(expected_path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+      error = "profile migration failed";
+      return false;
+    }
+    std::filesystem::path profile_path;
+    if (!EnsureProfile(key, profile_path, error)) return false;
+    if (profile_path != expected_path) {
+      error = "profile is corrupt";
+      return false;
+    }
+    return true;
+  }
+
+  static bool RemoveTree(const std::filesystem::path& path) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+      return false;
+    }
+    std::error_code error;
+    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+      for (const auto& entry : std::filesystem::directory_iterator(path, error)) {
+        if (error || !RemoveTree(entry.path())) return false;
+      }
+      return std::filesystem::remove(path, error) && !error;
+    }
+    return std::filesystem::remove(path, error) && !error;
+  }
+
+  static bool Quarantine(const std::filesystem::path& path) {
+    const auto destination = path.parent_path() /
+        (L"quarantine-" + std::to_wstring(GetTickCount64()) + L"-" +
+         path.filename().wstring());
+    return MoveFileExW(path.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH) !=
+           FALSE;
+  }
+
+  std::filesystem::path root_;
+  std::mutex mutex_;
+  uint64_t next_context_id_ = 1;
+  std::map<uint64_t, Context> contexts_;
+  std::map<std::string, uint64_t> persistent_;
+  std::set<std::string> clearing_;
+};
+
 class CreateBrowserTask;
 class CloseBrowserTask;
 
 struct SurfaceState {
   uint64_t id = 0;
   std::string profile_key;
+  uint64_t context_id = 0;
+  CefRefPtr<CefRequestContext> request_context;
   std::string presentation;
   int last_command_sequence = 0;
   CefRefPtr<CefBrowser> browser;
@@ -773,7 +1333,7 @@ class BrowserClient final : public CefClient,
 class HostController {
  public:
   HostController(const HostArgs& args, PipeChannel& pipe)
-      : args_(args), pipe_(pipe) {}
+      : args_(args), pipe_(pipe), profiles_(args.profile_root) {}
   HostController(const HostController&) = delete;
   HostController& operator=(const HostController&) = delete;
 
@@ -786,6 +1346,17 @@ class HostController {
   void OnBrowserClosed(uint64_t surface_id);
   void OnRendererFailure(uint64_t surface_id, std::string_view code,
                          std::string_view message);
+  bool ClearData(std::string_view profile_key, std::string& error) {
+    std::lock_guard lock(state_mutex_);
+    if (std::any_of(surfaces_.begin(), surfaces_.end(),
+                    [&](const auto& entry) {
+                      return entry.second.profile_key == profile_key;
+                    })) {
+      error = "profile is busy";
+      return false;
+    }
+    return profiles_.ClearData(profile_key, error);
+  }
 
  private:
   bool HandleFrame(std::string_view body);
@@ -811,6 +1382,7 @@ class HostController {
   PipeChannel& pipe_;
   std::mutex state_mutex_;
   std::map<uint64_t, SurfaceState> surfaces_;
+  ProfileManager profiles_;
   uint64_t next_surface_id_ = 1;
   std::atomic<bool> stopping_ = false;
   std::condition_variable closed_condition_;
@@ -1076,12 +1648,25 @@ bool HostController::HandleOpen(CefRefPtr<CefDictionaryValue> payload) {
       navigation == nullptr || navigation->GetType("url") != VTYPE_STRING ||
       navigation->GetType("disposition") != VTYPE_STRING ||
       navigation->GetType("user_initiated") != VTYPE_BOOL ||
-      spec->GetType("policy") != VTYPE_DICTIONARY || url != kFixtureUrl ||
-      presentation != "embedded") {
+      spec->GetType("policy") != VTYPE_DICTIONARY || url != kFixtureUrl) {
     SendError(request_id < 0 ? std::nullopt
                              : std::optional<int>(request_id),
               "invalid_spec",
-              "the Windows host smoke fixture requires an embedded commet URL");
+              "the Windows host smoke fixture requires the commet URL");
+    return true;
+  }
+
+  CefRefPtr<CefRequestContext> request_context;
+  uint64_t context_id = 0;
+  std::string profile_error;
+  if (!profiles_.Open(profile, privacy, request_context, context_id,
+                      profile_error)) {
+    const std::string code = profile_error == "profile migration failed"
+                                 ? "migration_failed"
+                                 : profile_error == "profile is busy"
+                                       ? "profile_busy"
+                                       : "profile_unavailable";
+    SendError(request_id, code, profile_error);
     return true;
   }
 
@@ -1095,11 +1680,14 @@ bool HostController::HandleOpen(CefRefPtr<CefDictionaryValue> payload) {
     } else {
       surface.id = next_surface_id_++;
       surface.profile_key = profile;
+      surface.context_id = context_id;
+      surface.request_context = request_context;
       surface.presentation = presentation;
       surfaces_.emplace(surface.id, surface);
     }
   }
   if (surface_ids_exhausted) {
+    profiles_.Release(context_id);
     SendError(request_id, "runtime_failed", "surface id space is exhausted");
     return true;
   }
@@ -1272,30 +1860,40 @@ void HostController::CreateBrowserOnUi(uint64_t surface_id, std::string url,
                                        std::string presentation) {
   CEF_REQUIRE_UI_THREAD();
   if (stopping_) {
+    auto surface = GetSurface(surface_id);
     std::lock_guard lock(state_mutex_);
     if (surfaces_.erase(surface_id) != 0) {
+      if (surface.has_value()) profiles_.Release(surface->context_id);
       closed_condition_.notify_all();
     }
     return;
   }
   auto surface = GetSurface(surface_id);
-  if (!surface || presentation != "embedded") {
+  if (!surface) {
     SendError(std::nullopt, "invalid_spec", "surface is no longer creatable");
     return;
   }
 
   CefWindowInfo window_info;
-  window_info.SetAsWindowless(nullptr, false);
+  if (presentation == "embedded") {
+    window_info.SetAsWindowless(nullptr, false);
+  } else {
+    window_info.SetAsPopup(nullptr, "roscord Browser");
+  }
   CefBrowserSettings settings;
   settings.windowless_frame_rate = 30;
   auto client = new BrowserClient(this, surface_id);
   auto browser = CefBrowserHost::CreateBrowserSync(
-      window_info, client, url, settings, nullptr, nullptr);
+      window_info, client, url, settings, nullptr, surface->request_context);
   if (browser == nullptr) {
     SendError(std::nullopt, "runtime_failed", "CEF rejected the fixture surface");
     {
       std::lock_guard lock(state_mutex_);
-      surfaces_.erase(surface_id);
+      const auto iterator = surfaces_.find(surface_id);
+      if (iterator != surfaces_.end()) {
+        profiles_.Release(iterator->second.context_id);
+        surfaces_.erase(iterator);
+      }
     }
     closed_condition_.notify_all();
     return;
@@ -1337,9 +1935,18 @@ void HostController::OnBrowserCreated(uint64_t surface_id,
 void HostController::OnBrowserClosed(uint64_t surface_id) {
   CEF_REQUIRE_UI_THREAD();
   bool was_active = false;
+  std::optional<uint64_t> context_id;
   {
     std::lock_guard lock(state_mutex_);
-    was_active = surfaces_.erase(surface_id) != 0;
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator != surfaces_.end()) {
+      context_id = iterator->second.context_id;
+      surfaces_.erase(iterator);
+      was_active = true;
+    }
+  }
+  if (context_id.has_value()) {
+    profiles_.Release(*context_id);
   }
   if (was_active) {
     SendClosed(surface_id, 2);
@@ -1377,6 +1984,7 @@ void HostController::Shutdown() {
   // controller alive until every surface has reached that callback.
   shutdown_timed_out_ = !closed_condition_.wait_for(
       lock, std::chrono::seconds(5), [&] { return surfaces_.empty(); });
+  if (!shutdown_timed_out_) profiles_.Shutdown();
 }
 
 void HostController::Run() {
@@ -1458,7 +2066,8 @@ int RunHost(HINSTANCE instance, void* sandbox_info) {
     // rejects both switches under NDEBUG.
     return EXIT_FAILURE;
   }
-  if (sandbox_info == nullptr || !VerifyBundledRuntime(error)) {
+  if (!ValidateProfileRoot(args->profile_root) || sandbox_info == nullptr ||
+      !VerifyBundledRuntime(error)) {
     return EXIT_FAILURE;
   }
 

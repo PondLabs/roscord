@@ -12,18 +12,15 @@
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_int, c_void, CString, OsString};
 use std::fmt;
-use std::fs::{self, symlink_metadata, OpenOptions};
-use std::io::{self, ErrorKind, Read, Write};
+use std::fs::{self, symlink_metadata};
+use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{
-    DirBuilderExt, MetadataExt as UnixMetadataExt, OpenOptionsExt, PermissionsExt,
-};
+use std::os::unix::fs::{MetadataExt as UnixMetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
-use base64::Engine as _;
-
+use crate::browser_profile::{ProfileContext, ProfileError, ProfileStore};
 use crate::browser_runtime::{
     CloseReason, FramedCodec, NavigationEvent, NavigationOutcome, ProfileKey, RuntimeError,
     SurfaceCommand, SurfaceEvent, SurfaceId, SurfaceSpec, WireMessage,
@@ -31,7 +28,6 @@ use crate::browser_runtime::{
 use crate::browser_runtime_lifecycle::FaultPoint;
 
 const SOCKET_PATH_MAX_BYTES: usize = 107;
-const PROFILE_SCHEMA: &str = "1";
 const CEF_RELEASE: &str = "Release";
 const REQUIRED_CEF_FILES: &[&str] = &[
     "Release/libcef.so",
@@ -71,6 +67,10 @@ pub enum HostError {
     Cef(String),
     Protocol(String),
     Runtime(String),
+    ProfileBusy,
+    ProfileCorrupt,
+    ProfileUnavailable,
+    MigrationFailed,
     Io(io::Error),
 }
 
@@ -83,6 +83,10 @@ impl fmt::Display for HostError {
             Self::Cef(message) => write!(formatter, "CEF error: {message}"),
             Self::Protocol(message) => write!(formatter, "protocol error: {message}"),
             Self::Runtime(message) => write!(formatter, "runtime error: {message}"),
+            Self::ProfileBusy => formatter.write_str("profile is busy"),
+            Self::ProfileCorrupt => formatter.write_str("profile is corrupt"),
+            Self::ProfileUnavailable => formatter.write_str("profile is unavailable"),
+            Self::MigrationFailed => formatter.write_str("profile migration failed"),
             Self::Io(error) => error.fmt(formatter),
         }
     }
@@ -919,6 +923,7 @@ fn write_message(
 
 struct SurfaceState {
     spec: SurfaceSpec,
+    context: ProfileContext,
     last_command_sequence: u64,
     next_event_sequence: u64,
 }
@@ -996,8 +1001,10 @@ impl HostCore {
         // Deserialization does not invoke ProfileKey::new, so revalidate the
         // opaque key at the host boundary before it participates in a path.
         ProfileKey::new(spec.profile_key().as_str().to_owned()).map_err(runtime_error)?;
-        self.profile_store
-            .open(spec.profile_key(), spec.privacy())?;
+        let context = self
+            .profile_store
+            .open(spec.profile_key(), spec.privacy())
+            .map_err(profile_error)?;
         let surface_id = SurfaceId(self.next_surface_id);
         self.next_surface_id = self
             .next_surface_id
@@ -1007,6 +1014,7 @@ impl HostCore {
             surface_id,
             SurfaceState {
                 spec: spec.clone(),
+                context,
                 last_command_sequence: 0,
                 next_event_sequence: 2,
             },
@@ -1126,6 +1134,9 @@ impl HostCore {
             .surfaces
             .remove(&surface_id)
             .ok_or_else(|| HostError::Runtime(format!("stale surface {surface_id}")))?;
+        self.profile_store
+            .release(surface.context.context_id())
+            .map_err(profile_error)?;
         Ok(vec![WireMessage::Event {
             event: SurfaceEvent::Closed {
                 surface_id,
@@ -1137,14 +1148,45 @@ impl HostCore {
 
     fn shutdown(&mut self) {
         self.surfaces.clear();
+        self.profile_store.shutdown();
         self.stopped = true;
+    }
+
+    /// Clear one account's browser state.  The operation is intentionally
+    /// outside the four BrowserRuntime caller operations: the app invokes it
+    /// through its account-data/settings bridge after closing all surfaces.
+    /// The host still enforces quiescence so a stale caller cannot clear a
+    /// context that remains reachable.
+    pub fn clear_data(
+        &mut self,
+        profile_key: &ProfileKey,
+    ) -> Result<crate::browser_profile::ProfileClearResult, HostError> {
+        if self
+            .surfaces
+            .values()
+            .any(|surface| surface.spec.profile_key() == profile_key)
+        {
+            return Err(HostError::ProfileBusy);
+        }
+        self.profile_store
+            .clear_data(profile_key)
+            .map_err(profile_error)
     }
 }
 
 fn wire_error_for(request_id: u64, error: HostError) -> Result<Vec<WireMessage>, HostError> {
     let (code, message) = match error {
         HostError::Runtime(message) => ("runtime_failed", message),
-        HostError::Permission(message) => ("profile_locked", message),
+        HostError::Permission(message) => ("profile_unavailable", message),
+        HostError::ProfileBusy => ("profile_busy", "profile is busy".to_owned()),
+        HostError::ProfileCorrupt => ("profile_corrupt", "profile is corrupt".to_owned()),
+        HostError::ProfileUnavailable => {
+            ("profile_unavailable", "profile is unavailable".to_owned())
+        }
+        HostError::MigrationFailed => (
+            "migration_failed",
+            "profile migration failed; re-authentication is required".to_owned(),
+        ),
         HostError::Usage(message) => ("invalid_command", message),
         other => return Err(other),
     };
@@ -1165,95 +1207,15 @@ fn runtime_error(error: RuntimeError) -> HostError {
     HostError::Runtime(error.to_string())
 }
 
-struct ProfileStore {
-    root: PathBuf,
-}
-
-impl ProfileStore {
-    fn new(root: PathBuf) -> Self {
-        Self { root }
-    }
-
-    fn open(
-        &self,
-        key: &ProfileKey,
-        privacy: crate::browser_runtime::PrivacyMode,
-    ) -> Result<(), HostError> {
-        if privacy == crate::browser_runtime::PrivacyMode::Private {
-            // Private contexts intentionally never create a profile directory.
-            return Ok(());
+fn profile_error(error: ProfileError) -> HostError {
+    match error {
+        ProfileError::Busy => HostError::ProfileBusy,
+        ProfileError::Security | ProfileError::Unavailable | ProfileError::Io => {
+            HostError::ProfileUnavailable
         }
-        let directory = self.root.join(profile_directory_name(key));
-        if let Ok(metadata) = symlink_metadata(&directory) {
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(HostError::Permission(
-                    "persistent profile path is not a real directory".to_owned(),
-                ));
-            }
-            if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
-                return Err(HostError::Permission(
-                    "persistent profile path is not owner-only".to_owned(),
-                ));
-            }
-        } else {
-            create_private_directory(&directory)?;
-        }
-        let manifest = directory.join("profile.manifest");
-        let expected = format!(
-            "schema={PROFILE_SCHEMA}\nprofile_key={}\n",
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.as_str())
-        );
-        match OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&manifest)
-        {
-            Ok(mut file) => {
-                let metadata = file.metadata()?;
-                if !metadata.is_file()
-                    || metadata.uid() != unsafe { libc::geteuid() }
-                    || metadata.mode() & 0o077 != 0
-                {
-                    return Err(HostError::Permission(
-                        "persistent profile manifest is not owner-controlled".to_owned(),
-                    ));
-                }
-                let mut actual = String::new();
-                file.read_to_string(&mut actual)?;
-                if actual == expected {
-                    Ok(())
-                } else {
-                    Err(HostError::Permission(
-                        "persistent profile manifest does not match the requested key".to_owned(),
-                    ))
-                }
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                let temporary = directory.join("profile.manifest.new");
-                let mut file = OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .mode(0o600)
-                    .open(&temporary)?;
-                file.write_all(expected.as_bytes())?;
-                file.sync_all()?;
-                fs::rename(temporary, manifest)?;
-                Ok(())
-            }
-            Err(error) => Err(HostError::Io(error)),
-        }
+        ProfileError::Corrupt => HostError::ProfileCorrupt,
+        ProfileError::MigrationFailed => HostError::MigrationFailed,
     }
-}
-
-fn profile_directory_name(key: &ProfileKey) -> String {
-    // FNV-1a is used only for a stable, non-user-controlled directory name;
-    // the manifest remains the source of truth and detects collisions.
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in key.as_str().as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("profile-{hash:016x}")
 }
 
 #[cfg(test)]
@@ -1281,10 +1243,10 @@ mod tests {
         path
     }
 
-    fn spec(key: &str) -> SurfaceSpec {
+    fn spec_with_presentation(key: &str, presentation: PresentationMode) -> SurfaceSpec {
         SurfaceSpec::new(
             ProfileKey::new(key).unwrap(),
-            PresentationMode::Embedded,
+            presentation,
             PrivacyMode::Persistent,
             NavigationRequest::new(
                 "https://widget.test/index",
@@ -1295,6 +1257,10 @@ mod tests {
             SurfacePolicy::default(),
         )
         .unwrap()
+    }
+
+    fn spec(key: &str) -> SurfaceSpec {
+        spec_with_presentation(key, PresentationMode::Embedded)
     }
 
     fn host_args(extra: &[&str]) -> Vec<OsString> {
@@ -1506,14 +1472,91 @@ mod tests {
     #[test]
     fn persistent_profiles_are_bound_by_manifest_and_private_profiles_leave_no_directory() {
         let root = temp_root("profiles");
-        let store = ProfileStore::new(root.clone());
+        let mut store = ProfileStore::new(root.clone());
         let account_a = ProfileKey::new("account-a").unwrap();
         let account_b = ProfileKey::new("account-b").unwrap();
-        store.open(&account_a, PrivacyMode::Persistent).unwrap();
-        store.open(&account_a, PrivacyMode::Persistent).unwrap();
-        assert!(store.open(&account_b, PrivacyMode::Persistent).is_ok());
-        store.open(&account_a, PrivacyMode::Private).unwrap();
-        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        let first = store.open(&account_a, PrivacyMode::Persistent).unwrap();
+        let second = store.open(&account_a, PrivacyMode::Persistent).unwrap();
+        let other = store.open(&account_b, PrivacyMode::Persistent).unwrap();
+        assert_eq!(first.context_id(), second.context_id());
+        assert_ne!(first.context_id(), other.context_id());
+        let private = store.open(&account_a, PrivacyMode::Private).unwrap();
+        assert_ne!(first.context_id(), private.context_id());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn host_core_clear_data_waits_for_quiescence_and_keeps_downloads() {
+        let root = temp_root("clear-data");
+        let mut host = HostCore::new(root.clone());
+        let key = ProfileKey::new("account-a").unwrap();
+        host.dispatch(WireMessage::Open {
+            request_id: 1,
+            spec: spec("account-a"),
+        })
+        .unwrap();
+
+        let profile_path = host
+            .profile_store
+            .persistent
+            .get(&key)
+            .and_then(|context| context.context.path())
+            .unwrap()
+            .to_owned();
+        fs::create_dir(profile_path.join("downloads")).unwrap();
+        File::create(profile_path.join("downloads").join("committed.bin")).unwrap();
+        File::create(profile_path.join("old-cache.bin")).unwrap();
+
+        assert!(matches!(host.clear_data(&key), Err(HostError::ProfileBusy)));
+        host.dispatch(WireMessage::Close {
+            surface_id: SurfaceId(1),
+        })
+        .unwrap();
+        let result = host.clear_data(&key).unwrap();
+        assert!(result.preserved_downloads());
+        assert!(profile_path
+            .join("downloads")
+            .join("committed.bin")
+            .exists());
+        assert!(!profile_path.join("old-cache.bin").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn same_account_persistent_presentations_share_one_context() {
+        let root = temp_root("presentations");
+        let mut host = HostCore::new(root.clone());
+        host.dispatch(WireMessage::Open {
+            request_id: 1,
+            spec: spec_with_presentation("account-a", PresentationMode::Embedded),
+        })
+        .unwrap();
+        host.dispatch(WireMessage::Open {
+            request_id: 2,
+            spec: spec_with_presentation("account-a", PresentationMode::Standalone),
+        })
+        .unwrap();
+        assert_eq!(
+            host.surfaces
+                .get(&SurfaceId(1))
+                .unwrap()
+                .context
+                .context_id(),
+            host.surfaces
+                .get(&SurfaceId(2))
+                .unwrap()
+                .context
+                .context_id()
+        );
+        host.dispatch(WireMessage::Close {
+            surface_id: SurfaceId(1),
+        })
+        .unwrap();
+        host.dispatch(WireMessage::Close {
+            surface_id: SurfaceId(2),
+        })
+        .unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

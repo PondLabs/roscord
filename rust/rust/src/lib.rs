@@ -1,6 +1,7 @@
 mod frb_generated;
 
 pub mod api;
+pub mod browser_profile;
 pub mod browser_runtime;
 pub mod browser_runtime_lifecycle;
 #[cfg(target_os = "linux")]

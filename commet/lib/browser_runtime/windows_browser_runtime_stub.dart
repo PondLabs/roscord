@@ -17,6 +17,7 @@ class WindowsBrowserRuntime implements BrowserRuntime {
     int maxFrameBytes = defaultBrowserRuntimeMaxFrameBytes,
     bool validationBuild = false,
     Object? faultPoint,
+    String? profileRoot,
   });
 
   final RuntimeLifecycle lifecycle = RuntimeLifecycle();
