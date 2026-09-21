@@ -15,6 +15,13 @@ class MatrixCallMembership {
   /// not report it, which is not the same as being unmuted.
   static const voiceStateKey = 'chat.commet.voice_state';
 
+  /// Whether the member has been away from their machine long enough to
+  /// count as away. In the membership rather than left to Matrix presence:
+  /// plenty of homeservers (matrix.org among them) share no presence at all,
+  /// and someone sitting in a voice channel is exactly who you want to know
+  /// this about.
+  static const awayKey = 'chat.commet.away';
+
   /// How long a membership lasts from its join time, the MatrixRTC default.
   static const lifetime = Duration(hours: 4);
 
@@ -43,6 +50,10 @@ class MatrixCallMembership {
     return state;
   }
 
+  /// Whether [content] says its owner is away from their machine. Anything
+  /// else, a client that does not report it included, reads as present.
+  static bool isAway(Map<String, Object?> content) => content[awayKey] == true;
+
   /// When the member joined: `created_ts` once the membership has been
   /// rewritten, otherwise when it was sent ([sentAt]).
   static DateTime? joinedAt(Map<String, Object?> content, DateTime? sentAt) {
@@ -62,21 +73,23 @@ class MatrixCallMembership {
     return now.isAfter(joined.add(Duration(milliseconds: expires)));
   }
 
-  /// [current] rewritten to list [media] and [voiceState]. Every other key is
-  /// kept, the join time is recorded in `created_ts` (without it other
-  /// clients take the rewrite for a new join, re-key, and reorder the
+  /// [current] rewritten to list [media], [voiceState] and [away]. Every
+  /// other key is kept, the join time is recorded in `created_ts` (without it
+  /// other clients take the rewrite for a new join, re-key, and reorder the
   /// oldest_membership focus choice), and the expiry moves [lifetime] past
   /// [now].
   static Map<String, Object?> withPublishedState(Map<String, Object?> current,
       {required Set<LiveMedia> media,
       required Set<VoiceState> voiceState,
       required DateTime joinedAt,
-      required DateTime now}) {
+      required DateTime now,
+      bool away = false}) {
     return {
       ...current,
       'created_ts': joinedAt.millisecondsSinceEpoch,
       'expires':
           now.difference(joinedAt).inMilliseconds + lifetime.inMilliseconds,
+      awayKey: away,
       liveMediaKey: [
         for (final m in LiveMedia.values)
           if (media.contains(m)) m.name,

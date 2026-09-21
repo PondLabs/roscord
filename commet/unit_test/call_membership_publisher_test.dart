@@ -10,6 +10,7 @@ const screenAndCamera =
 const camera = CallMembershipState(media: {LiveMedia.camera});
 const muted = CallMembershipState(voice: {VoiceState.muted});
 const nothing = CallMembershipState();
+const away = CallMembershipState(away: true);
 
 void main() {
   late List<CallMembershipState> writes;
@@ -144,6 +145,19 @@ void main() {
     publisher.update(nothing);
     await tester.pump(const Duration(seconds: 5));
     expect(writes, [muted, nothing]);
+
+    await finish();
+  });
+
+  testWidgets('walking away is a change, and coming back is another',
+      (tester) async {
+    publisher.update(away);
+    await tester.pump(const Duration(milliseconds: 800));
+    expect(writes, [away]);
+
+    publisher.update(nothing);
+    await tester.pump(const Duration(seconds: 5));
+    expect(writes, [away, nothing]);
 
     await finish();
   });

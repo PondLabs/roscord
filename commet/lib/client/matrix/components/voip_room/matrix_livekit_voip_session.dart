@@ -9,6 +9,7 @@ import 'package:commet/client/components/activities/activities_component.dart';
 import 'package:commet/client/components/voip/audio_processing/audio_processing_manager.dart';
 import 'package:commet/client/components/voip/voip_session.dart';
 import 'package:commet/client/components/voip/voip_stream.dart';
+import 'package:commet/client/components/user_presence/user_idle_watcher.dart';
 import 'package:commet/client/components/voip/webrtc_screencapture_source.dart';
 import 'package:commet/client/components/voip/android_screencapture_source.dart';
 import 'package:commet/client/matrix/components/dj/dj_booths.dart';
@@ -148,6 +149,11 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
     _dspWatchdog =
         Timer.periodic(const Duration(seconds: 1), (_) => _checkDspAlive());
 
+    // Being away from the machine is part of what our membership says, so
+    // the channel list shows it for someone who is sitting in the call
+    // without touching anything.
+    _idleWatcher.isAway.addListener(_publishMembershipState);
+
     DjBooths.open(this, livekitRoom);
 
     startHeartbeat().catchError((Object e, StackTrace s) {
@@ -161,6 +167,8 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
 
   StreamSubscription? _settingsSub;
   bool _dspNoiseSuppression = false;
+
+  final UserIdleWatcher _idleWatcher = UserIdleWatcher.instance;
 
   /// The microphone track is created with WebRTC's suppressor off whenever
   /// our DSP is supported (MatrixLivekitBackend.join), which is decided by
@@ -802,7 +810,10 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
     // Only with the delayed leave armed: it is what clears the membership,
     // and the badge with it, if this client crashes while streaming.
     _membershipPublisher.update(heartbeatDelayId != null
-        ? CallMembershipState(media: _localLiveMedia, voice: _localVoiceState)
+        ? CallMembershipState(
+            media: _localLiveMedia,
+            voice: _localVoiceState,
+            away: _idleWatcher.isAway.value)
         : const CallMembershipState());
   }
 
@@ -825,6 +836,7 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
       MatrixCallMembership.withPublishedState(current.content,
           media: published.media,
           voiceState: published.voice,
+          away: published.away,
           joinedAt: joinedAt,
           now: DateTime.now()),
     );
@@ -907,6 +919,7 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
     try {
       // First, so no membership write lands after the clear below: leaving
       // unpublishes our tracks, which would schedule one.
+      _idleWatcher.isAway.removeListener(_publishMembershipState);
       await _membershipPublisher.stop();
       // Likewise a heartbeat that is restoring our membership.
       heartbeatTimer?.cancel();
@@ -1462,6 +1475,7 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
       MatrixCallMembership.withPublishedState(membership,
           media: _localLiveMedia,
           voiceState: _localVoiceState,
+          away: _idleWatcher.isAway.value,
           joinedAt: _joinedAt ?? now,
           now: now),
     );
