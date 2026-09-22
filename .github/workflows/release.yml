@@ -411,6 +411,20 @@ jobs:
           sed -i "s/{{VERSION_TAG}}/$version/g" ./chat.commet.commetapp.metainfo.xml
           flatpak-builder --force-clean build-dir chat.commet.commetapp.yaml --repo=repo
           flatpak build-bundle repo chat.commet.commetapp.flatpak chat.commet.commetapp
+
+      - name: Qualify Flatpak CEF artifact
+        run: |
+          STAGE="$(mktemp -d)"
+          METADATA="$(mktemp -d)"
+          CACHE="$GITHUB_WORKSPACE/.cef-cache"
+          mkdir -p "$CACHE"
+          python tools/cef_runtime.py fetch --platform linux-x64 --cache-dir "$CACHE"
+          ARCHIVE="$(find "$CACHE" -name '*.tar.bz2' -type f | head -n 1)"
+          if [ -z "$ARCHIVE" ]; then echo "locked CEF archive was not cached" >&2; exit 1; fi
+          python tools/cef_runtime.py stage --platform linux-x64 "$ARCHIVE" "$STAGE"
+          python tools/cef_runtime.py metadata --platform linux-x64 "$STAGE" "$METADATA"
+          python tools/qualify_flatpak_artifact.py --bundle commet/linux/flatpak/build-dir/files --metadata "$METADATA" --manifest commet/linux/flatpak/chat.commet.commetapp.yaml
+          rm -rf "$STAGE" "$METADATA"
       
       - name: Upload to release
         if: github.event_name == 'release'
