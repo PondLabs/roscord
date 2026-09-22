@@ -287,6 +287,17 @@ class MediaEmbedSession {
 
   bool get isClosed => _closedState;
 
+  /// Accessible reconnecting state delegated to the owned embedded surface.
+  /// Host loss never takes down the app; retry is a fresh session via
+  /// [MediaEmbedAdapter] and [dispose] still drains without leaking.
+  bool get isReconnecting => surface.isReconnecting;
+
+  /// Records a host-loss observation on the owned surface.
+  void noteHostLost() => surface.noteHostLost();
+
+  /// Clears the reconnecting state after the host restores the surface.
+  void noteRestored() => surface.noteRestored();
+
   SurfaceId? get surfaceId => surface.surfaceId;
 
   Future<void> open() async {

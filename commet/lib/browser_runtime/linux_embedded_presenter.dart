@@ -149,6 +149,7 @@ class LinuxEmbeddedPresenter {
   int _nextCommandSequence = 1;
   FrameReadyEvent? _pendingFrame;
   bool _closed = false;
+  bool _hostLost = false;
 
   LinuxEmbeddedPresenter({
     required this.runtime,
@@ -170,6 +171,13 @@ class LinuxEmbeddedPresenter {
   String get presentationPath => linuxEmbeddedPresentationPath(compositor);
 
   bool get usesNativeChildEmbedding => linuxEmbeddedUsesNativeChildEmbedding;
+
+  /// Accessible reconnecting state shown when the host is lost. Host loss
+  /// never takes down the app: the pending frame is dropped, the surface
+  /// reports reconnecting, and [close] still wins.
+  bool get isReconnecting => _hostLost && !_closed;
+  bool get isHostLost => _hostLost;
+  bool get isClosed => _closed;
 
   /// Newest pending client-owned frame, if any. Older frames are dropped;
   /// control events are never coalesced here.
@@ -240,11 +248,26 @@ class LinuxEmbeddedPresenter {
 
   /// Closes the surface and marks the presenter unusable. A second close
   /// surfaces the host's stale-surface contract instead of double-freeing.
+  /// Close always wins, including after [noteHostLost].
   Future<void> close() async {
     _ensureOpen();
     _closed = true;
     _pendingFrame = null;
     await runtime.close(surfaceId);
+  }
+
+  /// Records a host-loss observation without taking down the app. The
+  /// pending frame is dropped, the surface reports reconnecting, and
+  /// [close] still wins. Other surfaces on the same runtime are untouched.
+  void noteHostLost() {
+    if (_closed) return;
+    _hostLost = true;
+    _pendingFrame = null;
+  }
+
+  /// Clears the reconnecting state after the host restores this surface.
+  void noteRestored() {
+    _hostLost = false;
   }
 
   Future<void> _command(SurfaceCommand command) async {

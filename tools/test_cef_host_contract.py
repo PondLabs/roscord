@@ -85,9 +85,6 @@ RELEASE_WORKFLOW = (ROOT / ".github" / "workflows" / "release.yml").read_text(
 BUILD_WORKFLOW = (ROOT / ".github" / "workflows" / "build.yml").read_text(
     encoding="utf-8"
 )
-EMBEDDED_DART = (
-    ROOT / "commet" / "lib" / "browser_runtime" / "embedded_browser_surface.dart"
-).read_text(encoding="utf-8")
 LINUX_EMBEDDED_DART = (
     ROOT / "commet" / "lib" / "browser_runtime" / "linux_embedded_presenter.dart"
 ).read_text(encoding="utf-8")
@@ -103,6 +100,9 @@ DART_BARREL = (ROOT / "commet" / "lib" / "browser_runtime.dart").read_text(
 )
 LINUX_EMBEDDED_TEST = (
     ROOT / "commet" / "unit_test" / "linux_embedded_presenter_test.dart"
+).read_text(encoding="utf-8")
+EMBEDDED_DART = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "embedded_browser_surface.dart"
 ).read_text(encoding="utf-8")
 LINUX_STANDALONE_DART = (
     ROOT / "commet" / "lib" / "browser_runtime" / "linux_standalone_presenter.dart"
@@ -133,6 +133,33 @@ FLATPAK_MANIFEST = (
 ).read_text(encoding="utf-8")
 STANDALONE_DART = (
     ROOT / "commet" / "lib" / "browser_runtime" / "standalone_browser_surface.dart"
+).read_text(encoding="utf-8")
+RECOVERY_DART = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "surface_recovery.dart"
+).read_text(encoding="utf-8")
+DIAGNOSTICS_DART = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "surface_diagnostics.dart"
+).read_text(encoding="utf-8")
+RECOVERY_UI_DART = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "recovery_surface_ui.dart"
+).read_text(encoding="utf-8")
+RECOVERY_TEST = (
+    ROOT / "commet" / "unit_test" / "surface_recovery_test.dart"
+).read_text(encoding="utf-8")
+DIAGNOSTICS_TEST = (
+    ROOT / "commet" / "unit_test" / "surface_diagnostics_test.dart"
+).read_text(encoding="utf-8")
+RECOVERY_UI_TEST = (
+    ROOT / "commet" / "unit_test" / "recovery_surface_ui_test.dart"
+).read_text(encoding="utf-8")
+MEDIA_ADAPTER = (
+    ROOT
+    / "commet"
+    / "lib"
+    / "client"
+    / "components"
+    / "video_embed"
+    / "media_embed_adapter.dart"
 ).read_text(encoding="utf-8")
 
 
@@ -544,6 +571,114 @@ class CefHostContractTests(unittest.TestCase):
         self.assertNotIn("URLDownloadToFile", SOURCE)
         self.assertNotIn("getDisplayMedia", SOURCE)
 
+    def test_linux_embedded_cells_use_osr_cpu_flutter_texture(self) -> None:
+        for token in (
+            "LinuxCompositor",
+            "parseLinuxCompositor",
+            "linuxEmbeddedPresentationPath",
+            "osr-cpu-flutter-texture",
+            "linuxEmbeddedUsesOsrCpuFrames",
+            "linuxEmbeddedUsesFlutterTexture",
+            "linuxEmbeddedUsesNativeChildEmbedding",
+            "LinuxEmbeddedPresenter",
+            "validateLinuxEmbeddedFrame",
+            "presentationPath",
+            "takeFrame",
+        ):
+            self.assertIn(token, LINUX_EMBEDDED_DART)
+        for token in (
+            "LinuxCompositor",
+            "parse_linux_compositor",
+            "EMBEDDED_PRESENTATION_PATH",
+            "osr-cpu-flutter-texture",
+            "uses_osr_cpu_frames",
+            "uses_flutter_texture",
+            "uses_native_child_embedding",
+            "validate_embedded_frame",
+            "resolve_embedded_backend",
+        ):
+            self.assertIn(token, LINUX_EMBEDDED_RUST)
+        self.assertIn("browser_linux_embedded", RUST_LIB)
+        self.assertIn("linux_embedded_presenter", DART_BARREL)
+        for token in (
+            "osr-cpu-flutter-texture",
+            "forced cpu",
+            "no fallback",
+            "webkitgtk",
+        ):
+            self.assertIn(token, LINUX_EMBEDDED_DOC.lower())
+
+    def test_linux_embedded_matches_windows_contract_without_child_embedding(
+        self,
+    ) -> None:
+        for token in (
+            "ResizeCommand",
+            "FocusCommand",
+            "InputCommand",
+            "ReleaseFrameCommand",
+            "runtime.close",
+            "stale surface",
+        ):
+            self.assertIn(token, LINUX_EMBEDDED_DART)
+        # The presenter is runtime-agnostic, so the embedded Matrix contract
+        # is pinned in its fixture: same embedded spec, profile, navigation,
+        # input/IME/focus/resize/DPI/close vocabulary as Windows.
+        for token in (
+            "PresentationMode.embedded",
+            "Matrix launch builds the same embedded surface spec",
+            "input, IME, focus, resize, DPI, and close round-trip",
+            "profiles, navigation, and command ordering match Windows",
+            "profileMismatch",
+            "sequenceViolation",
+            "navigationDecision",
+        ):
+            self.assertIn(token, LINUX_EMBEDDED_TEST)
+        self.assertIn("cpuOsr", LINUX_EMBEDDED_DART)
+        self.assertIn("CpuOsr", LINUX_EMBEDDED_RUST)
+        self.assertIn("forced_cpu_rendering", LINUX_EMBEDDED_RUST)
+        # Both presenters document that native child embedding is absent;
+        # only embedding *APIs* are forbidden in the sources.
+        for source in (LINUX_EMBEDDED_DART, LINUX_EMBEDDED_RUST):
+            self.assertIn("native child embedding", source.lower().replace("_", " "))
+            for token in ("GDK_BACKEND", "gtk_window", "GtkWidget"):
+                self.assertNotIn(token, source)
+
+    def test_linux_embedded_has_no_fallback_engine(self) -> None:
+        for token in (
+            "isForbiddenEmbeddedBackend",
+            "assertNoFallbackEngine",
+            "resolveLinuxEmbeddedBackend",
+            "cef-osr-cpu",
+            "webkit",
+            "wry",
+            "system cef",
+            "external chromium",
+            "WebView2",
+            "unowned browser",
+        ):
+            self.assertIn(token.lower(), LINUX_EMBEDDED_DART.lower())
+        for token in (
+            "is_forbidden_backend",
+            "assert_no_fallback_engine",
+            "resolve_embedded_backend",
+            "cef-osr-cpu",
+            "webkit",
+            "wry",
+            "system cef",
+            "external chromium",
+            "webview2",
+            "unowned browser",
+        ):
+            self.assertIn(token.lower(), LINUX_EMBEDDED_RUST.lower())
+        for source in (LINUX_EMBEDDED_DART, LINUX_EMBEDDED_RUST):
+            lowered = source.lower()
+            # The forbidden list itself names the engines only to deny them;
+            # no fallback may be imported, instantiated, or registered.
+            self.assertNotIn("import 'package:webview", lowered)
+            self.assertNotIn("desktop_webview_window", lowered)
+            self.assertNotIn("system cef lookup", lowered)
+            self.assertNotIn("external cef download", lowered)
+
     def test_windows_embedded_frame_ring_is_client_owned(self) -> None:
         for token in (
             "OnPaintFrame",
@@ -654,215 +789,6 @@ class CefHostContractTests(unittest.TestCase):
         self.assertNotIn("CefBrowser;", EMBEDDED_DART)
         self.assertIn("never selects another engine", SOURCE)
         self.assertIn("only ever builds a Flutter texture", EMBEDDED_DART)
-
-    def test_linux_embedded_cells_use_osr_cpu_flutter_texture(self) -> None:
-        for token in (
-            "LinuxCompositor",
-            "parseLinuxCompositor",
-            "linuxEmbeddedPresentationPath",
-            "osr-cpu-flutter-texture",
-            "linuxEmbeddedUsesOsrCpuFrames",
-            "linuxEmbeddedUsesFlutterTexture",
-            "linuxEmbeddedUsesNativeChildEmbedding",
-            "LinuxEmbeddedPresenter",
-            "validateLinuxEmbeddedFrame",
-            "presentationPath",
-            "takeFrame",
-        ):
-            self.assertIn(token, LINUX_EMBEDDED_DART)
-        for token in (
-            "LinuxCompositor",
-            "parse_linux_compositor",
-            "EMBEDDED_PRESENTATION_PATH",
-            "osr-cpu-flutter-texture",
-            "uses_osr_cpu_frames",
-            "uses_flutter_texture",
-            "uses_native_child_embedding",
-            "validate_embedded_frame",
-            "resolve_embedded_backend",
-        ):
-            self.assertIn(token, LINUX_EMBEDDED_RUST)
-        self.assertIn("browser_linux_embedded", RUST_LIB)
-        self.assertIn("linux_embedded_presenter", DART_BARREL)
-        for token in (
-            "osr-cpu-flutter-texture",
-            "forced cpu",
-            "no fallback",
-            "webkitgtk",
-        ):
-            self.assertIn(token, LINUX_EMBEDDED_DOC.lower())
-
-    def test_linux_embedded_matches_windows_contract_without_child_embedding(
-        self,
-    ) -> None:
-        for token in (
-            "ResizeCommand",
-            "FocusCommand",
-            "InputCommand",
-            "ReleaseFrameCommand",
-            "runtime.close",
-            "stale surface",
-        ):
-            self.assertIn(token, LINUX_EMBEDDED_DART)
-        # The presenter is runtime-agnostic, so the embedded Matrix contract
-        # is pinned in its fixture: same embedded spec, profile, navigation,
-        # input/IME/focus/resize/DPI/close vocabulary as Windows.
-        for token in (
-            "PresentationMode.embedded",
-            "Matrix launch builds the same embedded surface spec",
-            "input, IME, focus, resize, DPI, and close round-trip",
-            "profiles, navigation, and command ordering match Windows",
-            "profileMismatch",
-            "sequenceViolation",
-            "navigationDecision",
-        ):
-            self.assertIn(token, LINUX_EMBEDDED_TEST)
-        self.assertIn("cpuOsr", LINUX_EMBEDDED_DART)
-        self.assertIn("CpuOsr", LINUX_EMBEDDED_RUST)
-        self.assertIn("forced_cpu_rendering", LINUX_EMBEDDED_RUST)
-        # Both presenters document that native child embedding is absent;
-        # only embedding *APIs* are forbidden in the sources.
-        for source in (LINUX_EMBEDDED_DART, LINUX_EMBEDDED_RUST):
-            self.assertIn("native child embedding", source.lower().replace("_", " "))
-            for token in ("GDK_BACKEND", "gtk_window", "GtkWidget"):
-                self.assertNotIn(token, source)
-
-    def test_linux_embedded_has_no_fallback_engine(self) -> None:
-        for token in (
-            "isForbiddenEmbeddedBackend",
-            "assertNoFallbackEngine",
-            "resolveLinuxEmbeddedBackend",
-            "cef-osr-cpu",
-            "webkit",
-            "wry",
-            "system cef",
-            "external chromium",
-            "WebView2",
-            "unowned browser",
-        ):
-            self.assertIn(token.lower(), LINUX_EMBEDDED_DART.lower())
-        for token in (
-            "is_forbidden_backend",
-            "assert_no_fallback_engine",
-            "resolve_embedded_backend",
-            "cef-osr-cpu",
-            "webkit",
-            "wry",
-            "system cef",
-            "external chromium",
-            "webview2",
-            "unowned browser",
-        ):
-            self.assertIn(token.lower(), LINUX_EMBEDDED_RUST.lower())
-        for source in (LINUX_EMBEDDED_DART, LINUX_EMBEDDED_RUST):
-            lowered = source.lower()
-            # The forbidden list itself names the engines only to deny them;
-            # no fallback may be imported, instantiated, or registered.
-            self.assertNotIn("import 'package:webview", lowered)
-            self.assertNotIn("desktop_webview_window", lowered)
-            self.assertNotIn("system cef lookup", lowered)
-            self.assertNotIn("external cef download", lowered)
-
-    def test_windows_standalone_shares_host_profile_policy_and_permissions(self) -> None:
-        for token in (
-            "StandaloneBrowserSurface",
-            "StandaloneBrowserWindow",
-            "PresentationMode.standalone",
-            "shares one runtime",
-            "same account",
-            "profileKey",
-            "profileMismatch",
-            "PermissionCommand",
-            "DownloadCommand",
-            "ClipboardCommand",
-            "UploadCommand",
-            "PopupCommand",
-        ):
-            self.assertIn(
-                token, STANDALONE_DART + BROWSER_RUNTIME_DART,
-                f"missing standalone sharing token: {token}",
-            )
-        # The host uses one ProfileManager context per account for both
-        # presentations; standalone never starts a second host process.
-        for token in (
-            "profiles_.Open",
-            "CefRequestContext::CreateContext",
-            "SetAsChild",
-            "owned_window",
-        ):
-            self.assertIn(token, SOURCE, f"missing standalone host token: {token}")
-        self.assertNotIn("Process.start", STANDALONE_DART)
-
-    def test_windows_standalone_owned_window_behavior(self) -> None:
-        for token in (
-            "CreateStandaloneWindow",
-            "DestroyStandaloneWindow",
-            "RegisterStandaloneWindowClass",
-            "StandaloneWindowProc",
-            "RoscordBrowserStandalone",
-            "SetAsChild",
-            "SetWindowPos",
-            "BringWindowToTop",
-            "SetForegroundWindow",
-            "NotifyMoveOrResizeStarted",
-            "NotifyScreenInfoChanged",
-            "SendWindowChanged",
-            "window_changed",
-            "ApplyResizeOnUi",
-            "ApplyFocusOnUi",
-            "ApplyInputOnUi",
-            "ImeSetComposition",
-            "ImeCommitText",
-            "ImeCancelComposition",
-            "SendMouseClickEvent",
-            "SendMouseMoveEvent",
-            "SendMouseWheelEvent",
-            "SendKeyEvent",
-            "SetFocus",
-            "CloseBrowser(true)",
-            "device_scale_factor",
-            "bringToFront",
-            "setFocus",
-            "StandaloneWindowGeometry",
-        ):
-            self.assertIn(
-                token, SOURCE + STANDALONE_DART,
-                f"missing standalone window token: {token}",
-            )
-        # Standalone windows never emit frames through Flutter.
-        self.assertIn("never emit frames", SOURCE)
-        self.assertNotIn("Texture(textureId", STANDALONE_DART)
-        self.assertNotIn("frame_ready", STANDALONE_DART)
-        self.assertNotIn("CefBrowser;", STANDALONE_DART)
-
-    def test_windows_standalone_shared_state_software_and_cleanup(self) -> None:
-        for token in (
-            "forceSoftwareRendering",
-            "--cef-software-rendering",
-            "disable-gpu",
-            "CPU",
-            "same",
-            "close",
-            "CloseBrowser(true)",
-            "OnBrowserClosed",
-            "DestroyStandaloneWindow",
-            "profiles_.Release",
-        ):
-            self.assertIn(
-                token, SOURCE + STANDALONE_DART + DART_RUNTIME,
-                f"missing standalone software/cleanup token: {token}",
-            )
-
-    def test_windows_standalone_forbids_foreign_backends(self) -> None:
-        self.assertNotIn("wry", STANDALONE_DART.lower())
-        self.assertNotIn("webkit", SOURCE.lower())
-        self.assertNotIn("EdgeWebView2", SOURCE)
-        self.assertNotIn("CreateCoreWebView2", SOURCE)
-        self.assertNotIn("desktop_webview_window", STANDALONE_DART)
-        self.assertNotIn("flutter_inappwebview", STANDALONE_DART)
-        self.assertNotIn("SetAsPopup", SOURCE)
-        self.assertIn("never selects another engine", SOURCE)
-        self.assertIn("never builds a", STANDALONE_DART)
 
     def test_linux_standalone_cells_use_owned_window_osr_cpu(self) -> None:
         for token in (
@@ -1222,6 +1148,205 @@ class CefHostContractTests(unittest.TestCase):
         ):
             self.assertIn(token, FLATPAK_TEST.lower())
             self.assertIn(token, FLATPAK_DOC.lower())
+
+    def test_windows_standalone_shares_host_profile_policy_and_permissions(self) -> None:
+        for token in (
+            "StandaloneBrowserSurface",
+            "StandaloneBrowserWindow",
+            "PresentationMode.standalone",
+            "shares one runtime",
+            "same account",
+            "profileKey",
+            "profileMismatch",
+            "PermissionCommand",
+            "DownloadCommand",
+            "ClipboardCommand",
+            "UploadCommand",
+            "PopupCommand",
+        ):
+            self.assertIn(
+                token, STANDALONE_DART + BROWSER_RUNTIME_DART,
+                f"missing standalone sharing token: {token}",
+            )
+        # The host uses one ProfileManager context per account for both
+        # presentations; standalone never starts a second host process.
+        for token in (
+            "profiles_.Open",
+            "CefRequestContext::CreateContext",
+            "SetAsChild",
+            "owned_window",
+        ):
+            self.assertIn(token, SOURCE, f"missing standalone host token: {token}")
+        self.assertNotIn("Process.start", STANDALONE_DART)
+
+    def test_windows_standalone_owned_window_behavior(self) -> None:
+        for token in (
+            "CreateStandaloneWindow",
+            "DestroyStandaloneWindow",
+            "RegisterStandaloneWindowClass",
+            "StandaloneWindowProc",
+            "RoscordBrowserStandalone",
+            "SetAsChild",
+            "SetWindowPos",
+            "BringWindowToTop",
+            "SetForegroundWindow",
+            "NotifyMoveOrResizeStarted",
+            "NotifyScreenInfoChanged",
+            "SendWindowChanged",
+            "window_changed",
+            "ApplyResizeOnUi",
+            "ApplyFocusOnUi",
+            "ApplyInputOnUi",
+            "ImeSetComposition",
+            "ImeCommitText",
+            "ImeCancelComposition",
+            "SendMouseClickEvent",
+            "SendMouseMoveEvent",
+            "SendMouseWheelEvent",
+            "SendKeyEvent",
+            "SetFocus",
+            "CloseBrowser(true)",
+            "device_scale_factor",
+            "bringToFront",
+            "setFocus",
+            "StandaloneWindowGeometry",
+        ):
+            self.assertIn(
+                token, SOURCE + STANDALONE_DART,
+                f"missing standalone window token: {token}",
+            )
+        # Standalone windows never emit frames through Flutter.
+        self.assertIn("never emit frames", SOURCE)
+        self.assertNotIn("Texture(textureId", STANDALONE_DART)
+        self.assertNotIn("frame_ready", STANDALONE_DART)
+        self.assertNotIn("CefBrowser;", STANDALONE_DART)
+
+    def test_windows_standalone_shared_state_software_and_cleanup(self) -> None:
+        for token in (
+            "forceSoftwareRendering",
+            "--cef-software-rendering",
+            "disable-gpu",
+            "CPU",
+            "same",
+            "close",
+            "CloseBrowser(true)",
+            "OnBrowserClosed",
+            "DestroyStandaloneWindow",
+            "profiles_.Release",
+        ):
+            self.assertIn(
+                token, SOURCE + STANDALONE_DART + DART_RUNTIME,
+                f"missing standalone software/cleanup token: {token}",
+            )
+
+    def test_windows_standalone_forbids_foreign_backends(self) -> None:
+        self.assertNotIn("wry", STANDALONE_DART.lower())
+        self.assertNotIn("webkit", SOURCE.lower())
+        self.assertNotIn("EdgeWebView2", SOURCE)
+        self.assertNotIn("CreateCoreWebView2", SOURCE)
+        self.assertNotIn("desktop_webview_window", STANDALONE_DART)
+        self.assertNotIn("flutter_inappwebview", STANDALONE_DART)
+        self.assertNotIn("SetAsPopup", SOURCE)
+        self.assertIn("never selects another engine", SOURCE)
+        self.assertIn("never builds a", STANDALONE_DART)
+
+    def test_recovery_restores_declarative_state_without_replay(self) -> None:
+        for token in (
+            "SurfaceRecoveryCoordinator",
+            "SurfaceRecoveryRegistry",
+            "restoreOrder",
+            "declarativeSnapshots",
+            "isSideEffectingCommand",
+            "isIdempotentPresentationCommand",
+            "shouldReplayCommand",
+            "shutdownDrainOrder",
+            "SurfaceHostLossTracker",
+        ):
+            self.assertIn(token, RECOVERY_DART)
+        for token in (
+            "stable",
+            "never replayed",
+            "close always wins",
+        ):
+            self.assertIn(token.lower(), RECOVERY_DART.lower())
+        for token in (
+            "noteHostLost",
+            "isReconnecting",
+            "noteRestored",
+        ):
+            for source in (
+                EMBEDDED_DART,
+                STANDALONE_DART,
+                LINUX_EMBEDDED_DART,
+                LINUX_STANDALONE_DART,
+                FLATPAK_DART,
+                MEDIA_ADAPTER,
+            ):
+                self.assertIn(token, source, f"missing {token}")
+        self.assertIn("surface_recovery", DART_BARREL)
+        self.assertIn("restore plan is in stable", RECOVERY_TEST.lower())
+
+    def test_renderer_gpu_budgets_and_terminal_states_are_shared(self) -> None:
+        for token in (
+            "maxRendererRecoveries",
+            "maxGpuFailures",
+            "gpuDisabled",
+            "surfaceRecovering",
+            "surfaceRestored",
+            "surfaceFailed",
+        ):
+            self.assertIn(token, RECOVERY_DART + LIFECYCLE_DART)
+        self.assertIn("surface-scoped", RECOVERY_DART.lower())
+        self.assertIn("degrades to cpu", (RECOVERY_DART + RECOVERY_TEST).lower())
+
+    def test_recovery_ui_is_accessible(self) -> None:
+        for token in (
+            "ReconnectingBrowserOverlay",
+            "CrashedSurfaceCard",
+            "RuntimeUnavailableCard",
+            "Reconnecting browser",
+            "This embedded page crashed. Retry",
+            "Graphics unavailable. Retry",
+            "Embedded browser unavailable. Retry browser",
+            "Copy diagnostic ID",
+            "liveRegion",
+        ):
+            self.assertIn(token, RECOVERY_UI_DART)
+        self.assertIn("recovery_surface_ui", DART_BARREL)
+        for forbidden in (
+            "CefBrowser",
+            "GetNamedPipeClientProcessId",
+        ):
+            self.assertNotIn(forbidden, RECOVERY_UI_DART)
+
+    def test_diagnostics_are_consent_gated_rate_limited_and_redacted(
+        self,
+    ) -> None:
+        for token in (
+            "DiagnosticConsent",
+            "hashProfileKey",
+            "diagnosticOrigin",
+            "redactDiagnosticMessage",
+            "DiagnosticId",
+            "RateLimitedDiagnosticStore",
+            "tryCapture",
+            "tryUpload",
+            "copyDiagnosticId",
+            "wouldExceedDiskBudget",
+        ):
+            self.assertIn(token, DIAGNOSTICS_DART)
+        self.assertIn("surface_diagnostics", DART_BARREL)
+        self.assertIn("consent", DIAGNOSTICS_DART.lower())
+        self.assertIn("rate", DIAGNOSTICS_DART.lower())
+        self.assertIn("redact", DIAGNOSTICS_DART.lower())
+
+    def test_clean_close_drains_without_orphaning(self) -> None:
+        self.assertIn("shutdownDrainOrder", RECOVERY_DART)
+        self.assertIn("close always wins", RECOVERY_DART.lower())
+        self.assertIn("clean stop", RECOVERY_DART.lower())
+        self.assertIn("close", MEDIA_ADAPTER.lower())
+        self.assertIn("shutdown", RECOVERY_TEST.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

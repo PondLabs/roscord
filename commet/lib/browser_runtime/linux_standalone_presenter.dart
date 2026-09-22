@@ -516,6 +516,11 @@ class LinuxStandalonePresenter {
     _pendingFrame = null;
   }
 
+  /// Clears the reconnecting state after the host restores this surface.
+  void noteRestored() {
+    _hostLost = false;
+  }
+
   /// Closes the surface and marks the presenter unusable. A second close
   /// surfaces the host's stale-surface contract instead of double-freeing.
   /// Close always wins, including after [noteHostLost].

@@ -33,8 +33,7 @@ class StandaloneWindowGeometry {
   int get hashCode => Object.hash(width, height, deviceScaleFactor);
 
   @override
-  String toString() =>
-      '${width}x$height @${deviceScaleFactor}x';
+  String toString() => '${width}x$height @${deviceScaleFactor}x';
 }
 
 /// A standalone Windows Matrix surface in a roscord-owned window.
@@ -78,6 +77,7 @@ class StandaloneBrowserSurface {
   int _nextSequence = 1;
   bool _ready = false;
   bool _closed = false;
+  bool _hostLost = false;
   StandaloneWindowGeometry _geometry = const StandaloneWindowGeometry(
     width: 1024,
     height: 768,
@@ -89,6 +89,12 @@ class StandaloneBrowserSurface {
   SurfaceId? get surfaceId => _surfaceId;
   bool get isReady => _ready;
   bool get isClosed => _closed;
+
+  /// Accessible reconnecting state shown when the host is lost. Host loss
+  /// never takes down the app: the surface reports reconnecting and [close]
+  /// still wins. Other surfaces on the same runtime remain usable.
+  bool get isReconnecting => _hostLost && !_closed;
+  bool get isHostLost => _hostLost;
   bool get isFocused => _focused;
   StandaloneWindowGeometry get geometry => _geometry;
 
@@ -114,7 +120,13 @@ class StandaloneBrowserSurface {
     switch (event) {
       case ReadyEvent():
         _ready = true;
-      case WindowChangedEvent(change: ResizedWindow(:final width, :final height, :final deviceScaleFactor)):
+      case WindowChangedEvent(
+          change: ResizedWindow(
+            :final width,
+            :final height,
+            :final deviceScaleFactor
+          )
+        ):
         _geometry = StandaloneWindowGeometry(
           width: width,
           height: height,
@@ -224,8 +236,7 @@ class StandaloneBrowserSurface {
   /// windowed browser repaints at the new size, and reports the validated
   /// geometry back as a `window_changed` event. DPI travels as
   /// [deviceScaleFactor].
-  Future<void> resize(int width, int height, double deviceScaleFactor) =>
-      _send(
+  Future<void> resize(int width, int height, double deviceScaleFactor) => _send(
         (sequence) => SurfaceCommand.resize(
           sequence: sequence,
           profileKey: _spec.profileKey,
@@ -255,7 +266,21 @@ class StandaloneBrowserSurface {
   Future<void> close() async {
     final id = _surfaceId;
     if (id == null || _closed) return;
+    _closed = true;
     await _runtime.close(id);
+  }
+
+  /// Records a host-loss observation without taking down the app. The
+  /// surface reports reconnecting and [close] still wins. Other surfaces on
+  /// the same runtime are untouched.
+  void noteHostLost() {
+    if (_closed) return;
+    _hostLost = true;
+  }
+
+  /// Clears the reconnecting state after the host restores this surface.
+  void noteRestored() {
+    _hostLost = false;
   }
 
   Future<void> dispose() async {
@@ -307,7 +332,11 @@ class _StandaloneBrowserWindowState extends State<StandaloneBrowserWindow> {
         if (event is ClosedEvent) _closed = true;
         if (event is WindowChangedEvent) {
           switch (event.change) {
-            case ResizedWindow(:final width, :final height, :final deviceScaleFactor):
+            case ResizedWindow(
+                :final width,
+                :final height,
+                :final deviceScaleFactor
+              ):
               _geometry = StandaloneWindowGeometry(
                 width: width,
                 height: height,
@@ -337,7 +366,11 @@ class _StandaloneBrowserWindowState extends State<StandaloneBrowserWindow> {
           if (event is ClosedEvent) _closed = true;
           if (event is WindowChangedEvent) {
             switch (event.change) {
-              case ResizedWindow(:final width, :final height, :final deviceScaleFactor):
+              case ResizedWindow(
+                  :final width,
+                  :final height,
+                  :final deviceScaleFactor
+                ):
                 _geometry = StandaloneWindowGeometry(
                   width: width,
                   height: height,

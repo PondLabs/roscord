@@ -87,11 +87,19 @@ class EmbeddedBrowserSurface {
   int _nextSequence = 1;
   bool _ready = false;
   bool _closed = false;
+  bool _hostLost = false;
 
   SurfaceSpec get spec => _spec;
   SurfaceId? get surfaceId => _surfaceId;
   bool get isReady => _ready;
   bool get isClosed => _closed;
+
+  /// Accessible reconnecting state shown when the host is lost. Host loss
+  /// never takes down the app: the pending frame is dropped, the surface
+  /// reports reconnecting, and [close] still wins. Other surfaces on the
+  /// same runtime remain usable.
+  bool get isReconnecting => _hostLost && !_closed;
+  bool get isHostLost => _hostLost;
   int? get textureId => _textureId;
   FrameReference? get latestFrame => frames.latest;
 
@@ -256,7 +264,23 @@ class EmbeddedBrowserSurface {
   Future<void> close() async {
     final id = _surfaceId;
     if (id == null || _closed) return;
+    _closed = true;
+    frames.clear();
     await _runtime.close(id);
+  }
+
+  /// Records a host-loss observation without taking down the app. The
+  /// pending frame is dropped, the surface reports reconnecting, and
+  /// [close] still wins. Other surfaces on the same runtime are untouched.
+  void noteHostLost() {
+    if (_closed) return;
+    _hostLost = true;
+    frames.clear();
+  }
+
+  /// Clears the reconnecting state after the host restores this surface.
+  void noteRestored() {
+    _hostLost = false;
   }
 
   Future<void> dispose() async {
@@ -355,7 +379,8 @@ class _EmbeddedBrowserViewState extends State<EmbeddedBrowserView> {
     final frame = _frame;
     if (_closed) {
       return widget.placeholder ??
-          const Text('Embedded browser closed', textDirection: TextDirection.ltr);
+          const Text('Embedded browser closed',
+              textDirection: TextDirection.ltr);
     }
     if (textureId != null && frame != null) {
       return Texture(textureId: textureId);
