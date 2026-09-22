@@ -167,6 +167,9 @@ QUALIFY_TOOL = (ROOT / "tools" / "qualify_windows_artifact.py").read_text(
 WINDOWS_ARTIFACT_DOC = (
     ROOT / "docs" / "cef-browser-runtime-windows-artifacts.md"
 ).read_text(encoding="utf-8")
+WINDOWS_ARTIFACT_DOC = (
+    ROOT / "docs" / "cef-browser-runtime-windows-artifacts.md"
+).read_text(encoding="utf-8")
 LINUX_ARTIFACT_DART = (
     ROOT / "commet" / "lib" / "browser_runtime" / "linux_artifact_qualification.dart"
 ).read_text(encoding="utf-8")
@@ -187,6 +190,12 @@ DEBIAN_CONTROL_2204 = (
 ).read_text(encoding="utf-8")
 DEBIAN_CONTROL_2404 = (
     ROOT / "commet" / "linux" / "debian" / "DEBIAN" / "control-ubuntu-24.04"
+).read_text(encoding="utf-8")
+QUALIFY_FLATPAK_TOOL = (ROOT / "tools" / "qualify_flatpak_artifact.py").read_text(
+    encoding="utf-8"
+)
+FLATPAK_ARTIFACT_DOC = (
+    ROOT / "docs" / "cef-browser-runtime-flatpak-artifacts.md"
 ).read_text(encoding="utf-8")
 
 
@@ -1502,7 +1511,6 @@ class CefHostContractTests(unittest.TestCase):
         self.assertIn("disable-gpu", SOURCE)
         self.assertIn("forced CPU", WINDOWS_ARTIFACT_DOC + EMBEDDED_DART)
 
-
     def test_linux_artifacts_stage_bundled_payload_and_sandbox_route(self) -> None:
         for token in (
             "requiredLinuxRuntimeFiles",
@@ -1670,6 +1678,140 @@ class CefHostContractTests(unittest.TestCase):
         self.assertIn("mediaEmbedUsesCef", LINUX_ARTIFACT_TEST)
         self.assertIn("isWindows", MEDIA_ADAPTER)
         self.assertNotIn("isLinux", MEDIA_ADAPTER + LINUX_ARTIFACT_DART)
+
+    def test_flatpak_artifact_staging_covers_the_locked_payload(self) -> None:
+        # The Flatpak files root carries the flattened linux-x64 runtime
+        # under cef/ (/app at runtime); the offline qualification tool
+        # enforces the same set against built Flatpak artifacts.
+        for token in (
+            "libcef.so",
+            "chrome-sandbox",
+            "libEGL.so",
+            "libGLESv2.so",
+            "libvk_swiftshader.so",
+            "libvulkan.so.1",
+            "vk_swiftshader_icd.json",
+            "v8_context_snapshot.bin",
+        ):
+            self.assertIn(token, QUALIFY_FLATPAK_TOOL, f"qualifier is missing: {token}")
+        # Resource pak inputs are lock-driven; they must appear across the
+        # qualifier doc/layout, the lock, and the artifact doc.
+        for token in (
+            "chrome_100_percent.pak",
+            "chrome_200_percent.pak",
+            "icudtl.dat",
+            "resources.pak",
+            "en-US.pak",
+        ):
+            self.assertIn(
+                token,
+                QUALIFY_FLATPAK_TOOL + CEF_LOCK + FLATPAK_ARTIFACT_DOC,
+                f"staging is missing: {token}",
+            )
+        for token in (
+            "find_cef_payload",
+            "check_staged",
+            "check_hashes",
+            "libcef.so",
+            "/app",
+        ):
+            self.assertIn(token, QUALIFY_FLATPAK_TOOL)
+        self.assertIn("qualify_flatpak_artifact", FLATPAK_ARTIFACT_DOC)
+        self.assertIn("/app/cef/libcef.so", FLATPAK_DART + FLATPAK_RUST)
+        self.assertIn("cef", FLATPAK_ARTIFACT_DOC)
+
+    def test_flatpak_artifact_manifests_notices_sbom_and_signatures(self) -> None:
+        for token in (
+            "check_hashes",
+            "check_metadata",
+            "check_signatures",
+            "check_manifest",
+            "cef.runtime.manifest.json",
+            "cef.sbom.cdx.json",
+            "THIRD_PARTY_NOTICES.txt",
+            "cef.provenance.json",
+            "signatures.json",
+            "--require-signatures",
+            "CycloneDX",
+            "runtime_download",
+            "bundled-release-payload",
+        ):
+            self.assertIn(token, QUALIFY_FLATPAK_TOOL)
+        self.assertIn("OSTree", FLATPAK_ARTIFACT_DOC)
+        self.assertIn("signatures.json", FLATPAK_ARTIFACT_DOC)
+        self.assertIn("CycloneDX", FLATPAK_ARTIFACT_DOC)
+        self.assertIn("THIRD_PARTY_NOTICES", FLATPAK_ARTIFACT_DOC)
+        # The release Flatpak job qualifies the files root after it is
+        # built; a qualification failure blocks the artifact.
+        self.assertIn("qualify_flatpak_artifact", RELEASE_WORKFLOW)
+
+    def test_flatpak_sandbox_manifest_portals_and_denial_pass(self) -> None:
+        # Least-privilege finish-args plus portal mediation with fail-closed
+        # denial are proven by the presenter suites and re-checked by the
+        # artifact qualifier against the real manifest.
+        for token in (
+            "REQUIRED_FINISH_ARGS",
+            "FORBIDDEN_FINISH_ARG_FRAGMENTS",
+            "check_sandbox_helpers",
+            "--device=all",
+            "flatpak-spawn",
+            "--no-sandbox",
+        ):
+            self.assertIn(token, QUALIFY_FLATPAK_TOOL)
+        for token in (
+            "--share=ipc",
+            "--socket=fallback-x11",
+            "--socket=wayland",
+            "--socket=pulseaudio",
+            "--share=network",
+            "--device=dri",
+        ):
+            self.assertIn(token, FLATPAK_MANIFEST)
+            self.assertIn(token, QUALIFY_FLATPAK_TOOL)
+        self.assertNotIn("--device=all", FLATPAK_MANIFEST)
+        for token in (
+            "flatpakUsesPortalForCapability",
+            "assertFlatpakPortalDenialKeepsSandbox",
+            "CapturePortalOutcome",
+        ):
+            self.assertIn(token, FLATPAK_DART + FLATPAK_RUST + MEDIA_RUST)
+        self.assertIn("denial", FLATPAK_ARTIFACT_DOC.lower())
+        self.assertIn("never broadens", FLATPAK_ARTIFACT_DOC.lower())
+        self.assertIn("portal", FLATPAK_ARTIFACT_DOC.lower())
+
+    def test_flatpak_surfaces_run_from_the_bundle_without_downloads(self) -> None:
+        # Embedded and standalone both resolve only under /app via the
+        # BrowserRuntime seam; no surface may reach a host CEF, a download,
+        # or a foreign engine.
+        for token in (
+            "check_no_foreign_backends",
+            "webkitgtk",
+            "desktop_webview_window",
+            "cef_binary_",
+            "/run/host",
+        ):
+            self.assertIn(token.lower(), QUALIFY_FLATPAK_TOOL.lower())
+        self.assertIn("/app", FLATPAK_DART)
+        self.assertIn("/app", FLATPAK_RUST)
+        self.assertIn("resolveFlatpakCefBundlePath", FLATPAK_DART)
+        self.assertIn("isHostCefPath", FLATPAK_DART)
+        self.assertIn("isHostWebKitGtkPath", FLATPAK_DART)
+        self.assertNotIn("cef-builds.spotifycdn.com", FLATPAK_DART)
+        self.assertNotIn("cef-builds.spotifycdn.com", FLATPAK_RUST)
+        self.assertIn("no host cef", FLATPAK_ARTIFACT_DOC.lower())
+
+    def test_flatpak_forced_cpu_remains_functional(self) -> None:
+        for token in (
+            "check_cpu_fallback",
+            "libvk_swiftshader.so",
+            "libEGL.so",
+            "libGLESv2.so",
+            "cef-osr-cpu",
+        ):
+            self.assertIn(token, QUALIFY_FLATPAK_TOOL + FLATPAK_DART + FLATPAK_RUST)
+        self.assertIn("cpu", FLATPAK_ARTIFACT_DOC.lower())
+        self.assertIn("forced CPU", FLATPAK_ARTIFACT_DOC)
+
 
 if __name__ == "__main__":
     unittest.main()
