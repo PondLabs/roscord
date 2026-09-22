@@ -130,3 +130,40 @@ another engine view. Forced software rendering uses the same host flag with
 the same input/resize/focus/close contract in software; cleanup shares the
 same `CloseBrowser`/`OnBrowserClosed`/`Shutdown` path and request-context
 release as embedded.
+
+## Official video (MediaEmbedAdapter, #126)
+
+`MediaEmbedAdapter`
+(`commet/lib/client/components/video_embed/media_embed_adapter.dart`)
+migrates Windows official-video playback through the same four-operation seam.
+Only `OfficialVideoEmbedSource` enters CEF; native direct-stream sources keep
+using the media-kit player, including the Linux yt-dlp/mpv path, which is
+never adapted.
+
+- `MediaEmbedLaunch` is the immutable caller record: provider embed URL,
+  autoplay flag, `official-video` shared persistent profile (third-party
+  provider cookies, not Matrix account state), embedded presentation, and the
+  loopback wrapper URI. Standalone presentation is rejected at construction:
+  no standalone official-video surface exists.
+- The wrapper page is byte-identical in contract to the WebView one: served
+  from `http://127.0.0.1:<port>/embed` (real origin, so provider iframes send
+  a Referer), `pageOrigin` stays `https://www.youtube.com` for YouTube,
+  autoplay stays a URL parameter, and the iframe keeps
+  `allow="autoplay; encrypted-media; fullscreen; picture-in-picture"`,
+  `allowfullscreen`, and `referrerpolicy="strict-origin-when-cross-origin"`.
+- `toSurfaceSpec()` declares the embed host, page origin, the shared
+  YouTube/YouTube-nocookie/Instagram allowlist, and the loopback origin, with
+  `allowExternalNavigation: true`. Disallowed user-initiated links surface as
+  normalized `external` outcomes that the dialog opens via `LinkUtils`
+  (explicit external action, embed stays); blocked/cancelled outcomes are
+  cancellations with no callback.
+- `MediaEmbedSession` owns one `EmbeddedBrowserSurface`, exposes its
+  frame/event streams for the dialog's loading/error/retry/close chrome, and
+  forwards pointer/wheel/focus plus resize/DPI. `MediaEmbedAdapter` keeps one
+  active session with serialized opens. Disposal closes the runtime surface
+  and the loopback server: no profile, host, or owned-window leak.
+- Routing is Windows-only (`mediaEmbedUsesCef`: `!isWeb && isWindows`).
+  Linux keeps native yt-dlp/mpv when available or a deliberate external
+  browser; web, macOS, Android, and iOS keep their existing paths. No CEF
+  fallback and no standalone surface is added for Linux. The WebView branch
+  stays reachable on non-Windows platforms until the final cutover deletion.
