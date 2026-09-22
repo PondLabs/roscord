@@ -7,8 +7,6 @@ import 'package:commet/client/matrix/components/widgets/matrix_widget_message_ha
 import 'package:commet/client/matrix/matrix_timeline.dart';
 import 'package:commet/debug/log.dart';
 import 'package:matrix/matrix.dart';
-import 'package:matrix/matrix_api_lite/utils/try_get_map_extension.dart';
-import 'package:matrix/src/event.dart';
 
 class MatrixCapabilityReceiveEvent implements MatrixWidgetCapability {
   @override

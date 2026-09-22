@@ -14,6 +14,8 @@ widgets/calendar/android/local.properties
 .idea/
 /build
 /target
+.cache/cef/
+tools/__pycache__/
 commet/.livekit/
 commet/web/e2ee.worker.dart.js.map
 commet/web/e2ee.worker.dart.js.deps

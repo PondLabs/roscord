@@ -15,7 +15,7 @@ on 2026-09-14. Paths assume the Windows user `apbia`; adjust as needed.
 | Flutter 3.41.9 (the version CI pins) | `C:\Users\apbia\workspace\flutter-sdk\flutter` | Downloaded `https://storage.googleapis.com/flutter_infra_release/releases/stable/windows/flutter_windows_3.41.9-stable.zip` (1.8 GB) and extracted with Windows `tar.exe`. Not on the system PATH; prepend it per shell. |
 | Visual Studio 2022 Community, "Desktop development with C++" workload | default VS location | The workload was missing (only bare MSVC tools were installed, no CMake tools, no Windows SDK). Added with the VS installer, elevated. |
 | Rust stable (MSVC target) | `C:\Users\apbia\.cargo\bin` | Was 1.86; several crates in the lockfile refuse anything older than ~1.88. `rustup update stable` fixed it (now 1.98). |
-| `nuget.exe` | `C:\Users\apbia\workspace\tools\nuget.exe` | Required by `flutter_inappwebview_windows`' CMake step (it downloads WebView2 and WIL through NuGet). Downloaded from `https://dist.nuget.org/win-x86-commandline/latest/nuget.exe`. |
+| CEF SDK (pinned lock in `third_party/cef/`) | staged by `tools/cef_runtime.py` during the build | The cutover removed the old `nuget.exe`/WebView2 step: the Windows target links no WebView2 and downloads nothing at configure time. The bundled CEF runtime is staged, hash-verified, sandboxed, and signed per `docs/cef-browser-runtime-windows-artifacts.md`; run `python tools/qualify_windows_artifact.py` after the build. |
 | Native checkout | `C:\Users\apbia\workspace\roscord` | Cloned from the WSL repo (`git clone /home/lion/workspace/pondlabs/roscord /mnt/c/Users/apbia/workspace/roscord`), then `git remote set-url origin git@github.com:PondLabs/roscord.git`. Build from a native Windows path, not from `\\wsl.localhost\...`: the build is far slower there and plugin symlinks misbehave. |
 | Git long paths | global git config | `git config --global core.longpaths true` (CI does the same). |
 
@@ -30,10 +30,8 @@ curl -L -o /mnt/c/Users/apbia/workspace/flutter_windows_3.41.9-stable.zip \
   https://storage.googleapis.com/flutter_infra_release/releases/stable/windows/flutter_windows_3.41.9-stable.zip
 cmd.exe /c "cd /d C:\Users\apbia\workspace\flutter-sdk && tar -xf ..\flutter_windows_3.41.9-stable.zip"
 
-# nuget
-mkdir -p /mnt/c/Users/apbia/workspace/tools
-curl -L -o /mnt/c/Users/apbia/workspace/tools/nuget.exe \
-  https://dist.nuget.org/win-x86-commandline/latest/nuget.exe
+# CEF runtime: pinned in third_party/cef/ and staged/verified by
+# tools/cef_runtime.py during the build (no nuget.exe/WebView2 step remains)
 
 # Visual Studio workload (shows a UAC prompt; cmd.exe "start" cannot elevate, PowerShell can)
 powershell.exe -NoProfile -Command "Start-Process -FilePath 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\setup.exe' -ArgumentList 'modify','--installPath','\"C:\Program Files\Microsoft Visual Studio\2022\Community\"','--add','Microsoft.VisualStudio.Workload.NativeDesktop','--includeRecommended','--passive','--norestart' -Verb RunAs -Wait"
@@ -76,8 +74,7 @@ flutter build windows --release --dart-define PLATFORM=windows
 
 `codegen.dart` runs `flutter pub get`, intl generation and build_runner; it
 only needs re-running after pulling changes. The first full build takes
-roughly 10 minutes, most of it the Rust library (`wry`, `tao`, `image`)
-through cargokit.
+roughly 10 minutes, most of it the Rust library through cargokit.
 
 Output: `C:\Users\apbia\workspace\roscord\commet\build\windows\x64\runner\Release\`.
 `commet.exe` plus all DLLs (about 157 MB) is the whole app; the folder can be
@@ -96,10 +93,11 @@ cd /mnt/c/Users/apbia/workspace/roscord && git fetch /home/lion/workspace/pondla
 - **`start /wait setup.exe ...` from cmd.exe gives "Access is denied."** The
   VS installer needs elevation and cmd cannot request it. Use PowerShell
   `Start-Process -Verb RunAs`.
-- **`NUGET-NOTFOUND install Microsoft.Web.WebView2 ...` / exit code 9009**
-  during `flutter_inappwebview_windows`. `nuget.exe` was not on PATH. After
-  adding it, delete `commet\build\windows` so CMake re-runs its
-  `find_program`; the cached NOTFOUND otherwise persists.
+- **`flutter_inappwebview_windows` CMake step fails with missing native
+  sources.** The cutover replaced the upstream WebView2 plugin with the
+  no-op stub in `third_party/flutter_inappwebview_windows_stub/` (see its
+  README). After pulling, delete `commet\build\windows` so CMake re-runs
+  against the stub; the cached upstream paths otherwise persist.
 - **`rustc 1.86.0 is not supported by the following packages`** from
   cargokit. `rustup update stable`.
 - **`flutter doctor` lists "MSVC v142", "C++ CMake tools", "Windows 10 SDK" as

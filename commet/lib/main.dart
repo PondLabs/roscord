@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:commet/cache/file_cache.dart';
+import 'package:commet/browser_runtime.dart';
 import 'package:commet/client/client_manager.dart';
 import 'package:commet/client/components/component.dart';
 import 'package:commet/client/components/push_notification/android/unified_push_notifier.dart';
@@ -55,7 +56,6 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:tiamat/config/style/theme_changer.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:tiamat/config/style/theme_dark.dart';
-import 'package:desktop_webview_window/desktop_webview_window.dart';
 import 'package:tiamat/tiamat.dart' as tiamat;
 
 final GlobalKey<NavigatorState> navigator = GlobalKey();
@@ -64,6 +64,7 @@ Preferences preferences = Preferences();
 ShortcutsManager shortcutsManager = ShortcutsManager();
 BackgroundTaskManager backgroundTaskManager = BackgroundTaskManager();
 ClientManager? clientManager;
+BrowserRuntime? browserRuntime;
 
 bool isHeadless = false;
 
@@ -134,10 +135,6 @@ void bubble() async {
 void main(List<String> args) async {
   commandLineArgs = args;
   print(args);
-
-  if (runWebViewTitleBarWidget(args)) {
-    return;
-  }
 
   final format = DateFormat('HH:mm:ss');
 
@@ -216,6 +213,16 @@ Future<void> initNecessary() async {
   if ((PlatformUtils.isWindows || PlatformUtils.isLinux) && !_rustLibReady) {
     await RustLib.init();
     _rustLibReady = true;
+  }
+
+  // The desktop adapters start their single authenticated CEF host lazily
+  // on the first surface open; constructing them here makes the public
+  // runtime available to desktop callers without starting a process during
+  // startup. Windows uses named pipes, Linux uses an owner-only Unix socket.
+  if (PlatformUtils.isWindows) {
+    browserRuntime ??= WindowsBrowserRuntime();
+  } else if (PlatformUtils.isLinux) {
+    browserRuntime ??= LinuxBrowserRuntime();
   }
 
   fileCache = FileCache.getFileCacheInstance();

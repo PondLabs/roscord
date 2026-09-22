@@ -49,8 +49,7 @@ jobs:
             echo "dart=true" >> "$GITHUB_OUTPUT"
           fi
 
-          # Only crates that have tests: rust_lib_commet pulls in wry/tao and
-          # would need the whole GTK/WebKit stack just to compile.
+          # Only crates that have tests.
           crates=""
           for manifest in rust/*/Cargo.toml; do
             dir=$(dirname "$manifest")
@@ -59,6 +58,11 @@ jobs:
             fi
           done
           echo "rust_crates=$crates" >> "$GITHUB_OUTPUT"
+
+      - name: Verify locked CEF release inputs
+        run: |
+          python3 tools/cef_runtime.py validate-lock
+          python3 -m unittest tools.test_cef_runtime tools.test_cef_host_contract
 
       - name: Setup Rust
         if: steps.find.outputs.rust_crates != '' || steps.find.outputs.dart == 'true'

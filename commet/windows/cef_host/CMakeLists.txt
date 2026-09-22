@@ -1,0 +1,111 @@
+cmake_minimum_required(VERSION 3.21)
+
+# The Windows host is deliberately opt-in.  The normal Flutter build does not
+# have a CEF distribution in its source tree; release jobs enable this target
+# after tools/cef_runtime.py has staged the locked build SDK.  The SDK staging
+# command verifies the exact archive digest and combines the SDK inputs with
+# the allow-listed runtime files in a build-only directory.
+if(NOT WIN32)
+  message(FATAL_ERROR "roscord's cef_host target is Windows-only")
+endif()
+
+if(NOT DEFINED CEF_ROOT OR CEF_ROOT STREQUAL "")
+  message(FATAL_ERROR
+    "CEF_ROOT must point at the locked CEF distribution when building cef_host")
+endif()
+
+get_filename_component(CEF_ROOT "${CEF_ROOT}" ABSOLUTE)
+if(NOT EXISTS "${CEF_ROOT}/include/cef_app.h")
+  message(FATAL_ERROR "CEF_ROOT does not contain the CEF headers: ${CEF_ROOT}")
+endif()
+
+list(APPEND CMAKE_MODULE_PATH "${CEF_ROOT}/cmake")
+find_package(CEF REQUIRED)
+
+# libcef_dll_wrapper is the only CEF library linked by the client DLL.  The
+# standard SDK exposes its source through CEF_LIBCEF_DLL_WRAPPER_PATH (usually
+# `${CEF_ROOT}/libcef_dll`).  The official M138+ bootstrap owns the process
+# entry point and sandbox setup; the client DLL exports RunWinMain and receives
+# the bootstrap sandbox handle.
+if(NOT DEFINED CEF_LIBCEF_DLL_WRAPPER_PATH OR
+   CEF_LIBCEF_DLL_WRAPPER_PATH STREQUAL "")
+  set(CEF_LIBCEF_DLL_WRAPPER_PATH "${CEF_ROOT}/libcef_dll")
+endif()
+if(NOT EXISTS "${CEF_LIBCEF_DLL_WRAPPER_PATH}/CMakeLists.txt")
+  message(FATAL_ERROR
+    "CEF SDK is missing libcef_dll/CMakeLists.txt: ${CEF_LIBCEF_DLL_WRAPPER_PATH}")
+endif()
+add_subdirectory("${CEF_LIBCEF_DLL_WRAPPER_PATH}"
+  "${CMAKE_CURRENT_BINARY_DIR}/libcef_dll_wrapper")
+
+add_library(cef_host_client SHARED
+  cef_host.cpp
+  cef_host.rc
+)
+
+set_target_properties(cef_host_client PROPERTIES
+  OUTPUT_NAME "client"
+  PREFIX ""
+  SUFFIX ".dll"
+)
+
+target_compile_features(cef_host_client PRIVATE cxx_std_17)
+target_compile_definitions(cef_host_client PRIVATE
+  UNICODE
+  _UNICODE
+  NOMINMAX
+  CEF_USE_BOOTSTRAP
+  USE_SANDBOX
+  CEF_API_VERSION=CEF_API_VERSION_LAST
+)
+target_compile_options(cef_host_client PRIVATE /W4 /WX /EHsc /wd4100)
+target_include_directories(cef_host_client PRIVATE
+  "${CEF_ROOT}"
+  "${CEF_ROOT}/include"
+)
+target_link_libraries(cef_host_client PRIVATE
+  libcef_dll_wrapper
+  advapi32.lib
+  shell32.lib
+)
+
+# Keep a stable logical target name for release scripts and CI.  The output is
+# client.dll because bootstrap.exe loads that exact module name.
+add_custom_target(cef_host DEPENDS cef_host_client)
+
+set(CEF_RELEASE_DIR "${CEF_ROOT}/Release")
+set(CEF_RESOURCES_DIR "${CEF_ROOT}/Resources")
+if(NOT EXISTS "${CEF_RELEASE_DIR}/bootstrap.exe")
+  message(FATAL_ERROR "locked CEF Release/bootstrap.exe is missing")
+endif()
+
+add_custom_command(TARGET cef_host_client POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${CEF_RELEASE_DIR}/bootstrap.exe"
+    "$<TARGET_FILE_DIR:cef_host_client>/cef_host.exe"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "$<TARGET_FILE:cef_host_client>"
+    "$<TARGET_FILE_DIR:cef_host_client>/client.dll"
+  COMMENT "Staging the signed CEF bootstrap and roscord client DLL"
+  VERBATIM
+)
+
+# CEF's standard distribution keeps the Release/Resources split.  Copying the
+# runtime at install time preserves that layout and prevents a system CEF lookup.
+install(TARGETS cef_host_client RUNTIME DESTINATION cef_host LIBRARY DESTINATION cef_host)
+install(FILES "${CEF_RELEASE_DIR}/bootstrap.exe" DESTINATION cef_host RENAME cef_host.exe)
+install(DIRECTORY "${CEF_RELEASE_DIR}/" DESTINATION cef_host
+  FILES_MATCHING
+  PATTERN "*.dll"
+  PATTERN "*.exe"
+  PATTERN "*.bin"
+  PATTERN "*.json"
+  PATTERN "*.pak"
+  PATTERN "bootstrap.exe" EXCLUDE
+)
+install(DIRECTORY "${CEF_RESOURCES_DIR}/" DESTINATION cef_host/Resources)
+install(FILES
+  "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
+  "${CMAKE_CURRENT_SOURCE_DIR}/fixture.html"
+  DESTINATION cef_host/fixtures
+)

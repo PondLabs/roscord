@@ -9,21 +9,14 @@ import 'package:commet/client/matrix/components/widgets/matrix_widget_message_ha
 import 'package:commet/client/matrix/components/widgets/matrix_widget_transport.dart';
 import 'package:commet/client/matrix/matrix_client.dart';
 import 'package:commet/client/matrix/matrix_room.dart';
-import 'package:commet/config/build_config.dart';
-import 'package:commet/config/platform_utils.dart';
 import 'package:commet/debug/log.dart';
-import 'package:commet/main.dart';
 import 'package:commet/ui/navigation/adaptive_dialog.dart';
-import 'package:commet/utils/error_utils.dart';
 import 'package:commet/utils/notifying_list.dart';
 import 'package:commet/utils/rng.dart';
-import 'package:commet/utils/system_processes_utils.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:pretty_qr_code/pretty_qr_code.dart';
 import 'package:tiamat/tiamat.dart' as tiamat;
-import 'package:path/path.dart' as p;
 
 class MatrixUserWidgetRemoteHttpRunner implements MatrixWidgetRunner {
   @override
@@ -37,10 +30,7 @@ class MatrixUserWidgetRemoteHttpRunner implements MatrixWidgetRunner {
 
   late HttpServer server;
 
-  Process? externalBrowserProcess;
-
-  @override
-  UserWidgetInfo info;
+  late MatrixRemoteHttpWidgetTransceiver tx;
 
   @override
   NotifyingList<LogEntry> logs = NotifyingList.empty(growable: true);
@@ -54,7 +44,8 @@ class MatrixUserWidgetRemoteHttpRunner implements MatrixWidgetRunner {
   @override
   late WidgetCapabilityManager capabilities;
 
-  late MatrixRemoteHttpWidgetTransceiver tx;
+  @override
+  UserWidgetInfo info;
 
   StreamController _onClosed = StreamController.broadcast();
 
@@ -64,7 +55,6 @@ class MatrixUserWidgetRemoteHttpRunner implements MatrixWidgetRunner {
   bool useInsecureHttp;
 
   bool allowRemoteConnection;
-
   MatrixUserWidgetRemoteHttpRunner({
     required this.room,
     required String url,
@@ -73,7 +63,6 @@ class MatrixUserWidgetRemoteHttpRunner implements MatrixWidgetRunner {
     required HttpServer server,
     required BuildContext context,
     required String hostName,
-    required bool launchBrowser,
     required this.info,
     required this.useInsecureHttp,
     required this.allowRemoteConnection,
@@ -97,87 +86,17 @@ class MatrixUserWidgetRemoteHttpRunner implements MatrixWidgetRunner {
     capabilities =
         MatrixWidgetCapabilitiesManager(runner: this, context: context);
 
-    if (launchBrowser) {
-      var url = Uri(
-          scheme: "http",
-          host: hostName,
-          port: server.port,
-          queryParameters: {"token": secret});
-
-      Log.i("Launching browser with url: $url");
-
-      launchExternalBrowser(url);
-    } else {
-      showConnectionInfo(secret, hostName, context);
-    }
-  }
-
-  void launchExternalBrowser(Uri url) async {
-    ErrorUtils.tryRun(
-      navigator.currentContext!,
-      () async {
-        var tempDir = await getTemporaryDirectory();
-        var temp = p.join(tempDir.path, "chat.commet.app", "widget_runner");
-
-        Log.i("Launching chrome with temp location: $temp");
-
-        var knownChromiumBrowsers = ["chromium", "google-chrome"];
-
-        String? selectedBrowser;
-        for (var s in knownChromiumBrowsers) {
-          Log.i("Looking for browser: ${s}");
-          var result = await SystemProcessesUtils.runSubprocess("which", [s]);
-
-          if (result.exitCode == 0) {
-            selectedBrowser = s;
-            break;
-          }
-
-          Log.i("Which result: ${result.exitCode}");
-        }
-
-        if (selectedBrowser == null) {
-          throw Exception(
-              "Could not find any installed chromium browser to run widget");
-        }
-
-        var command = selectedBrowser;
-        var args = [
-          '--app=${url.toString()}',
-          '--no-first-run',
-          '--no-default-browser-check',
-          '--disable-background-networking',
-          '--disable-component-update',
-          '--user-data-dir=${temp}'
-        ];
-
-        if (BuildConfig.IS_FLATPAK) {
-          if (PlatformUtils.isDisplayServer(DisplayServer.Wayland)) {
-            args = ["--ozone-platform=wayland", ...args];
-          }
-        }
-
-        SystemProcessesUtils.spawnSubprocess(command, args).then((process) {
-          externalBrowserProcess = process;
-
-          process.exitCode.then((code) {
-            Log.i("Browser process terminated with code: $code");
-
-            dispose();
-          });
-        });
-      },
-      onError: () async {
-        dispose();
-      },
-    );
+    // Preserved remote-device flow: show the connection QR/link for another
+    // device. The cutover deleted the host-Chromium launcher that used to
+    // share this constructor: Matrix widgets never open in an unowned
+    // system browser anymore.
+    showConnectionInfo(secret, hostName, context);
   }
 
   @override
   Future<void> dispose() async {
     await server.close(force: true);
     _onClosed.add(null);
-    externalBrowserProcess?.kill(ProcessSignal.sigsegv);
   }
 
   void handleInitialConnection() async {

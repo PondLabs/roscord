@@ -7,7 +7,6 @@ import 'package:commet/client/components/push_notification/notification_manager.
 import 'package:commet/config/app_config.dart';
 import 'package:commet/config/build_config.dart';
 import 'package:commet/config/platform_utils.dart';
-import 'package:commet/debug/log.dart';
 import 'package:commet/diagnostic/diagnostics.dart';
 import 'package:commet/main.dart';
 import 'package:commet/ui/atoms/code_block.dart';
@@ -375,37 +374,6 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
           Theme.of(context).colorScheme.surfaceContainerLow,
       children: [
         Wrap(spacing: 8, runSpacing: 8, children: [
-          tiamat.Button(
-              text: "Launch Widget Runner",
-              onTap: () async {
-                var exe = Platform.resolvedExecutable;
-
-                var process = await Process.start(exe, [
-                  '--widget_runner',
-                  '--title="roscord | Widget Runner"',
-                  '--url=${"https://github.com/PondLabs/roscord"}'
-                ]);
-
-                process.exitCode.then((i) {
-                  Log.i("Subprocess exited: $i");
-                });
-
-                AdaptiveDialog.show(context,
-                    builder: (context) => ProcessOutputViewer(
-                          process,
-                          showStdErr: true,
-                        )).then((_) {
-                  process.kill(ProcessSignal.sigkill);
-                });
-
-                for (int i = 0; i < 10; i++) {
-                  Log.i("Sending data to subprocess");
-                  process.stdin.writeln("Sending some data to stdin!!!");
-                  process.stdin.flush();
-
-                  await Future.delayed(Duration(seconds: 5));
-                }
-              }),
           tiamat.Button(
             text: "Get Process List",
             onTap: () async {
