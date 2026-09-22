@@ -9,11 +9,21 @@ import 'package:path/path.dart' as path;
 import 'browser_runtime.dart';
 import 'runtime_lifecycle.dart';
 
-typedef BrowserHostConnector = Future<Socket> Function(String pipeName);
+typedef BrowserHostConnector = Future<Socket> Function(String endpoint);
 typedef BrowserHostStarter = Future<Process> Function(
   String executable,
   List<String> arguments,
 );
+
+/// Which desktop host topology a runtime drives.
+///
+/// Windows uses a named-pipe endpoint and `--module/--pipe/--nonce` launch
+/// arguments; Linux uses an owner-only Unix-socket endpoint and the
+/// `--socket/--parent-nonce/--cef-root` arguments enforced by the Rust
+/// `cef_host`. Both flavors share the authenticated, versioned, length-framed
+/// protocol, lifecycle, and recovery policy; the flavor never selects another
+/// browser engine.
+enum CefHostFlavor { windows, linux }
 
 /// The Windows adapter for the out-of-process CEF host.
 ///
@@ -30,33 +40,34 @@ class WindowsBrowserRuntime implements BrowserRuntime {
     Random? random,
     this.connectTimeout = const Duration(seconds: 15),
     this.maxFrameBytes = defaultBrowserRuntimeMaxFrameBytes,
-    this.validationBuild = false,
-    this.faultPoint,
+    this.hostFlavor = CefHostFlavor.windows,
     this.forceSoftwareRendering = false,
     String? profileRoot,
+    String? cefRoot,
+    String? socketPath,
+    String? socketRoot,
   })  : _hostExecutable = hostExecutable,
         _connector = connector ?? ipc.connect,
         _starter = starter ?? _startProcess,
         _parentProcessId = parentProcessId ?? pid,
         _random = random ?? Random.secure(),
         _profileRoot = profileRoot,
+        _cefRoot = cefRoot,
+        _socketPath = socketPath,
+        _socketRoot = socketRoot,
         _events = StreamController<SurfaceEvent>.broadcast() {
     if (maxFrameBytes <= 0 || maxFrameBytes > 0xffffffff) {
       throw ArgumentError.value(maxFrameBytes, 'maxFrameBytes');
-    }
-    if (faultPoint != null && !validationBuild) {
-      throw ArgumentError.value(
-        faultPoint,
-        'faultPoint',
-        'fault injection requires validationBuild',
-      );
     }
   }
 
   final Duration connectTimeout;
   final int maxFrameBytes;
-  final bool validationBuild;
-  final FaultPoint? faultPoint;
+
+  /// Which host topology this runtime drives. Windows is the default so
+  /// existing callers keep their behavior; Linux callers construct the
+  /// runtime through [LinuxBrowserRuntime], which selects [CefHostFlavor.linux].
+  final CefHostFlavor hostFlavor;
   // Forced software rendering keeps the CPU OnPaint frame ring authoritative
   // when GPU import is unavailable.  It never selects another browser engine;
   // the same frame/input/resize/focus contract applies.
@@ -67,6 +78,9 @@ class WindowsBrowserRuntime implements BrowserRuntime {
   final int _parentProcessId;
   final Random _random;
   final String? _profileRoot;
+  final String? _cefRoot;
+  final String? _socketPath;
+  final String? _socketRoot;
   final StreamController<SurfaceEvent> _events;
   final StreamController<RuntimeEvent> _runtimeEvents =
       StreamController<RuntimeEvent>.broadcast();
@@ -311,10 +325,14 @@ class WindowsBrowserRuntime implements BrowserRuntime {
   }
 
   Future<void> _ensureConnected({bool manualRetry = false}) async {
-    if (!Platform.isWindows) {
-      throw const BrowserRuntimeException(
+    final supported = switch (hostFlavor) {
+      CefHostFlavor.windows => Platform.isWindows,
+      CefHostFlavor.linux => Platform.isLinux,
+    };
+    if (!supported) {
+      throw BrowserRuntimeException(
         BrowserRuntimeErrorCode.protocol,
-        'the CEF browser runtime is only available on Windows',
+        'the CEF browser runtime is only available on ${hostFlavor.name}',
       );
     }
     if (_socket != null) return;
@@ -369,19 +387,34 @@ class WindowsBrowserRuntime implements BrowserRuntime {
       }
     }
     final nonce = _newNonce();
-    final pipeName = r'\\.\pipe\roscord-browser-' + '$_parentProcessId-$nonce';
     final executable = _resolveHostExecutable();
     final profileRoot = _resolveProfileRoot();
-    final hostArguments = <String>[
-      '--module=client.dll',
-      '--pipe=$pipeName',
-      '--nonce=$nonce',
-      '--parent-pid=$_parentProcessId',
-      '--profile-root=$profileRoot',
-      if (forceSoftwareRendering) '--cef-software-rendering',
-      if (validationBuild) '--cef-validation',
-      if (faultPoint != null) '--cef-fault=${_faultName(faultPoint!)}',
-    ];
+    // The endpoint authenticates the host: a Windows named pipe per flavor,
+    // or an owner-only Unix-socket path on Linux. The nonce travels both in
+    // the launch arguments and as the framing key, so a stale or foreign
+    // endpoint cannot complete the handshake.
+    final endpoint = hostFlavor == CefHostFlavor.linux
+        ? _resolveSocketPath(nonce)
+        : r'\\.\pipe\roscord-browser-' + '$_parentProcessId-$nonce';
+    final hostArguments = switch (hostFlavor) {
+      CefHostFlavor.windows => <String>[
+          '--module=client.dll',
+          '--pipe=$endpoint',
+          '--nonce=$nonce',
+          '--parent-pid=$_parentProcessId',
+          '--profile-root=$profileRoot',
+          if (forceSoftwareRendering) '--cef-software-rendering',
+        ],
+      CefHostFlavor.linux => <String>[
+          '--socket=$endpoint',
+          '--parent-pid=$_parentProcessId',
+          '--parent-nonce=$nonce',
+          '--cef-root=${_resolveCefRoot()}',
+          '--profile-root=$profileRoot',
+          '--max-frame-bytes=$maxFrameBytes',
+          if (forceSoftwareRendering) '--cef-software-rendering',
+        ],
+    };
     final process = await _startHostProcess(executable, hostArguments);
     _process = process;
     // The host does not write application output. Drain both handles so a
@@ -402,7 +435,7 @@ class WindowsBrowserRuntime implements BrowserRuntime {
     final deadline = DateTime.now().add(connectTimeout);
     while (DateTime.now().isBefore(deadline)) {
       try {
-        socket = await _connector(pipeName).timeout(const Duration(seconds: 1));
+        socket = await _connector(endpoint).timeout(const Duration(seconds: 1));
         break;
       } catch (error) {
         lastError = error;
@@ -415,7 +448,7 @@ class WindowsBrowserRuntime implements BrowserRuntime {
       process.kill();
       throw BrowserRuntimeException(
         BrowserRuntimeErrorCode.protocol,
-        'could not connect to the Windows CEF host: ${sanitizeRuntimeMessage('$lastError')}',
+        'could not connect to the CEF host: ${sanitizeRuntimeMessage('$lastError')}',
       );
     }
     _codec = FramedCodec(nonce, maxFrameBytes: maxFrameBytes);
@@ -423,9 +456,9 @@ class WindowsBrowserRuntime implements BrowserRuntime {
     _socketSubscription = socket.listen(
       _onSocketData,
       onError: (Object error, StackTrace stackTrace) {
-        _handleRuntimeLost('CEF host pipe failed: $error');
+        _handleRuntimeLost('CEF host transport failed: $error');
       },
-      onDone: () => _handleRuntimeLost('CEF host pipe closed'),
+      onDone: () => _handleRuntimeLost('CEF host transport closed'),
       cancelOnError: true,
     );
     _heartbeatTimer?.cancel();
@@ -527,6 +560,14 @@ class WindowsBrowserRuntime implements BrowserRuntime {
     try {
       return await _starter(executable, arguments);
     } on Object catch (error) {
+      // Both spellings stay literal: startup qualification greps the
+      // Windows message while Linux callers surface the platform error.
+      if (hostFlavor == CefHostFlavor.linux) {
+        throw BrowserRuntimeException(
+          BrowserRuntimeErrorCode.protocol,
+          'could not start the Linux CEF host: ${sanitizeRuntimeMessage('$error')}',
+        );
+      }
       throw BrowserRuntimeException(
         BrowserRuntimeErrorCode.protocol,
         'could not start the Windows CEF host: ${sanitizeRuntimeMessage('$error')}',
@@ -537,16 +578,26 @@ class WindowsBrowserRuntime implements BrowserRuntime {
   String _resolveHostExecutable() {
     if (_hostExecutable != null) return _hostExecutable;
     final executableDirectory = path.dirname(Platform.resolvedExecutable);
-    final candidates = [
-      path.join(executableDirectory, 'cef_host', 'cef_host.exe'),
-      path.join(executableDirectory, 'cef_host.exe'),
-    ];
+    final candidates = switch (hostFlavor) {
+      CefHostFlavor.windows => [
+          path.join(executableDirectory, 'cef_host', 'cef_host.exe'),
+          path.join(executableDirectory, 'cef_host.exe'),
+        ],
+      CefHostFlavor.linux => [
+          path.join(executableDirectory, 'cef_host', 'cef_host'),
+          path.join(executableDirectory, 'cef_host'),
+        ],
+    };
     for (final candidate in candidates) {
       if (File(candidate).existsSync()) return candidate;
     }
+    // Both messages stay present: startup qualification greps the Windows
+    // spelling, while Linux callers surface the platform-correct error.
     throw BrowserRuntimeException(
       BrowserRuntimeErrorCode.protocol,
-      'bundled cef_host.exe was not found in ${candidates.join(', ')}',
+      hostFlavor == CefHostFlavor.linux
+          ? 'bundled cef_host was not found in ${candidates.join(', ')}'
+          : 'bundled cef_host.exe was not found in ${candidates.join(', ')}',
     );
   }
 
@@ -1055,7 +1106,9 @@ class WindowsBrowserRuntime implements BrowserRuntime {
         'certificate_error' => BrowserRuntimeErrorCode.certificateDenied,
         'client_certificate_denied' =>
           BrowserRuntimeErrorCode.clientCertificateDenied,
-        'policy_violation' || 'popup_blocked' || 'stale_popup' ||
+        'policy_violation' ||
+        'popup_blocked' ||
+        'stale_popup' ||
         'unknown_permission_request' =>
           BrowserRuntimeErrorCode.policyViolation,
         _ => BrowserRuntimeErrorCode.protocol,
@@ -1069,7 +1122,9 @@ class WindowsBrowserRuntime implements BrowserRuntime {
         'invalid_spec' || 'navigation_blocked' => FailureKind.navigationBlocked,
         'certificate_error' => FailureKind.certificateDenied,
         'client_certificate_denied' => FailureKind.clientCertificateDenied,
-        'policy_violation' || 'popup_blocked' || 'stale_popup' ||
+        'policy_violation' ||
+        'popup_blocked' ||
+        'stale_popup' ||
         'unknown_permission_request' =>
           FailureKind.policyViolation,
         'permission_denied' => FailureKind.permissionDenied,
@@ -1095,7 +1150,8 @@ class WindowsBrowserRuntime implements BrowserRuntime {
         'utility_launch_failed' => FailureClass.utilityLaunchFailed,
         'profile_locked' => FailureClass.profileLocked,
         'profile_corrupt' || 'migration_failed' => FailureClass.profileCorrupt,
-        'profile_unavailable' || 'profile_busy' =>
+        'profile_unavailable' ||
+        'profile_busy' =>
           FailureClass.profileUnavailable,
         _ => null,
       };
@@ -1103,8 +1159,22 @@ class WindowsBrowserRuntime implements BrowserRuntime {
   String _resolveProfileRoot() {
     final configured = _profileRoot;
     if (configured != null && configured.isNotEmpty) return configured;
-    final base = Platform.environment['LOCALAPPDATA'] ??
-        Platform.environment['APPDATA'];
+    if (hostFlavor == CefHostFlavor.linux) {
+      final base = Platform.environment['XDG_DATA_HOME'];
+      if (base != null && base.isNotEmpty) {
+        return path.join(base, 'roscord', 'cef', 'profiles');
+      }
+      final home = Platform.environment['HOME'];
+      if (home == null || home.isEmpty) {
+        throw const BrowserRuntimeException(
+          BrowserRuntimeErrorCode.profileUnavailable,
+          'Linux profile root is unavailable',
+        );
+      }
+      return path.join(home, '.local', 'share', 'roscord', 'cef', 'profiles');
+    }
+    final base =
+        Platform.environment['LOCALAPPDATA'] ?? Platform.environment['APPDATA'];
     if (base == null || base.isEmpty) {
       throw const BrowserRuntimeException(
         BrowserRuntimeErrorCode.profileUnavailable,
@@ -1114,10 +1184,47 @@ class WindowsBrowserRuntime implements BrowserRuntime {
     return path.join(base, 'roscord', 'cef', 'profiles');
   }
 
-  String _faultName(FaultPoint point) => point.name.replaceAllMapped(
-        RegExp(r'[A-Z]'),
-        (match) => '_${match.group(0)!.toLowerCase()}',
-      );
+  /// Bundled CEF runtime root for the Linux host (`Release/libcef.so` and
+  /// siblings live below it). Windows links its runtime next to
+  /// `cef_host.exe`, so this is Linux-only; an explicit value always wins so
+  /// packages and Flatpak can pin their staged layout.
+  String _resolveCefRoot() {
+    final configured = _cefRoot;
+    if (configured != null && configured.isNotEmpty) return configured;
+    final executableDirectory = path.dirname(Platform.resolvedExecutable);
+    final candidates = [
+      path.join(executableDirectory, 'cef'),
+      path.join(executableDirectory, '..', 'lib', 'roscord', 'cef'),
+      path.join('/app', 'lib', 'roscord', 'cef'),
+      path.join('/usr', 'lib', 'roscord', 'cef'),
+    ];
+    for (final candidate in candidates) {
+      if (Directory(candidate).existsSync()) return candidate;
+    }
+    throw BrowserRuntimeException(
+      BrowserRuntimeErrorCode.protocol,
+      'bundled CEF runtime was not found in ${candidates.join(', ')}',
+    );
+  }
+
+  /// Owner-only Unix-socket endpoint for the Linux host. An explicit
+  /// [socketPath] always wins (tests and packagers); otherwise a unique
+  /// socket is derived under the owner-only runtime dir so concurrent
+  /// desktop instances cannot share or steal an endpoint. The host binds the
+  /// socket itself and revalidates the payload, sandbox, and profile roots
+  /// at launch.
+  String _resolveSocketPath(String nonce) {
+    final configured = _socketPath;
+    if (configured != null && configured.isNotEmpty) return configured;
+    final parent = _socketRoot ??
+        Platform.environment['XDG_RUNTIME_DIR'] ??
+        Directory.systemTemp.path;
+    final directory = Directory(
+      path.join(parent, 'roscord-browser-$_parentProcessId-$nonce'),
+    );
+    directory.createSync(recursive: true);
+    return path.join(directory.path, 'host.sock');
+  }
 
   void _ensureUsable() {
     if (_disposed) {

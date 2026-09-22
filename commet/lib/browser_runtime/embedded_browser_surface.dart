@@ -76,6 +76,35 @@ class EmbeddedBrowserSurface {
   final SurfaceSpec _spec;
   final int? _textureId;
 
+  /// Attach presentation to a surface that an adapter (for example
+  /// [MatrixWidgetAdapter]) already opened through the same [runtime].
+  ///
+  /// The adapter resolves its open only after the host's `ReadyEvent`, so an
+  /// attached surface is ready by construction; subsequent frames and
+  /// lifecycle events flow through the new subscription. Protocol ownership
+  /// (close/dispose of the runtime surface) stays with the adapter: callers
+  /// must [dispose] the presentation without [close], then dispose the
+  /// adapter session.
+  EmbeddedBrowserSurface.attached({
+    required BrowserRuntime runtime,
+    required SurfaceSpec spec,
+    required SurfaceId surfaceId,
+    int? textureId,
+  })  : _runtime = runtime,
+        _spec = spec,
+        _textureId = textureId {
+    if (spec.presentation != PresentationMode.embedded) {
+      throw ArgumentError.value(
+        spec.presentation,
+        'spec.presentation',
+        'EmbeddedBrowserSurface requires PresentationMode.embedded',
+      );
+    }
+    _surfaceId = surfaceId;
+    _ready = true;
+    _subscription = _runtime.events().listen(_onEvent);
+  }
+
   final ClientFrameRing frames = ClientFrameRing();
   final StreamController<FrameReference> _frameStream =
       StreamController<FrameReference>.broadcast();

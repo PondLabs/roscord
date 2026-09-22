@@ -4,7 +4,7 @@
 //! transport.  The Windows and Linux adapters feed host/child observations
 //! into this controller and expose the resulting [`RuntimeEvent`] values to
 //! callers.  Keeping the policy here makes the backoff, command and shutdown
-//! rules deterministic in validation builds and in unit tests.
+//! rules deterministic in unit tests.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -1013,45 +1013,11 @@ fn prune(values: &mut VecDeque<u64>, now_ms: u64) {
     }
 }
 
-/// Fault points are accepted only by debug/validation builds.  Production
-/// binaries have no usable injection path.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FaultPoint {
-    HostCrash,
-    HostUnresponsive,
-    RendererCrash,
-    RendererOom,
-    RendererHang,
-    GpuCrash,
-    UtilityCrash,
-    BadBundle,
-    BadProtocol,
-    SandboxFailure,
-    ProfileLock,
-}
-
-impl FaultPoint {
-    pub fn parse(value: &str, validation_build: bool) -> Option<Self> {
-        if !validation_build {
-            return None;
-        }
-        Some(match value {
-            "host_crash" => Self::HostCrash,
-            "host_unresponsive" => Self::HostUnresponsive,
-            "renderer_crash" => Self::RendererCrash,
-            "renderer_oom" => Self::RendererOom,
-            "renderer_hang" => Self::RendererHang,
-            "gpu_crash" => Self::GpuCrash,
-            "utility_crash" => Self::UtilityCrash,
-            "bad_bundle" => Self::BadBundle,
-            "bad_protocol" => Self::BadProtocol,
-            "sandbox_failure" => Self::SandboxFailure,
-            "profile_lock" => Self::ProfileLock,
-            _ => return None,
-        })
-    }
-}
+/// The cutover deleted validation-only fault injection: there is no
+/// `--cef-validation` switch, no `--cef-fault` point, and no `FaultPoint`
+/// type. Recovery is driven only by real host, renderer, GPU, utility, and
+/// profile observations through [`RuntimeLifecycle`]; production binaries
+/// cannot select a fault path.
 
 #[cfg(test)]
 mod tests {
@@ -1223,9 +1189,21 @@ mod tests {
     }
 
     #[test]
-    fn fault_injection_is_hard_disabled_when_validation_is_off() {
-        assert!(FaultPoint::parse("host_crash", true).is_some());
-        assert!(FaultPoint::parse("host_crash", false).is_none());
-        assert!(FaultPoint::parse("unknown", true).is_none());
+    fn validation_and_fault_injection_controls_are_gone() {
+        // The cutover removed the validation switch and fault injection:
+        // recovery is driven only by real host observations, so there is no
+        // fault-point vocabulary left to parse. This test pins the deletion
+        // by asserting the lifecycle still classifies a real host crash
+        // without any injection hook.
+        let mut lifecycle = RuntimeLifecycle::new();
+        lifecycle.start(0).unwrap();
+        lifecycle.host_ready(0).unwrap();
+        let events = lifecycle.report_failure(
+            FailureClass::HostCrash,
+            None,
+            "real host exit".to_owned(),
+            1,
+        );
+        assert!(matches!(events[0].kind, RuntimeEventKind::Failure { .. }));
     }
 }

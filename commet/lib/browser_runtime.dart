@@ -13,3 +13,5 @@ export 'browser_runtime/surface_diagnostics.dart';
 export 'browser_runtime/surface_recovery.dart';
 export 'browser_runtime/windows_browser_runtime_stub.dart'
     if (dart.library.io) 'browser_runtime/windows_browser_runtime.dart';
+export 'browser_runtime/linux_browser_runtime_stub.dart'
+    if (dart.library.io) 'browser_runtime/linux_browser_runtime.dart';

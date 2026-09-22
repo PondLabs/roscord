@@ -30,9 +30,13 @@ class VideoPlaybackDialog extends StatefulWidget {
   final bool autoplay;
 
   /// Whether this platform can render an [OfficialVideoEmbedSource] in the
-  /// dialog. flutter_inappwebview has no Linux implementation, and the web
-  /// build has no iframe path yet, so those open the link in the browser.
-  static bool get supportsOfficialEmbeds => !kIsWeb && !Platform.isLinux;
+  /// dialog. Windows plays official embeds unconditionally through the CEF
+  /// [MediaEmbedAdapter] after the cutover; macOS, Android, and iOS keep
+  /// their existing web view. Linux has no web view for the official player
+  /// and the web build has no iframe path yet, so those open the link in
+  /// the browser.
+  static bool get supportsOfficialEmbeds =>
+      !kIsWeb && !Platform.isLinux && !Platform.isWindows;
 
   /// Whether YouTube can play in the native player instead: mpv hands a
   /// YouTube page to yt-dlp itself, when it is installed. This is the in-app
@@ -388,18 +392,7 @@ class _OfficialVideoEmbedState extends State<_OfficialVideoEmbed> {
   String? error;
   int revision = 0;
 
-  /// Loopback server hosting the wrapper page on platforms where the webview
-  /// cannot give an in-memory page an origin. See [_needsLoopbackServer].
-  HttpServer? pageServer;
-  Uri? pageServerUri;
-
   bool get supportsInAppWebView => VideoPlaybackDialog.supportsOfficialEmbeds;
-
-  /// WebView2 (Windows) loads in-memory HTML with `NavigateToString`, which
-  /// ignores `baseUrl` and gives the page an opaque origin. Frames inside it
-  /// then send no Referer, and YouTube refuses to play (error 153). Serving
-  /// the same page from 127.0.0.1 gives it a real origin.
-  bool get _needsLoopbackServer => !kIsWeb && Platform.isWindows;
 
   /// Playback URL with the preserved autoplay rule. Single source of truth
   /// is [mediaEmbedPlaybackUri] so the CEF adapter serves the same URL.
@@ -415,42 +408,6 @@ class _OfficialVideoEmbedState extends State<_OfficialVideoEmbed> {
   /// [mediaEmbedWrapperHtml] so the CEF adapter serves identical markup.
   String get wrapperHtml => mediaEmbedWrapperHtml(playbackUri);
 
-  @override
-  void initState() {
-    super.initState();
-    if (supportsInAppWebView && _needsLoopbackServer) {
-      _startPageServer();
-    }
-  }
-
-  Future<void> _startPageServer() async {
-    try {
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      server.listen((request) {
-        request.response.headers.contentType = ContentType.html;
-        request.response.write(wrapperHtml);
-        request.response.close();
-      });
-      if (!mounted) {
-        await server.close(force: true);
-        return;
-      }
-      setState(() {
-        pageServer = server;
-        pageServerUri = Uri.http('127.0.0.1:${server.port}', '/embed');
-      });
-    } catch (e, s) {
-      Log.onError(e, s, content: 'Failed to start embed page server');
-      if (mounted) setState(() => error = e.toString());
-    }
-  }
-
-  @override
-  void dispose() {
-    pageServer?.close(force: true);
-    super.dispose();
-  }
-
   /// Whether a navigation target stays inside the embed. Single source of
   /// truth is [mediaEmbedIsAllowedNavigation] so the CEF adapter enforces
   /// the same provider allowlist.
@@ -458,7 +415,6 @@ class _OfficialVideoEmbedState extends State<_OfficialVideoEmbed> {
         target,
         embedUri: widget.source.uri,
         pageOrigin: pageOrigin,
-        loopbackUri: pageServerUri,
       );
 
   @override
@@ -506,25 +462,22 @@ class _OfficialVideoEmbedState extends State<_OfficialVideoEmbed> {
       );
     }
 
-    final waitingForServer = _needsLoopbackServer && pageServerUri == null;
-
+    // The remaining InAppWebView branch serves macOS, Android, and iOS only:
+    // Windows runs through CEF above, Linux and web fall into the external
+    // path. The legacy Windows loopback workaround is gone with the old
+    // Windows web view.
     return Stack(
       fit: StackFit.expand,
       children: [
-        if (!waitingForServer && error == null)
+        if (error == null)
           InAppWebView(
             key: ValueKey(revision),
-            initialUrlRequest: _needsLoopbackServer
-                ? URLRequest(url: WebUri(pageServerUri.toString()))
-                : null,
-            initialData: _needsLoopbackServer
-                ? null
-                : InAppWebViewInitialData(
-                    data: wrapperHtml,
-                    baseUrl: WebUri(pageOrigin),
-                    mimeType: 'text/html',
-                    encoding: 'utf-8',
-                  ),
+            initialData: InAppWebViewInitialData(
+              data: wrapperHtml,
+              baseUrl: WebUri(pageOrigin),
+              mimeType: 'text/html',
+              encoding: 'utf-8',
+            ),
             initialSettings: InAppWebViewSettings(
               javaScriptEnabled: true,
               mediaPlaybackRequiresUserGesture: !widget.autoplay,
@@ -569,9 +522,6 @@ class _OfficialVideoEmbedState extends State<_OfficialVideoEmbed> {
                 loaded = false;
                 revision += 1;
               });
-              if (_needsLoopbackServer && pageServerUri == null) {
-                _startPageServer();
-              }
             },
             onOpenInBrowser: () {
               Navigator.pop(context);
@@ -588,8 +538,9 @@ class _OfficialVideoEmbedState extends State<_OfficialVideoEmbed> {
 
 /// Shared retry/close/error chrome for official-video embeds.
 ///
-/// Both the WebView branch and the CEF branch render this on load failure so
-/// retry, close, and error behavior stay identical across the engine change.
+/// Both the preserved web-view branch (macOS, Android, iOS) and the CEF
+/// branch render this on load failure so retry, close, and error behavior
+/// stay identical across the engine change.
 class _EmbedErrorView extends StatelessWidget {
   const _EmbedErrorView({
     required this.onRetry,
@@ -643,7 +594,7 @@ class _EmbedErrorView extends StatelessWidget {
 
 /// Windows official-video playback through the CEF [MediaEmbedAdapter].
 ///
-/// Replaces the WebView2 branch on Windows only: the same loopback-hosted
+/// Replaces the legacy Windows web-view branch: the same loopback-hosted
 /// wrapper page (origin and Referer preserved) opens as an embedded
 /// BrowserRuntime surface, the provider allowlist and navigation policy
 /// travel in the [SurfaceSpec], disallowed links become explicit external
@@ -701,7 +652,7 @@ class _CefOfficialVideoEmbedState extends State<_CefOfficialVideoEmbed> {
 
   /// Loopback server hosting the wrapper page. Serving from 127.0.0.1 gives
   /// the page a real origin so provider iframes send a Referer — the same
-  /// reason the WebView2 branch needed it.
+  /// reason the legacy Windows web-view branch needed it.
   Future<void> _startPageServer() async {
     if (_pageServerUri != null) return;
     try {

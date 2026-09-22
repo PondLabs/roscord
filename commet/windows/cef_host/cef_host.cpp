@@ -214,8 +214,6 @@ struct HostArgs {
   std::filesystem::path profile_root;
   std::string nonce;
   std::wstring module_name;
-  bool validation = false;
-  std::optional<std::string> fault;
   // Forced software rendering.  Available in every build (not validation-only):
   // the CPU OnPaint path is release-authoritative and must satisfy the same
   // frame/input/resize/focus contract as the default path.
@@ -288,22 +286,9 @@ bool ValidatePipeName(std::wstring_view pipe_name) {
   });
 }
 
-bool IsKnownFaultPoint(std::wstring_view fault) {
-  static constexpr std::array<std::wstring_view, 11> kFaultPoints = {
-      L"host_crash",       L"host_unresponsive", L"renderer_crash",
-      L"renderer_oom",     L"renderer_hang",     L"gpu_crash",
-      L"utility_crash",    L"bad_bundle",        L"bad_protocol",
-      L"sandbox_failure",  L"profile_lock",
-  };
-  return std::find(kFaultPoints.begin(), kFaultPoints.end(), fault) !=
-         kFaultPoints.end();
-}
-
 std::optional<HostArgs> ValidateHostArgs(const ParsedCommandLine& command_line,
                                           std::wstring& error) {
-  bool validation = false;
   bool software_rendering = false;
-  std::optional<std::wstring> fault_name;
   for (const auto& value : command_line.values) {
     const std::wstring lowered = Lowercase(value);
     for (const auto forbidden : kForbiddenSwitches) {
@@ -319,25 +304,18 @@ std::optional<HostArgs> ValidateHostArgs(const ParsedCommandLine& command_line,
       // the CPU OnPaint frame ring authoritative when GPU import is
       // unavailable; it never selects another browser engine.
       software_rendering = true;
-    } else if (lowered == L"--cef-validation") {
-#ifdef NDEBUG
-      error = L"CEF validation controls are disabled in production builds";
+    } else if (lowered == L"--cef-validation" ||
+               StartsWith(lowered, L"--cef-validation=")) {
+      // The cutover removed the validation switch: production routing is
+      // unconditional, so every spelling is rejected in all builds.
+      error = L"CEF validation controls were removed by the cutover";
       return std::nullopt;
-#else
-      validation = true;
-#endif
-    } else if (StartsWith(lowered, L"--cef-fault=")) {
-#ifdef NDEBUG
-      error = L"CEF fault injection is disabled in production builds";
+    } else if (lowered == L"--cef-fault" ||
+               StartsWith(lowered, L"--cef-fault=")) {
+      // Fault injection was removed with the validation switch; recovery is
+      // driven only by real host observations.
+      error = L"CEF fault injection was removed by the cutover";
       return std::nullopt;
-#else
-      const auto value_name = value.substr(std::wstring(L"--cef-fault=").size());
-      if (value_name.empty()) {
-        error = L"CEF fault point is empty";
-        return std::nullopt;
-      }
-      fault_name = value_name;
-#endif
     }
   }
 
@@ -352,28 +330,8 @@ std::optional<HostArgs> ValidateHostArgs(const ParsedCommandLine& command_line,
     return std::nullopt;
   }
 
-#ifndef NDEBUG
-  std::optional<std::string> fault;
-  if (fault_name.has_value()) {
-    if (!validation) {
-      error = L"CEF fault injection requires --cef-validation";
-      return std::nullopt;
-    }
-    const auto lowered_fault = Lowercase(*fault_name);
-    if (!IsKnownFaultPoint(lowered_fault)) {
-      error = L"unknown CEF fault point";
-      return std::nullopt;
-    }
-    fault = std::string(fault_name->begin(), fault_name->end());
-  }
-#else
-  std::optional<std::string> fault;
-#endif
-
   HostArgs result;
   result.module_name = *module;
-  result.validation = validation;
-  result.fault = fault;
   result.software_rendering = software_rendering;
   result.pipe_name = *pipe;
   result.profile_root = std::filesystem::path(*profile_root);
@@ -2226,7 +2184,6 @@ class HostController {
   uint64_t next_surface_id_ = 1;
   std::atomic<bool> stopping_ = false;
   std::condition_variable closed_condition_;
-  bool validation_fault_consumed_ = false;
   bool shutdown_timed_out_ = false;
 };
 
@@ -3692,20 +3649,6 @@ bool HostController::AuthenticateEnvelope(
 }
 
 bool HostController::HandleFrame(std::string_view body) {
-  if (args_.fault.has_value() && *args_.fault == "host_crash" &&
-      !validation_fault_consumed_) {
-    validation_fault_consumed_ = true;
-    stopping_ = true;
-    return false;
-  }
-  if (args_.fault.has_value() && *args_.fault == "bad_protocol" &&
-      !validation_fault_consumed_) {
-    validation_fault_consumed_ = true;
-    SendError(std::nullopt, "malformed_message",
-              "validation protocol fault");
-    stopping_ = true;
-    return false;
-  }
   auto decoded = CefParseJSON(std::string(body), JSON_PARSER_RFC);
   auto envelope = Dictionary(decoded);
   CefRefPtr<CefDictionaryValue> message;
@@ -3733,9 +3676,6 @@ bool HostController::HandleHeartbeat(CefRefPtr<CefDictionaryValue> payload) {
       payload->GetInt("request_id") <= 0) {
     SendError(std::nullopt, "invalid_command", "heartbeat payload is malformed");
     return false;
-  }
-  if (args_.fault.has_value() && *args_.fault == "host_unresponsive") {
-    return true;
   }
   SendHeartbeatAck(payload->GetInt("request_id"));
   return true;
@@ -3835,43 +3775,12 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
     return false;
   }
   const int request_id = payload->GetInt("request_id");
-  if (args_.fault.has_value() && *args_.fault == "profile_lock" &&
-      !validation_fault_consumed_) {
-    validation_fault_consumed_ = true;
-    SendError(request_id, "profile_locked", "validation profile lock fault");
-    return true;
-  }
   const int raw_surface_id = payload->GetInt("surface_id");
   if (raw_surface_id <= 0) {
     SendError(request_id, "invalid_command", "surface id must be positive");
     return false;
   }
   const uint64_t surface_id = static_cast<uint64_t>(raw_surface_id);
-  if (args_.fault.has_value() && !validation_fault_consumed_) {
-    std::string_view code;
-    std::string_view message;
-    if (*args_.fault == "renderer_crash") {
-      code = "renderer_crash";
-      message = "validation renderer crash";
-    } else if (*args_.fault == "renderer_oom") {
-      code = "renderer_oom";
-      message = "validation renderer OOM";
-    } else if (*args_.fault == "renderer_hang") {
-      code = "renderer_unresponsive";
-      message = "validation renderer hang";
-    } else if (*args_.fault == "gpu_crash") {
-      code = "gpu_crash";
-      message = "validation GPU crash";
-    } else if (*args_.fault == "utility_crash") {
-      code = "utility_crash";
-      message = "validation utility crash";
-    }
-    if (!code.empty()) {
-      validation_fault_consumed_ = true;
-      SendError(request_id, code, message);
-      return true;
-    }
-  }
   const auto command = payload->GetDictionary("command");
   if (command->GetType("type") != VTYPE_STRING ||
       command->GetType("payload") != VTYPE_DICTIONARY) {
@@ -4714,13 +4623,6 @@ int RunHost(HINSTANCE instance, void* sandbox_info) {
   std::wstring error;
   const auto args = ValidateHostArgs(command_line, error);
   if (!args) {
-    return EXIT_FAILURE;
-  }
-  if (args->fault.has_value() &&
-      (*args->fault == "bad_bundle" || *args->fault == "sandbox_failure")) {
-    // Fault injection is intentionally deterministic and validation-only.  A
-    // production binary cannot reach this branch because argument validation
-    // rejects both switches under NDEBUG.
     return EXIT_FAILURE;
   }
   if (!ValidateProfileRoot(args->profile_root) || sandbox_info == nullptr ||

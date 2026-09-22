@@ -65,15 +65,16 @@ download, clipboard, capture, and other side-effecting commands are never
 replayed. During recovery, only the latest resize/DPI, bounds, visibility, and
 focus values may be held for the restored surface; a close always wins.
 
-## Validation-only fault injection
+## Removed validation-only fault injection
 
-Debug host builds accept the positive-only `--cef-validation` switch and a
-`--cef-fault=<point>` value such as `host_crash`, `host_unresponsive`,
-`renderer_crash`, `gpu_crash`, `bad_bundle`, `bad_protocol`, or
-`profile_lock`. The Rust and Windows host argument parsers reject these flags
-in production builds, and the Dart parser also returns no fault point when
-validation is disabled. Fault points are deterministic test controls; they are
-not a backend selector and never enable a fallback engine.
+The cutover deleted the positive-only `--cef-validation` switch and every
+`--cef-fault=<point>` control from all builds. The Rust `cef_host`, the
+Windows `cef_host`, and the Dart adapters reject those flags unconditionally;
+there is no `FaultPoint` type, parser, build symbol, or user setting left.
+Recovery is driven only by real host, renderer, GPU, utility, and profile
+observations through `RuntimeLifecycle`. Forced software rendering
+(`--cef-software-rendering`) is unaffected: it is a supported production
+switch that keeps the CPU OnPaint contract, not a validation control.
 
 The lifecycle tests exercise heartbeat timeout/backoff, host command outcome
 classification, renderer/GPU scope, validation gating, and clean shutdown.

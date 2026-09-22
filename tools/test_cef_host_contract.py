@@ -206,6 +206,56 @@ RELEASE_DOC = (
 RELEASE_TEST = (ROOT / "tools" / "test_qualify_release_candidate.py").read_text(
     encoding="utf-8"
 )
+MATRIX_COMPONENT = (
+    ROOT
+    / "commet"
+    / "lib"
+    / "client"
+    / "matrix"
+    / "components"
+    / "widgets"
+    / "matrix_widget_component.dart"
+).read_text(encoding="utf-8")
+VIDEO_DIALOG = (
+    ROOT
+    / "commet"
+    / "lib"
+    / "ui"
+    / "molecules"
+    / "video_player"
+    / "video_playback_dialog.dart"
+).read_text(encoding="utf-8")
+WIDGET_VOCAB = (
+    ROOT / "commet" / "lib" / "client" / "components" / "widgets" / "widget_component.dart"
+).read_text(encoding="utf-8")
+PUBSPEC = (ROOT / "commet" / "pubspec.yaml").read_text(encoding="utf-8")
+RUST_CARGO = (ROOT / "rust" / "rust" / "Cargo.toml").read_text(encoding="utf-8")
+LINUX_DART_RUNTIME = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "linux_browser_runtime.dart"
+).read_text(encoding="utf-8")
+STUB_PUBSPEC = (
+    ROOT / "third_party" / "flutter_inappwebview_windows_stub" / "pubspec.yaml"
+).read_text(encoding="utf-8")
+STUB_CMAKE = (
+    ROOT
+    / "third_party"
+    / "flutter_inappwebview_windows_stub"
+    / "windows"
+    / "CMakeLists.txt"
+).read_text(encoding="utf-8")
+STUB_NATIVE = (
+    ROOT
+    / "third_party"
+    / "flutter_inappwebview_windows_stub"
+    / "windows"
+    / "flutter_inappwebview_windows_plugin_c_api.cpp"
+).read_text(encoding="utf-8")
+VENDORED_AUTH_LINOWS = (
+    ROOT / "third_party" / "flutter_web_auth_2" / "lib" / "src" / "linows.dart"
+).read_text(encoding="utf-8")
+VENDORED_AUTH_PUBSPEC = (
+    ROOT / "third_party" / "flutter_web_auth_2" / "pubspec.yaml"
+).read_text(encoding="utf-8")
 
 
 class CefHostContractTests(unittest.TestCase):
@@ -301,7 +351,6 @@ class CefHostContractTests(unittest.TestCase):
             "MAX_AUTOMATIC_HOST_RESTARTS",
             "HEARTBEAT_TIMEOUT_MS",
             "HOST_TERMINATION_GRACE_MS",
-            "FaultPoint",
         ):
             self.assertIn(token, LIFECYCLE_RUST)
         for token in (
@@ -312,7 +361,6 @@ class CefHostContractTests(unittest.TestCase):
             "CommandOutcome",
             "maxAutomaticHostRestarts",
             "heartbeatTimeoutMs",
-            "parseFaultPoint",
         ):
             self.assertIn(token, LIFECYCLE_DART)
         self.assertIn('"heartbeat_ack"', SOURCE)
@@ -323,7 +371,10 @@ class CefHostContractTests(unittest.TestCase):
             "OnRenderProcessTerminated",
             "OnRenderProcessUnresponsive",
             "renderer_oom",
-            "profile_locked",
+            # Real lock contention reports `profile_busy` on Windows (mapped
+            # to `profileUnavailable`); the cutover deleted the injected
+            # `profile_locked` fault line.
+            "profile_busy",
         ):
             self.assertIn(token, SOURCE)
         self.assertIn("Timer.periodic", DART_RUNTIME)
@@ -338,6 +389,178 @@ class CefHostContractTests(unittest.TestCase):
             "RuntimeState::Restarting",
         ):
             self.assertIn(token, LINUX_RUNTIME)
+
+    def test_validation_switch_and_fault_injection_are_removed(self) -> None:
+        # Cutover #132: the validation switch and fault-injection controls
+        # are removed from all builds. Hosts name the removed flags only to
+        # reject them; no FaultPoint type, parser, field, or launch argument
+        # remains, and production routing is unconditional.
+        for token in (
+            "--cef-validation was removed by the cutover",
+            "CEF fault injection was removed by the cutover",
+        ):
+            self.assertIn(token, RUST_HOST_SOURCE)
+        for token in (
+            "CEF validation controls were removed by the cutover",
+            "CEF fault injection was removed by the cutover",
+        ):
+            self.assertIn(token, SOURCE)
+        for source in (RUST_HOST_SOURCE, LIFECYCLE_RUST, LINUX_RUNTIME):
+            self.assertNotIn("enum FaultPoint", source)
+            self.assertNotIn("FaultPoint::", source)
+            self.assertNotIn("start_with_validation_fault", source)
+            self.assertNotIn("validation_build", source)
+        self.assertNotIn("parseFaultPoint", LIFECYCLE_DART)
+        self.assertNotIn("enum FaultPoint", LIFECYCLE_DART)
+        self.assertNotIn("FaultPoint?", LIFECYCLE_DART)
+        for token in (
+            "validationBuild",
+            "faultPoint",
+            "--cef-validation",
+            "--cef-fault",
+        ):
+            self.assertNotIn(token, DART_RUNTIME)
+        # Forced software rendering is a supported production switch, not a
+        # validation control: it stays on every host and adapter.
+        for token in ("--cef-software-rendering", "forceSoftwareRendering"):
+            self.assertIn(token, SOURCE + DART_RUNTIME)
+
+    def test_matrix_widgets_route_unconditionally_through_cef(self) -> None:
+        # Cutover #132: desktop Matrix widgets use the BrowserRuntime adapter
+        # with no validation switch, legacy runner, or fallback selection.
+        for token in (
+            "matrixWidgetUsesCef",
+            "openCefMatrixWidget",
+            "MatrixWidgetAdapter",
+            "MatrixWidgetAdapterLaunch.fromMatrixWidget",
+            "EmbeddedBrowserSurface.attached",
+            "StandaloneBrowserSurface.attached",
+            "PresentationMode.standalone",
+            "browserRuntime",
+        ):
+            self.assertIn(token, MATRIX_COMPONENT)
+        for token in (
+            "childProcess",
+            "externalBrowser",
+            "spawnChildProcess",
+            "MatrixUserWidgetSubprocessRunner",
+            "--widget_runner",
+            "launchExternalBrowser",
+            "desktop_webview_window",
+        ):
+            self.assertNotIn(token, MATRIX_COMPONENT)
+        # The host vocabulary no longer names the deleted runners.
+        for token in ("childProcess", "externalBrowser"):
+            self.assertNotIn(token, WIDGET_VOCAB)
+        self.assertIn("standalone", WIDGET_VOCAB)
+        # Linux constructs its Unix-socket runtime at startup; Windows keeps
+        # its named-pipe runtime. No desktop caller can select another engine.
+        self.assertIn("browserRuntime ??= LinuxBrowserRuntime()", MAIN_DART)
+        self.assertIn("browserRuntime ??= WindowsBrowserRuntime()", MAIN_DART)
+
+    def test_linux_dart_runtime_uses_unix_socket_without_validation(self) -> None:
+        for token in (
+            "CefHostFlavor.linux",
+            "--socket=",
+            "--parent-nonce=",
+            "--cef-root=",
+            "InternetAddressType.unix",
+            "connectLinuxSocket",
+        ):
+            self.assertIn(token, LINUX_DART_RUNTIME + DART_RUNTIME)
+        for token in (
+            "--cef-validation",
+            "--cef-fault",
+            "validationBuild",
+            "faultPoint",
+        ):
+            self.assertNotIn(token, LINUX_DART_RUNTIME + DART_RUNTIME)
+        self.assertIn("CefHostFlavor", DART_RUNTIME)
+
+    def test_cutover_stub_and_vendored_auth_have_no_engine(self) -> None:
+        # The Windows webview plugin is a no-op stub: same registration name,
+        # no engine evidence, no method channels, no NuGet/WIL downloads.
+        self.assertIn("FlutterInappwebviewWindowsPluginCApi", STUB_PUBSPEC)
+        for token in (
+            "CreateCoreWebView2",
+            "WebView2Loader",
+            "Microsoft.Web",
+            "MethodChannel",
+            "method_channel",
+            "nuget",
+            "NuGet",
+        ):
+            self.assertNotIn(token, STUB_CMAKE + STUB_NATIVE + STUB_PUBSPEC)
+        stub_text = (STUB_CMAKE + STUB_NATIVE).replace("\n", " ")
+        stub_text = stub_text.replace("#", " ").replace("/", " ")
+        stub_text = " ".join(stub_text.split())
+        self.assertIn("registers no method channels", stub_text)
+        # SSO keeps working through the external browser plus loopback
+        # server; the vendored auth package carries no webview dependency,
+        # import, or implementation. (Historical COMMET comments may name the
+        # removed package; the assertions below target dependency lines and
+        # imports, not prose.)
+        self.assertNotIn("desktop_webview_window:", VENDORED_AUTH_PUBSPEC)
+        self.assertNotIn(
+            "package:desktop_webview_window", VENDORED_AUTH_LINOWS
+        )
+        for token in (
+            "webview.dart",
+            "_webviewImpl",
+        ):
+            self.assertNotIn(token, VENDORED_AUTH_LINOWS + VENDORED_AUTH_PUBSPEC)
+        self.assertIn("_serverImpl", VENDORED_AUTH_LINOWS)
+        self.assertIn(
+            "flutter_web_auth_2:\n    path: ../third_party/flutter_web_auth_2",
+            PUBSPEC,
+        )
+        self.assertIn(
+            "flutter_inappwebview_windows:\n    path: ../third_party/flutter_inappwebview_windows_stub",
+            PUBSPEC,
+        )
+        self.assertNotIn("desktop_webview_window:", PUBSPEC)
+
+    def test_cutover_deleted_runner_graph(self) -> None:
+        # The Wry child-runner, its binary/export/dispatch, and runner-only
+        # target dependencies are gone from the source graph.
+        self.assertFalse(
+            (ROOT / "rust" / "rust" / "src" / "widget_runner.rs").exists()
+        )
+        self.assertFalse(
+            (ROOT / "rust" / "rust" / "src" / "widget_runner").exists()
+        )
+        self.assertFalse((ROOT / "rust" / "rust" / "src" / "main.rs").exists())
+        self.assertFalse(
+            (ROOT / "commet" / "linux" / "widget_runner.h").exists()
+        )
+        self.assertFalse(
+            (
+                ROOT
+                / "commet"
+                / "lib"
+                / "client"
+                / "matrix"
+                / "components"
+                / "widgets"
+                / "runners"
+                / "subprocess"
+                / "matrix_widget_desktop_runner.dart"
+            ).exists()
+        )
+        for token in (
+            "wry",
+            "tao",
+            "stderrlog",
+            "commet_widget_runner",
+            "widget_runner",
+            "webrtc",
+        ):
+            self.assertNotIn(token, RUST_CARGO)
+        for token in ("runWebViewTitleBarWidget", "desktop_webview_window"):
+            self.assertNotIn(token, MAIN_DART)
+        # The Windows video dialog no longer carries the legacy loopback branch.
+        self.assertNotIn("_needsLoopbackServer", VIDEO_DIALOG)
+        self.assertNotIn("NavigateToString", VIDEO_DIALOG)
 
     def test_no_runtime_download_or_backend_fallback(self) -> None:
         self.assertNotIn("URLDownloadToFile", SOURCE)

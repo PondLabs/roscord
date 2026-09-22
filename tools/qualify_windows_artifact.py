@@ -87,16 +87,36 @@ FORBIDDEN_PAYLOAD_SUFFIXES = (".pdb", ".lib", ".exp", ".ilk")
 FORBIDDEN_PAYLOAD_DIRS = ("Debug", "tests", "include", "libcef_dll", "cmake")
 
 #: Case-folded filename markers that prove a foreign browser engine would be
-#: reachable from the bundle.  The root ``flutter_inappwebview`` package is
-#: retained for Android/iOS/macOS/web; only the Windows implementation and the
-#: other desktop engines are forbidden here.
+#: reachable from the bundle. The root ``flutter_inappwebview`` package is
+#: retained for Android/iOS/macOS/web, and the Windows plugin name
+#: ``flutter_inappwebview_windows`` now denotes the cutover stub (a no-op
+#: native registration with no WebView2, proven by source scan); only the
+#: desktop engines below are forbidden here by filename.
 FORBIDDEN_BUNDLE_MARKERS = (
     "webview2",
     "desktop_webview_window",
-    "inappwebview_windows",
     "wry",
     "webkitgtk",
     "libwebkit",
+)
+
+#: Exact bundle filenames owned by the cutover stub. The stub keeps the
+#: upstream plugin filename so the generated registrant links, but its bytes
+#: must carry no engine evidence (see ``FORBIDDEN_BINARY_EVIDENCE``).
+CUTOVER_STUB_FILENAMES = frozenset(
+    {
+        "flutter_inappwebview_windows_plugin.dll",
+    }
+)
+
+#: Case-sensitive byte markers that prove a foreign engine is linked into a
+#: bundle binary. The stub filename above is allowed only when none of these
+#: markers appear in its bytes; any other binary carrying them fails closed.
+FORBIDDEN_BINARY_EVIDENCE = (
+    b"CreateCoreWebView2",
+    b"EdgeWebView2",
+    b"WebView2Loader",
+    b"Microsoft.Web.WebView2",
 )
 
 #: CEF download artifacts must never ship inside the bundle; the application
@@ -491,6 +511,39 @@ def check_no_foreign_backends(bundle: Path, payload: Path) -> dict[str, Any]:
             offenders.append(path.relative_to(bundle).as_posix())
     if offenders:
         raise QualificationError(f"bundle ships a foreign backend: {sorted(offenders)}")
+    # Binary evidence scan for app-side binaries outside the manifest-pinned
+    # CEF payload. The cutover stub keeps the upstream plugin filename, so it
+    # is allowed by name only when its bytes carry no engine evidence.
+    # Payload files are excluded here: unexpected payload files already fail,
+    # and pinned files are hash-verified, so scanning libcef bytes would only
+    # risk Chromium-string false positives.
+    try:
+        resolved_payload = payload.resolve()
+    except OSError:
+        resolved_payload = payload
+    for path in sorted(bundle.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if path.suffix.lower() not in (".dll", ".exe", ".so"):
+            continue
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        if resolved == resolved_payload or resolved_payload in resolved.parents:
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            raise QualificationError(f"cannot scan bundle binary {path}: {exc}")
+        for marker in FORBIDDEN_BINARY_EVIDENCE:
+            if marker in data:
+                offenders.append(path.relative_to(bundle).as_posix())
+                break
+    if offenders:
+        raise QualificationError(
+            f"bundle binary links a foreign engine: {sorted(offenders)}"
+        )
     for name, path in sorted(_payload_files(payload).items()):
         if not name.lower().endswith(TEXT_CONFIG_SUFFIXES):
             continue

@@ -182,3 +182,35 @@ retry, close, and diagnostic-reporting UI is accessible, logs/metrics/dumps
 and diagnostic IDs are consent-gated, rate-limited, and redacted, and clean
 close drains surfaces and host processes without orphaning. See
 `docs/cef-browser-runtime-recovery.md`.
+
+## Cutover: unconditional desktop routing (#132)
+
+After the aggregate gate (#131) went green, desktop Matrix widgets use this
+adapter unconditionally. `matrixWidgetUsesCef` routes Windows and Linux to
+`MatrixWidgetComponent.openCefMatrixWidget`; the deleted runners are the Dart
+`subprocess/` Wry module, the Rust/Wry child-runner binary, module, export,
+and native dispatch (`--widget_runner`), the host-Chromium launcher inside
+the remote-HTTP runner, the developer launcher, and the Windows web-view
+branches. `WidgetHostType` is now `embedded`, `standalone`,
+`remoteHttpClient`, and `androidActivity`: desktop offers embedded plus
+standalone (a roscord-owned CEF window), remote HTTP stays as the
+remote-device QR flow, and Android/web keep their existing runners.
+
+`_CefMatrixWidget` opens one adapter session per overlay, attaches an
+`EmbeddedBrowserSurface.attached` (Flutter texture plus ordered
+pointer/wheel/focus/resize/key input) or a `StandaloneBrowserSurface.attached`
+(status placeholder; the owned window presents natively), and forwards
+`external` navigation outcomes to explicit `LinkUtils` actions. Protocol
+ownership stays with the adapter session: presentation `dispose` never sends
+`close`. `main.dart` constructs `WindowsBrowserRuntime` (named pipes) on
+Windows and the new `LinuxBrowserRuntime` (owner-only Unix socket,
+`--socket/--parent-nonce/--cef-root` launch) on Linux; both share the framed
+protocol, lifecycle, and recovery through `CefHostFlavor`.
+
+Preserved flows are untouched: Android activity, remote HTTP, web/macOS/iOS
+in-app runners, calendar, deliberate external links, Linux native video, and
+shared audio/WebRTC. SSO keeps working through the external system browser
+plus loopback server: `flutter_web_auth_2` is vendored into `third_party/`
+with its WebView2 webview deleted, and the Windows `flutter_inappwebview`
+plugin is a no-op stub (`third_party/flutter_inappwebview_windows_stub/`)
+that links no foreign engine.

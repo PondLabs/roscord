@@ -1,0 +1,17 @@
+name: flutter_inappwebview_windows
+description: Cutover stub replacing the legacy Windows webview implementation of flutter_inappwebview. Windows web surfaces render through the bundled CEF BrowserRuntime; this plugin registers nothing and links no foreign engine.
+version: 0.0.0-cutover.1
+
+environment:
+  sdk: '>=3.6.0 <4.0.0'
+  flutter: '>=3.24.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      windows:
+        pluginClass: FlutterInappwebviewWindowsPluginCApi

@@ -25,14 +25,3 @@ pub use audio_decode;
 // DJ music player (local file to 48 kHz stereo for the WebRTC music track),
 // same C ABI arrangement.
 pub use dj_audio;
-
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-mod widget_runner;
-
-#[no_mangle]
-pub extern "C" fn commet_widget_runner() {
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    {
-        widget_runner::run();
-    }
-}

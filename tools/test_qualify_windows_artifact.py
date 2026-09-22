@@ -202,6 +202,43 @@ class QualifyWindowsArtifactTests(unittest.TestCase):
             with self.assertRaises(QualificationError):
                 qualify_windows_artifact.qualify(bundle, metadata, lock)
 
+    def test_cutover_stub_name_passes_when_bytes_are_clean(self) -> None:
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            lock, bundle, metadata = _build_qualified_fixture(directory)
+            (bundle / "flutter_inappwebview_windows_plugin.dll").write_bytes(
+                b"no-op registration"
+            )
+            report = qualify_windows_artifact.qualify(bundle, metadata, lock)
+            self.assertTrue(report["checks"]["no_foreign_backends"])
+
+    def test_stub_binary_with_engine_evidence_fails(self) -> None:
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            lock, bundle, metadata = _build_qualified_fixture(directory)
+            (bundle / "flutter_inappwebview_windows_plugin.dll").write_bytes(
+                b"no-op registration CreateCoreWebView2"
+            )
+            with self.assertRaises(QualificationError):
+                qualify_windows_artifact.qualify(bundle, metadata, lock)
+
+    def test_app_binary_with_engine_evidence_fails(self) -> None:
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            lock, bundle, metadata = _build_qualified_fixture(directory)
+            target = bundle / "commet.exe"
+            target.write_bytes(target.read_bytes() + b"EdgeWebView2")
+            with self.assertRaises(QualificationError):
+                qualify_windows_artifact.qualify(bundle, metadata, lock)
+
+    def test_desktop_webview_window_name_still_fails(self) -> None:
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            lock, bundle, metadata = _build_qualified_fixture(directory)
+            (bundle / "desktop_webview_window_plugin.dll").write_bytes(b"legacy")
+            with self.assertRaises(QualificationError):
+                qualify_windows_artifact.qualify(bundle, metadata, lock)
+
     def test_shipped_cef_archive_fails(self) -> None:
         with TemporaryDirectory() as temporary:
             directory = Path(temporary)
