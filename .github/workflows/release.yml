@@ -58,6 +58,22 @@ jobs:
           cd .\commet
           dart run scripts/build_release.dart --platform windows --version_tag ${{ github.event.release.tag_name || 'v0.0.0-artifact' }} --git_hash ${{ github.sha }}
 
+      - name: Qualify Windows CEF artifact
+        shell: pwsh
+        run: |
+          $bundle = ".\commet\build\windows\x64\runner\Release"
+          $payload = Join-Path $bundle "cef_host"
+          $stage = Join-Path $env:GITHUB_WORKSPACE ".cef-stage"
+          $metadata = Join-Path $env:GITHUB_WORKSPACE ".cef-metadata"
+          $archive = Get-ChildItem -LiteralPath (Join-Path $env:GITHUB_WORKSPACE ".cef-cache") -Filter "*.tar.bz2" -File -Recurse | Select-Object -First 1
+          if ($null -eq $archive) { throw "locked CEF archive was not cached" }
+          python tools/cef_runtime.py stage --platform windows-x64 $archive.FullName $stage --project-root $payload
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/cef_runtime.py metadata --platform windows-x64 $stage $metadata --project-root $payload
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/qualify_windows_artifact.py --bundle $bundle --metadata $metadata
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Archive 
         run: tar -a -c -f roscord-windows.zip -C .\commet\build\windows\x64\runner\ Release
       

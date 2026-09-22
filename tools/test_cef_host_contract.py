@@ -161,6 +161,12 @@ MEDIA_ADAPTER = (
     / "video_embed"
     / "media_embed_adapter.dart"
 ).read_text(encoding="utf-8")
+QUALIFY_TOOL = (ROOT / "tools" / "qualify_windows_artifact.py").read_text(
+    encoding="utf-8"
+)
+WINDOWS_ARTIFACT_DOC = (
+    ROOT / "docs" / "cef-browser-runtime-windows-artifacts.md"
+).read_text(encoding="utf-8")
 
 
 class CefHostContractTests(unittest.TestCase):
@@ -1346,6 +1352,134 @@ class CefHostContractTests(unittest.TestCase):
         self.assertIn("clean stop", RECOVERY_DART.lower())
         self.assertIn("close", MEDIA_ADAPTER.lower())
         self.assertIn("shutdown", RECOVERY_TEST.lower())
+
+    def test_windows_artifact_staging_covers_the_locked_payload(self) -> None:
+        # The host startup gate must mirror the lock's windows-x64 runtime
+        # allow-list (flattened from Release/, bootstrap renamed to
+        # cef_host.exe), and the offline qualification tool enforces the same
+        # set against built bundles.
+        for token in (
+            "d3dcompiler_47.dll",
+            "dxcompiler.dll",
+            "dxil.dll",
+            "libEGL.dll",
+            "libGLESv2.dll",
+            "vk_swiftshader.dll",
+            "vk_swiftshader_icd.json",
+            "vulkan-1.dll",
+            "chrome_100_percent.pak",
+            "chrome_200_percent.pak",
+            "icudtl.dat",
+            "resources.pak",
+            "en-US.pak",
+            "chrome_elf.dll",
+            "libcef.dll",
+            "client.dll",
+        ):
+            self.assertIn(token, SOURCE, f"host startup gate is missing: {token}")
+        for token in (
+            "BOOTSTRAP_RENAME",
+            "PROJECT_BOOTSTRAP",
+            "CPU_FALLBACK_FILES",
+            "check_staged",
+            "cef_host.exe",
+            "find_cef_payload",
+        ):
+            self.assertIn(token, QUALIFY_TOOL)
+        self.assertIn("qualify_windows_artifact", WINDOWS_ARTIFACT_DOC)
+        self.assertIn("cef_host", WINDOWS_ARTIFACT_DOC)
+
+    def test_windows_artifact_manifests_notices_sbom_and_signatures(self) -> None:
+        for token in (
+            "check_hashes",
+            "check_metadata",
+            "check_signatures",
+            "cef.runtime.manifest.json",
+            "cef.sbom.cdx.json",
+            "THIRD_PARTY_NOTICES.txt",
+            "cef.provenance.json",
+            "signatures.json",
+            "--require-signatures",
+            "CycloneDX",
+            "runtime_download",
+            "bundled-release-payload",
+        ):
+            self.assertIn(token, QUALIFY_TOOL)
+        self.assertIn("Authenticode", WINDOWS_ARTIFACT_DOC)
+        self.assertIn("signatures.json", WINDOWS_ARTIFACT_DOC)
+        self.assertIn("CycloneDX", WINDOWS_ARTIFACT_DOC)
+        self.assertIn("THIRD_PARTY_NOTICES", WINDOWS_ARTIFACT_DOC)
+        # Release and desktop builds qualify the Windows bundle after it is
+        # built; a qualification failure blocks the artifact.
+        self.assertIn("qualify_windows_artifact", DESKTOP_WORKFLOW)
+        self.assertIn("qualify_windows_artifact", RELEASE_WORKFLOW)
+
+    def test_windows_sandbox_bootstrap_failures_block_opening(self) -> None:
+        # Startup fails closed: missing payload, missing sandbox handle, bad
+        # profile root, or a failed pipe handshake never opens a surface.
+        for token in (
+            "VerifyBundledRuntime",
+            "sandbox_info == nullptr",
+            "!VerifyBundledRuntime(error)",
+            "ValidateProfileRoot",
+            "bundled CEF bootstrap, client, or resource is missing",
+            "VerifyLoadedBundledRuntime",
+            "CEF is not loaded from the bundled host directory",
+        ):
+            self.assertIn(token, SOURCE)
+        self.assertIn("check_sandbox_bootstrap", QUALIFY_TOOL)
+        self.assertIn("--no-sandbox", QUALIFY_TOOL)
+        # The Dart adapter fails closed when the bundled host is absent and
+        # surfaces startup failures as typed host errors.
+        for token in (
+            "bundled cef_host.exe was not found",
+            "could not start the Windows CEF host",
+            "CEF host startup failed",
+            "hostStartFailure",
+        ):
+            self.assertIn(token, DART_RUNTIME)
+        self.assertIn("sandbox", WINDOWS_ARTIFACT_DOC.lower())
+        self.assertIn("block", WINDOWS_ARTIFACT_DOC.lower())
+
+    def test_windows_surfaces_run_from_the_bundle_without_downloads(self) -> None:
+        # Embedded, standalone, and official video all route through the one
+        # bundled host via the BrowserRuntime seam; no surface may reach a
+        # host CEF, a download, or a foreign engine.
+        for token in (
+            "check_no_foreign_backends",
+            "WebView2Loader.dll",
+            "desktop_webview_window",
+            "cef_binary_",
+        ):
+            self.assertIn(token, QUALIFY_TOOL)
+        self.assertIn("required BrowserRuntime runtime", EMBEDDED_DART)
+        self.assertIn("required BrowserRuntime runtime", STANDALONE_DART)
+        self.assertIn("final BrowserRuntime runtime", MEDIA_ADAPTER)
+        self.assertIn("mediaEmbedUsesCef", MEDIA_ADAPTER)
+        for forbidden in (
+            "CreateCoreWebView2",
+            "URLDownloadToFile",
+            "cef-builds.spotifycdn.com",
+            "desktop_webview_window",
+        ):
+            self.assertNotIn(forbidden, SOURCE)
+            self.assertNotIn(forbidden, EMBEDDED_DART)
+            self.assertNotIn(forbidden, STANDALONE_DART)
+            self.assertNotIn(forbidden, MEDIA_ADAPTER)
+        self.assertIn("No host CEF or runtime downloads", WINDOWS_ARTIFACT_DOC)
+
+    def test_windows_forced_cpu_remains_functional(self) -> None:
+        for token in (
+            "check_cpu_fallback",
+            "vk_swiftshader.dll",
+            "libEGL.dll",
+            "libGLESv2.dll",
+            "--cef-software-rendering",
+        ):
+            self.assertIn(token, QUALIFY_TOOL + SOURCE + DART_RUNTIME)
+        self.assertIn("forceSoftwareRendering", DART_RUNTIME)
+        self.assertIn("disable-gpu", SOURCE)
+        self.assertIn("forced CPU", WINDOWS_ARTIFACT_DOC + EMBEDDED_DART)
 
 
 if __name__ == "__main__":
