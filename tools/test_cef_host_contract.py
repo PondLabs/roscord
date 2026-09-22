@@ -116,6 +116,21 @@ LINUX_STANDALONE_DOC = (
 LINUX_STANDALONE_TEST = (
     ROOT / "commet" / "unit_test" / "linux_standalone_presenter_test.dart"
 ).read_text(encoding="utf-8")
+FLATPAK_DART = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "flatpak_presenter.dart"
+).read_text(encoding="utf-8")
+FLATPAK_RUST = (ROOT / "rust" / "rust" / "src" / "browser_flatpak.rs").read_text(
+    encoding="utf-8"
+)
+FLATPAK_DOC = (ROOT / "docs" / "cef-browser-runtime-flatpak.md").read_text(
+    encoding="utf-8"
+)
+FLATPAK_TEST = (
+    ROOT / "commet" / "unit_test" / "flatpak_presenter_test.dart"
+).read_text(encoding="utf-8")
+FLATPAK_MANIFEST = (
+    ROOT / "commet" / "linux" / "flatpak" / "chat.commet.commetapp.yaml"
+).read_text(encoding="utf-8")
 
 
 class CefHostContractTests(unittest.TestCase):
@@ -880,6 +895,229 @@ class CefHostContractTests(unittest.TestCase):
             self.assertNotIn("desktop_webview_window", lowered)
             self.assertNotIn("system cef lookup", lowered)
             self.assertNotIn("external cef download", lowered)
+
+    def test_flatpak_presentations_load_without_host_engines_or_gpu(self) -> None:
+        for token in (
+            "FlatpakCompositor",
+            "parseFlatpakCompositor",
+            "flatpakEmbeddedPresentationPath",
+            "flatpakStandalonePresentationPath",
+            "flatpakPresentationPath",
+            "osr-cpu-flutter-texture",
+            "osr-cpu-owned-window",
+            "flatpakUsesOsrCpuFrames",
+            "flatpakUsesBundledCef",
+            "flatpakUsesHostCef",
+            "flatpakUsesHostWebKitGtk",
+            "flatpakWorksWithoutGpu",
+            "FlatpakEmbeddedPresenter",
+            "FlatpakStandalonePresenter",
+            "validateFlatpakFrame",
+            "resolveFlatpakCefBundlePath",
+            "flatpakCefBundleRoot",
+            "/app",
+            "takeFrame",
+        ):
+            self.assertIn(token, FLATPAK_DART)
+        for token in (
+            "FlatpakCompositor",
+            "parse_flatpak_compositor",
+            "FLATPAK_EMBEDDED_PRESENTATION_PATH",
+            "FLATPAK_STANDALONE_PRESENTATION_PATH",
+            "osr-cpu-flutter-texture",
+            "osr-cpu-owned-window",
+            "uses_osr_cpu_frames",
+            "uses_bundled_cef",
+            "uses_host_cef",
+            "uses_host_webkitgtk",
+            "works_without_gpu",
+            "validate_flatpak_frame",
+            "resolve_cef_bundle_path",
+            "FLATPAK_CEF_BUNDLE_ROOT",
+            "/app",
+        ):
+            self.assertIn(token, FLATPAK_RUST)
+        self.assertIn("browser_flatpak", RUST_LIB)
+        self.assertIn("flatpak_presenter", DART_BARREL)
+        for token in (
+            "both presentations load without host cef",
+            "bundled",
+            "/app",
+            "without host",
+            "or gpu",
+        ):
+            self.assertIn(token, FLATPAK_TEST.lower())
+        for token in (
+            "osr-cpu-flutter-texture",
+            "osr-cpu-owned-window",
+            "/app",
+            "without host cef",
+            "host webkitgtk",
+        ):
+            self.assertIn(token, FLATPAK_DOC.lower())
+
+    def test_flatpak_sandbox_and_least_privilege_permissions_are_proven(self) -> None:
+        for token in (
+            "flatpakUsesUserNamespaceSandbox",
+            "flatpakUsesSeccompSandbox",
+            "validateFlatpakFinishArgs",
+            "isForbiddenFlatpakFinishArg",
+            "--device=dri",
+            "least-privilege",
+            "least_privilege",
+        ):
+            self.assertIn(token.lower(), (FLATPAK_DART + FLATPAK_RUST).lower())
+        for token in (
+            "uses_user_namespace_sandbox",
+            "uses_seccomp_sandbox",
+            "validate_finish_args",
+            "is_forbidden_finish_arg",
+        ):
+            self.assertIn(token, FLATPAK_RUST)
+        # The shipped manifest carries the hardened least-privilege set.
+        for token in (
+            "--share=ipc",
+            "--socket=fallback-x11",
+            "--socket=wayland",
+            "--socket=pulseaudio",
+            "--share=network",
+            "--device=dri",
+        ):
+            self.assertIn(token, FLATPAK_MANIFEST)
+        self.assertNotIn("--device=all", FLATPAK_MANIFEST)
+        self.assertNotIn("filesystem=host", FLATPAK_MANIFEST)
+        self.assertNotIn("filesystem=home", FLATPAK_MANIFEST)
+        self.assertIn("org.gnome.Platform", FLATPAK_MANIFEST)
+        self.assertIn("48", FLATPAK_MANIFEST)
+        self.assertIn("x86_64", FLATPAK_MANIFEST)
+        self.assertIn("/app", FLATPAK_MANIFEST)
+
+    def test_flatpak_capture_uses_portals_and_denial_keeps_the_sandbox(self) -> None:
+        for token in (
+            "flatpakRequiresPortals",
+            "flatpakUsesPortalForCapability",
+            "flatpakPortalCapabilities",
+            "assertFlatpakPortalDenialKeepsSandbox",
+            "flatpakPortalDenialBroadensSandbox",
+            "camera",
+            "microphone",
+            "display_video",
+            "portal",
+        ):
+            self.assertIn(token.lower(), FLATPAK_DART.lower())
+        for token in (
+            "requires_portals",
+            "uses_portal_for_capability",
+            "assert_portal_denial_keeps_sandbox",
+            "portal_denial_broadens_sandbox",
+            "CapturePortalOutcome",
+        ):
+            self.assertIn(token.lower(), (FLATPAK_RUST + MEDIA_RUST).lower())
+        for token in (
+            "portal",
+            "denial never broadens",
+            "ScreenCast",
+            "PipeWire",
+        ):
+            self.assertIn(token.lower(), FLATPAK_DOC.lower())
+        for token in (
+            "use portals",
+            "denial never broadens",
+            "portal",
+        ):
+            self.assertIn(token, FLATPAK_TEST.lower())
+
+    def test_flatpak_cpu_rendering_remains_fully_functional(self) -> None:
+        for token in (
+            "FlatpakRendering",
+            "cpuOsr",
+            "flatpakForcedCpuRendering",
+            "resolveFlatpakBackend",
+            "cef-osr-cpu",
+            "validateFlatpakStandaloneGeometry",
+            "bringToFront",
+            "sendToBack",
+        ):
+            self.assertIn(token, FLATPAK_DART)
+        for token in (
+            "FlatpakRendering",
+            "CpuOsr",
+            "forced_cpu_rendering",
+            "resolve_flatpak_backend",
+            "cef-osr-cpu",
+            "FlatpakWindowGeometry",
+            "FlatpakWindowState",
+        ):
+            self.assertIn(token, FLATPAK_RUST)
+        for token in (
+            "cpu rendering remains fully functional",
+            "forced cpu",
+            "osr",
+        ):
+            self.assertIn(token, FLATPAK_TEST.lower())
+        self.assertIn("cpu", FLATPAK_DOC.lower())
+
+    def test_flatpak_has_no_child_embedding_broadening_or_host_filesystem(
+        self,
+    ) -> None:
+        for token in (
+            "isForbiddenFlatpakBackend",
+            "assertNoFlatpakFallback",
+            "resolveFlatpakBackend",
+            "cef-osr-cpu",
+            "native child",
+            "child embedding",
+            "unowned window",
+            "unowned browser",
+            "host cef",
+            "host webkit",
+            "webkit",
+            "wry",
+            "system cef",
+            "external chromium",
+            "WebView2",
+        ):
+            self.assertIn(token.lower(), FLATPAK_DART.lower())
+        for token in (
+            "is_forbidden_backend",
+            "assert_no_fallback_engine",
+            "resolve_flatpak_backend",
+            "cef-osr-cpu",
+            "native child",
+            "child embedding",
+            "unowned window",
+            "host cef",
+            "webkit",
+            "wry",
+            "system cef",
+            "external chromium",
+            "webview2",
+        ):
+            self.assertIn(token.lower(), FLATPAK_RUST.lower())
+        for token in (
+            "isFlatpakHostFilesystemPath",
+            "assertNoFlatpakHostFilesystemAccess",
+            "isFlatpakDynamicBroadening",
+            "assertNoFlatpakDynamicBroadening",
+            "flatpak-spawn",
+            "host filesystem",
+        ):
+            self.assertIn(token.lower(), (FLATPAK_DART + FLATPAK_RUST).lower())
+        for source in (FLATPAK_DART, FLATPAK_RUST):
+            lowered = source.lower()
+            self.assertNotIn("import 'package:webview", lowered)
+            self.assertNotIn("desktop_webview_window", lowered)
+            self.assertNotIn("system cef lookup", lowered)
+            self.assertNotIn("external cef download", lowered)
+            for token in ("GDK_BACKEND", "gtk_window", "GtkWidget"):
+                self.assertNotIn(token, source)
+        for token in (
+            "no native child embedding",
+            "dynamic broadening",
+            "host filesystem",
+        ):
+            self.assertIn(token, FLATPAK_TEST.lower())
+            self.assertIn(token, FLATPAK_DOC.lower())
 
 
 if __name__ == "__main__":
