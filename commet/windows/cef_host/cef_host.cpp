@@ -59,11 +59,14 @@
 #include "include/cef_version_info.h"
 #include "include/wrapper/cef_helpers.h"
 
-// Windows embedded widget surface: CEF windowless OSR with CPU OnPaint copied
-// into client-owned memory and presented as a Flutter texture.  Only the
-// bundled runtime is ever loaded and only owned request contexts and owned
-// OSR browsers are ever created; a surface failure is a typed failure or
-// bounded recovery that never selects another engine.
+// Windows widget surfaces: embedded windowless OSR with CPU OnPaint
+// copied into client-owned memory and presented as a Flutter texture, and
+// standalone windowed CEF in a roscord-owned top-level HWND.  Both
+// presentations share one host, one account request context, one policy, and
+// one permission mediation; a surface failure is a typed failure or bounded
+// recovery that never selects another engine.  Only the bundled runtime is
+// ever loaded and only owned request contexts and owned browsers are ever
+// created.
 
 namespace roscord::cef_host {
 
@@ -1765,6 +1768,71 @@ std::string_view SanitizedMediaDeniedMessage(std::string_view capability) {
   return "camera or microphone access was denied by policy";
 }
 
+// Standalone owned-window plumbing.  Each standalone surface owns one
+// top-level roscord HWND; the windowed CEF browser is created as its child so
+// geometry, focus, z-order, resize/DPI, input, IME, popup parenting, and
+// close stay observable and never escape into an unowned native window.
+// The window procedure only forwards close/destroy/size/dpi notifications to
+// CEF; all policy decisions stay on the BrowserRuntime command stream.
+constexpr wchar_t kStandaloneWindowClass[] = L"RoscordBrowserStandalone";
+constexpr int kStandaloneDefaultWidth = 1024;
+constexpr int kStandaloneDefaultHeight = 768;
+
+LRESULT CALLBACK StandaloneWindowProc(HWND hwnd, UINT message, WPARAM wparam,
+                                      LPARAM lparam) {
+  switch (message) {
+    case WM_CLOSE:
+      // Owned-window close routes through the Runtime close path so the
+      // surface emits event/closed and releases its request context.
+      ::DestroyWindow(hwnd);
+      return 0;
+    case WM_DESTROY:
+      return 0;
+    default:
+      break;
+  }
+  return ::DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+bool RegisterStandaloneWindowClass() {
+  static bool registered = false;
+  if (registered) return true;
+  WNDCLASSEXW clazz = {};
+  clazz.cbSize = sizeof(clazz);
+  clazz.style = CS_HREDRAW | CS_VREDRAW;
+  clazz.lpfnWndProc = &StandaloneWindowProc;
+  clazz.hInstance = ::GetModuleHandleW(nullptr);
+  clazz.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
+  clazz.lpszClassName = kStandaloneWindowClass;
+  if (::RegisterClassExW(&clazz) == 0) {
+    const DWORD error = ::GetLastError();
+    return error == ERROR_CLASS_ALREADY_EXISTS;
+  }
+  registered = true;
+  return true;
+}
+
+HWND CreateStandaloneWindow(int width, int height) {
+  if (!RegisterStandaloneWindowClass()) return nullptr;
+  if (width <= 0) width = kStandaloneDefaultWidth;
+  if (height <= 0) height = kStandaloneDefaultHeight;
+  if (width > 7680) width = 7680;
+  if (height > 4320) height = 4320;
+  HWND hwnd = ::CreateWindowExW(
+      WS_EX_APPWINDOW, kStandaloneWindowClass, L"roscord Browser",
+      WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
+      width, height, nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
+  if (hwnd == nullptr) return nullptr;
+  ::ShowWindow(hwnd, SW_SHOW);
+  ::UpdateWindow(hwnd);
+  return hwnd;
+}
+
+void DestroyStandaloneWindow(HWND hwnd) {
+  if (hwnd == nullptr) return;
+  ::DestroyWindow(hwnd);
+}
+
 struct SurfaceState {
   uint64_t id = 0;
   std::string profile_key;
@@ -1778,6 +1846,16 @@ struct SurfaceState {
   uint64_t next_event_sequence = 2;
   CefRefPtr<CefBrowser> browser;
   bool close_requested = false;
+  // Standalone owned-window state.  The HWND is a roscord-owned top-level
+  // window created on the CEF UI thread; the windowed browser is its child.
+  // Geometry (view_width/view_height), DPI (device_scale_factor), focus, and
+  // z-order are driven by ordered resize/focus commands so embedded and
+  // standalone surfaces share one host, one profile context, and one policy.
+  HWND owned_window = nullptr;
+  int window_x = CW_USEDEFAULT;
+  int window_y = CW_USEDEFAULT;
+  bool window_visible = false;
+  bool window_focused = false;
   // Embedded OSR presentation state.  The view rectangle is owned here so
   // GetViewRect/GetScreenInfo stay consistent with the last validated resize
   // command; DPI is carried as a device scale factor and applied on resize.
@@ -2106,6 +2184,9 @@ class HostController {
                          CefRefPtr<CefDictionaryValue> envelope);
   void SendFrameReady(uint64_t surface_id, int slot, int width, int height,
                       int stride, uint64_t frame_sequence);
+  void SendWindowChanged(uint64_t surface_id, bool resized, int width,
+                         int height, double device_scale_factor, bool focused);
+  void DestroyStandaloneWindowOnUi(uint64_t surface_id);
   void OnPaintFrame(uint64_t surface_id, const void* buffer, int width,
                     int height);
   bool GetViewSize(uint64_t surface_id, int& width, int& height,
@@ -2457,6 +2538,61 @@ void HostController::SendFrameReady(uint64_t surface_id, int slot, int width,
   SendMessage(wire);
 }
 
+void HostController::SendWindowChanged(uint64_t surface_id, bool resized,
+                                        int width, int height,
+                                        double device_scale_factor,
+                                        bool focused) {
+  uint64_t sequence = 0;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return;
+    // Standalone owned-window observations only: embedded surfaces track
+    // geometry through the OSR view rectangle and Flutter layout.
+    if (iterator->second.presentation != "standalone") return;
+    sequence = iterator->second.next_event_sequence++;
+  }
+  auto change_value = NewDictionary();
+  auto change = NewDictionary();
+  if (resized) {
+    change_value->SetInt("width", width);
+    change_value->SetInt("height", height);
+    change_value->SetDouble("device_scale_factor", device_scale_factor);
+    change->SetString("kind", "resized");
+  } else {
+    change_value->SetBool("focused", focused);
+    change->SetString("kind", "focused");
+  }
+  change->SetDictionary("value", change_value);
+  auto event_payload = NewDictionary();
+  event_payload->SetInt("surface_id", static_cast<int>(surface_id));
+  event_payload->SetInt("sequence", static_cast<int>(sequence));
+  event_payload->SetDictionary("change", change);
+  auto event = NewDictionary();
+  event->SetString("type", "window_changed");
+  event->SetDictionary("payload", event_payload);
+  auto payload = NewDictionary();
+  payload->SetDictionary("event", event);
+  auto wire = NewDictionary();
+  wire->SetString("type", "event");
+  wire->SetDictionary("payload", payload);
+  SendMessage(wire);
+}
+
+void HostController::DestroyStandaloneWindowOnUi(uint64_t surface_id) {
+  CEF_REQUIRE_UI_THREAD();
+  HWND hwnd = nullptr;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return;
+    hwnd = iterator->second.owned_window;
+    iterator->second.owned_window = nullptr;
+    iterator->second.window_visible = false;
+  }
+  DestroyStandaloneWindow(hwnd);
+}
+
 void HostController::OnPaintFrame(uint64_t surface_id, const void* buffer,
                                   int width, int height) {
   CEF_REQUIRE_UI_THREAD();
@@ -2509,6 +2645,8 @@ void HostController::ApplyResizeOnUi(uint64_t surface_id, int width,
                                      double device_scale_factor) {
   CEF_REQUIRE_UI_THREAD();
   CefRefPtr<CefBrowser> browser;
+  HWND hwnd = nullptr;
+  bool is_standalone = false;
   {
     std::lock_guard lock(state_mutex_);
     const auto iterator = surfaces_.find(surface_id);
@@ -2517,24 +2655,58 @@ void HostController::ApplyResizeOnUi(uint64_t surface_id, int width,
     iterator->second.view_height = height;
     iterator->second.device_scale_factor = device_scale_factor;
     browser = iterator->second.browser;
+    hwnd = iterator->second.owned_window;
+    is_standalone = iterator->second.presentation == "standalone";
   }
   if (browser != nullptr) {
-    browser->GetHost()->WasResized();
-    browser->GetHost()->NotifyScreenInfoChanged();
+    if (is_standalone && hwnd != nullptr) {
+      // Owned-window geometry: move the roscord HWND and notify the windowed
+      // browser so it repaints at the new size. DPI travels as the device
+      // scale factor; WM_DPICHANGED handling keeps GetScreenInfo consistent.
+      ::SetWindowPos(hwnd, nullptr, 0, 0, width, height,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+      browser->GetHost()->NotifyMoveOrResizeStarted();
+      browser->GetHost()->NotifyScreenInfoChanged();
+      SendWindowChanged(surface_id, true, width, height, device_scale_factor,
+                        false);
+    } else {
+      browser->GetHost()->WasResized();
+      browser->GetHost()->NotifyScreenInfoChanged();
+    }
   }
 }
 
 void HostController::ApplyFocusOnUi(uint64_t surface_id, bool focused) {
   CEF_REQUIRE_UI_THREAD();
   CefRefPtr<CefBrowser> browser;
+  HWND hwnd = nullptr;
+  bool is_standalone = false;
   {
     std::lock_guard lock(state_mutex_);
     const auto iterator = surfaces_.find(surface_id);
     if (iterator == surfaces_.end()) return;
     browser = iterator->second.browser;
+    hwnd = iterator->second.owned_window;
+    iterator->second.window_focused = focused;
+    is_standalone = iterator->second.presentation == "standalone";
   }
   if (browser != nullptr) {
-    browser->GetHost()->SetFocus(focused);
+    if (is_standalone && hwnd != nullptr) {
+      // Owned-window focus and z-order: focusing brings the HWND to the front
+      // without stealing activation from unrelated apps; unfocusing keeps
+      // z-order and only releases CEF focus.
+      if (focused) {
+        ::SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
+                       SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        ::BringWindowToTop(hwnd);
+        ::SetForegroundWindow(hwnd);
+        ::SetFocus(hwnd);
+      }
+      browser->GetHost()->SetFocus(focused);
+      SendWindowChanged(surface_id, false, 0, 0, 1.0, focused);
+    } else {
+      browser->GetHost()->SetFocus(focused);
+    }
   }
 }
 
@@ -3420,8 +3592,10 @@ bool HostController::OnPopupRequested(uint64_t surface_id, int popup_id,
                                                user_gesture});
   }
   // Popups are always canceled synchronously.  The app can explicitly choose
-  // the external action through a later PopupCommand; no native popup is ever
-  // created behind the policy boundary.
+  // an owned child surface or the external action through a later
+  // PopupCommand; no unowned native popup is ever created behind the policy
+  // boundary.  Standalone popups inherit the opener account context and close
+  // with the opener, same as embedded.
   SendPopupRequest(surface_id, request_id, url, user_gesture);
   return true;
 }
@@ -3979,21 +4153,29 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
                                     command_payload);
   }
   if (command_type == "input") {
-    // Pointer, keyboard, wheel, and IME input route to the OSR browser on the
-    // CEF UI thread.  Selection is owned by the page; the host only delivers
-    // ordered input events and never synthesizes clipboard or focus changes.
+    // Pointer, keyboard, wheel, and IME input route to the browser on the CEF
+    // UI thread for both presentations.  Windowed standalone browsers also
+    // receive native HWND input and IME messages; the synthetic channel keeps
+    // scripted and assistive input ordered.  Selection is owned by the page;
+    // the host only delivers ordered input events and never synthesizes
+    // clipboard or focus changes.
     CefTaskRunner::GetForThread(TID_UI)->PostTask(
         new InputSurfaceTask(this, surface_id, std::move(input_value)));
     return true;
   }
   if (command_type == "resize") {
-    // Resize and DPI update the owned view rectangle and notify CEF so the
-    // next OnPaint matches the Flutter layout size and device scale factor.
+    // Resize and DPI update the owned geometry.  Embedded updates the OSR view
+    // rectangle so the next OnPaint matches Flutter layout; standalone moves
+    // the roscord-owned HWND and notifies the windowed browser.  Both report
+    // the validated size through the same ordered command stream.
     CefTaskRunner::GetForThread(TID_UI)->PostTask(new ResizeSurfaceTask(
         this, surface_id, resize_width, resize_height, resize_scale));
     return true;
   }
   if (command_type == "focus") {
+    // Focus updates the owned window: embedded delivers SetFocus to the OSR
+    // browser, standalone brings the roscord HWND to the front for z-order
+    // and then focuses the windowed browser.  Unfocus never destroys z-order.
     CefTaskRunner::GetForThread(TID_UI)->PostTask(
         new FocusSurfaceTask(this, surface_id, focus_value));
     return true;
@@ -4069,10 +4251,42 @@ void HostController::CreateBrowserOnUi(uint64_t surface_id, std::string url,
   }
 
   CefWindowInfo window_info;
+  HWND owned_window = nullptr;
   if (presentation == "embedded") {
     window_info.SetAsWindowless(nullptr, false);
   } else {
-    window_info.SetAsPopup(nullptr, "roscord Browser");
+    // Standalone windowed CEF in a roscord-owned top-level HWND.  The host
+    // creates and shows the window first, then parents the CEF browser as
+    // its child so geometry, focus, z-order, DPI, input, IME, popup
+    // parenting, and close stay owned. The same host, request context,
+    // profile, policy, and permission mediation apply as embedded.
+    int initial_width = surface->view_width;
+    int initial_height = surface->view_height;
+    owned_window = CreateStandaloneWindow(initial_width, initial_height);
+    if (owned_window == nullptr) {
+      SendError(std::nullopt, "runtime_failed",
+                "roscord-owned standalone window could not be created");
+      {
+        std::lock_guard lock(state_mutex_);
+        const auto iterator = surfaces_.find(surface_id);
+        if (iterator != surfaces_.end()) {
+          profiles_.Release(iterator->second.context_id);
+          surfaces_.erase(iterator);
+        }
+      }
+      closed_condition_.notify_all();
+      return;
+    }
+    {
+      std::lock_guard lock(state_mutex_);
+      const auto iterator = surfaces_.find(surface_id);
+      if (iterator != surfaces_.end()) {
+        iterator->second.owned_window = owned_window;
+        iterator->second.window_visible = true;
+      }
+    }
+    CefRect child_rect(0, 0, initial_width, initial_height);
+    window_info.SetAsChild(owned_window, child_rect);
   }
   CefBrowserSettings settings;
   settings.windowless_frame_rate = 30;
@@ -4081,14 +4295,17 @@ void HostController::CreateBrowserOnUi(uint64_t surface_id, std::string url,
       window_info, client, url, settings, nullptr, surface->request_context);
   if (browser == nullptr) {
     SendError(std::nullopt, "runtime_failed", "CEF rejected the fixture surface");
+    HWND failed_window = nullptr;
     {
       std::lock_guard lock(state_mutex_);
       const auto iterator = surfaces_.find(surface_id);
       if (iterator != surfaces_.end()) {
+        failed_window = iterator->second.owned_window;
         profiles_.Release(iterator->second.context_id);
         surfaces_.erase(iterator);
       }
     }
+    DestroyStandaloneWindow(failed_window);
     closed_condition_.notify_all();
     return;
   }
@@ -4154,17 +4371,24 @@ void HostController::OnBrowserClosed(uint64_t surface_id) {
   CancelPendingMediaOnUi(surface_id);
   bool was_active = false;
   std::optional<uint64_t> context_id;
+  HWND owned_window = nullptr;
   uint64_t close_sequence = 2;
   {
     std::lock_guard lock(state_mutex_);
     const auto iterator = surfaces_.find(surface_id);
     if (iterator != surfaces_.end()) {
       context_id = iterator->second.context_id;
+      owned_window = iterator->second.owned_window;
       close_sequence = iterator->second.next_event_sequence;
       surfaces_.erase(iterator);
       was_active = true;
     }
   }
+  // Standalone owned windows are destroyed on the UI thread after the browser
+  // closes so no orphan HWND survives process cleanup. Embedded surfaces have
+  // no window and skip this step; both paths share the same CPU/software
+  // rendering shutdown and request-context release.
+  DestroyStandaloneWindow(owned_window);
   if (context_id.has_value()) {
     profiles_.Release(*context_id);
   }
@@ -4498,9 +4722,10 @@ int RunHost(HINSTANCE instance, void* sandbox_info) {
   settings.log_severity = LOGSEVERITY_DISABLE;
 
   if (args->software_rendering) {
-    // Forced software rendering keeps the CPU OnPaint frame ring authoritative
-    // when GPU import is unavailable.  The same frame/input/resize/focus
-    // contract applies; no alternate engine is selected.
+    // Forced software rendering keeps CPU rendering authoritative when GPU
+    // import is unavailable.  Embedded keeps the same CPU OnPaint frame ring;
+    // standalone windowed browsers render in software with the same
+    // input/resize/focus/close contract.  No alternate engine is selected.
     CefRefPtr<CefCommandLine> process_command_line =
         CefCommandLine::GetGlobalCommandLine();
     if (process_command_line != nullptr) {

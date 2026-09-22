@@ -97,3 +97,36 @@ Forced software rendering (`WindowsBrowserRuntime(forceSoftwareRendering: true)`
 keeps the same CPU frame/input/resize/focus contract; it never selects another
 engine. Failures remain typed and bounded, and no legacy, system, or unowned
 browser backend is reachable from the embedded path.
+
+## Windows standalone presentation (#122)
+
+`StandaloneBrowserSurface` (`commet/lib/browser_runtime/standalone_browser_surface.dart`)
+owns one `PresentationMode.standalone` surface through the same four-operation
+seam. Standalone and embedded surfaces share one lazily started host, one
+account request context, one policy, and one permission mediation without
+starting another host; two surfaces for one account observe the same browser
+state while different accounts stay isolated.
+
+The Windows host creates a roscord-owned top-level `HWND` per standalone
+surface (`CreateStandaloneWindow`/`RegisterStandaloneWindowClass`) and parents
+the windowed CEF browser as its child (`SetAsChild`). Geometry travels through
+ordered `resize` commands applied with `SetWindowPos`/`MoveWindow` plus
+`NotifyMoveOrResizeStarted`/`NotifyScreenInfoChanged` for DPI; focus and
+z-order travel through ordered `focus` commands applied with
+`SetForegroundWindow`/`BringWindowToTop`/`SetWindowPos` plus `SetFocus`.
+Validated geometry and focus are reported back as `window_changed` events,
+which the Dart surface tracks as `StandaloneWindowGeometry` and `isFocused`.
+Pointer, keyboard, wheel, and IME input use the same ordered synthetic channel
+as embedded (windowed browsers additionally receive native `HWND` input and
+IME messages); popups stay canceled synchronously and become owned child
+surfaces or explicit external actions, never unowned native windows. Close is
+deterministic `CloseBrowser` plus `DestroyStandaloneWindow` in
+`OnBrowserClosed`, so no orphan `HWND` survives process cleanup.
+
+Windowed standalone surfaces never emit frames through Flutter: the Flutter
+`StandaloneBrowserWindow` only ever builds a status placeholder for its owned
+surface (geometry, focus, lifecycle), never a texture, platform view, or
+another engine view. Forced software rendering uses the same host flag with
+the same input/resize/focus/close contract in software; cleanup shares the
+same `CloseBrowser`/`OnBrowserClosed`/`Shutdown` path and request-context
+release as embedded.

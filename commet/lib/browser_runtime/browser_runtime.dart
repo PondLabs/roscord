@@ -1551,12 +1551,18 @@ class _FakeSurface {
 }
 
 /// Deterministic host substitute for adapter and protocol fixtures.
+///
+/// The event stream is broadcast so one fake host can serve an embedded and a
+/// standalone surface at once, matching the shared-host contract of
+/// [WindowsBrowserRuntime]: standalone and embedded surfaces share one
+/// runtime, one profile context, one policy, and one permission mediation
+/// without starting another host.
 class FakeBrowserRuntime implements BrowserRuntime {
   int _nextSurfaceId = 1;
   final Map<SurfaceId, _FakeSurface> _surfaces = {};
   final List<SurfaceEvent> _pendingEvents = [];
   late final StreamController<SurfaceEvent> _controller =
-      StreamController<SurfaceEvent>()..onListen = _flushPending;
+      StreamController<SurfaceEvent>.broadcast()..onListen = _flushPending;
   bool _flushScheduled = false;
 
   @override
