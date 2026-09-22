@@ -167,6 +167,27 @@ QUALIFY_TOOL = (ROOT / "tools" / "qualify_windows_artifact.py").read_text(
 WINDOWS_ARTIFACT_DOC = (
     ROOT / "docs" / "cef-browser-runtime-windows-artifacts.md"
 ).read_text(encoding="utf-8")
+LINUX_ARTIFACT_DART = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "linux_artifact_qualification.dart"
+).read_text(encoding="utf-8")
+LINUX_ARTIFACT_RUST = (
+    ROOT / "rust" / "rust" / "src" / "browser_linux_artifacts.rs"
+).read_text(encoding="utf-8")
+LINUX_ARTIFACT_DOC = (
+    ROOT / "docs" / "cef-browser-runtime-linux-artifacts.md"
+).read_text(encoding="utf-8")
+LINUX_ARTIFACT_TEST = (
+    ROOT / "commet" / "unit_test" / "linux_artifact_qualification_test.dart"
+).read_text(encoding="utf-8")
+LINUX_CMAKE = (ROOT / "commet" / "linux" / "CMakeLists.txt").read_text(
+    encoding="utf-8"
+)
+DEBIAN_CONTROL_2204 = (
+    ROOT / "commet" / "linux" / "debian" / "DEBIAN" / "control-ubuntu-22.04"
+).read_text(encoding="utf-8")
+DEBIAN_CONTROL_2404 = (
+    ROOT / "commet" / "linux" / "debian" / "DEBIAN" / "control-ubuntu-24.04"
+).read_text(encoding="utf-8")
 
 
 class CefHostContractTests(unittest.TestCase):
@@ -1481,6 +1502,174 @@ class CefHostContractTests(unittest.TestCase):
         self.assertIn("disable-gpu", SOURCE)
         self.assertIn("forced CPU", WINDOWS_ARTIFACT_DOC + EMBEDDED_DART)
 
+
+    def test_linux_artifacts_stage_bundled_payload_and_sandbox_route(self) -> None:
+        for token in (
+            "requiredLinuxRuntimeFiles",
+            "requiredLinuxGraphicsFiles",
+            "requiredLinuxLocale",
+            "requiredLinuxNoticeFiles",
+            "sandboxBypassFlags",
+            "requiredSandboxRoute",
+            "linuxNativeBackend",
+            "cef-osr-cpu",
+            "osr-cpu-flutter-texture",
+            "osr-cpu-owned-window",
+        ):
+            self.assertIn(token, LINUX_ARTIFACT_DART, f"missing Dart token: {token}")
+        for token in (
+            "REQUIRED_LINUX_RUNTIME_FILES",
+            "REQUIRED_LINUX_GRAPHICS_FILES",
+            "REQUIRED_LINUX_LOCALE",
+            "REQUIRED_LINUX_NOTICE_FILES",
+            "SANDBOX_BYPASS_FLAGS",
+            "required_sandbox_route",
+            "LINUX_NATIVE_BACKEND",
+            "cef-osr-cpu",
+            "osr-cpu-flutter-texture",
+            "osr-cpu-owned-window",
+        ):
+            self.assertIn(token, LINUX_ARTIFACT_RUST, f"missing Rust token: {token}")
+        for required in (
+            "Release/libcef.so",
+            "Release/chrome-sandbox",
+            "Release/libEGL.so",
+            "Release/libGLESv2.so",
+            "Release/libvk_swiftshader.so",
+            "Release/libvulkan.so.1",
+            "Release/v8_context_snapshot.bin",
+            "Release/vk_swiftshader_icd.json",
+            "Resources/chrome_100_percent.pak",
+            "Resources/chrome_200_percent.pak",
+            "Resources/icudtl.dat",
+            "Resources/resources.pak",
+            "Resources/locales/en-US.pak",
+            "LICENSE.txt",
+            "CREDITS.html",
+        ):
+            self.assertIn(required, LINUX_ARTIFACT_DART, f"missing staged file: {required}")
+            self.assertIn(required, LINUX_ARTIFACT_RUST, f"missing staged file: {required}")
+            self.assertIn(required, RUNTIME_TOOL, f"staging tool misses: {required}")
+        # The host enforces the staged payload and rejects bypass flags.
+        for token in (
+            "REQUIRED_CEF_FILES",
+            "validate_cef_root",
+            "validate_sandbox",
+            "--no-sandbox",
+        ):
+            self.assertIn(token, RUST_HOST_SOURCE)
+        # CMake consumes the staged runtime and SDK through the environment.
+        self.assertIn("ROSCORD_CEF_RUNTIME_DIR", LINUX_CMAKE)
+        self.assertIn("ROSCORD_CEF_SDK_ROOT", LINUX_CMAKE)
+        self.assertIn("/cef", LINUX_CMAKE)
+        # Qualification modules are registered in both barrels.
+        self.assertIn("linux_artifact_qualification", DART_BARREL)
+        self.assertIn("browser_linux_artifacts", RUST_LIB)
+
+    def test_linux_debian_sandbox_and_portable_namespace_are_proven(self) -> None:
+        for token in (
+            "debianSandboxUid",
+            "debianSandboxMode",
+            "assertDebianSandboxOwnerMode",
+            "assertPortableProvesUserNamespace",
+            "assertNoSandboxBypass",
+        ):
+            self.assertIn(token, LINUX_ARTIFACT_DART)
+        for token in (
+            "DEBIAN_SANDBOX_UID",
+            "DEBIAN_SANDBOX_MODE",
+            "assert_debian_sandbox_owner_mode",
+            "assert_portable_proves_user_namespace",
+            "assert_no_sandbox_bypass",
+        ):
+            self.assertIn(token, LINUX_ARTIFACT_RUST)
+        self.assertIn("4755", LINUX_ARTIFACT_DOC)
+        self.assertIn("root", LINUX_ARTIFACT_DOC.lower())
+        self.assertIn("user-namespace", LINUX_ARTIFACT_DOC.lower())
+        # Host accepts exactly the setuid helper or the user-namespace probe.
+        self.assertIn("chrome-sandbox", RUST_HOST_SOURCE)
+        self.assertIn("user_namespace_available", RUST_HOST_SOURCE)
+        self.assertIn("unshare", RUST_HOST_SOURCE)
+
+    def test_linux_matrix_cells_cover_packages_compositors_presentations(self) -> None:
+        for token in (
+            "debian-12",
+            "ubuntu-22.04",
+            "ubuntu-24.04",
+            "portable",
+            "parseLinuxNativePackage",
+            "parseLinuxNativeCompositor",
+            "linuxNativePresentationPath",
+            "linuxCellSharesAccountPolicy",
+            "linuxNativeMatrixCells",
+        ):
+            self.assertIn(token, LINUX_ARTIFACT_DART)
+        for token in (
+            "debian-12",
+            "ubuntu-22.04",
+            "ubuntu-24.04",
+            "portable",
+            "parse_linux_native_package",
+            "parse_linux_native_compositor",
+            "cell_presentation_path",
+            "cell_shares_account_policy",
+            "native_matrix_cells",
+        ):
+            self.assertIn(token, LINUX_ARTIFACT_RUST)
+        for token in (
+            "sixteen cells",
+            "osr-cpu-flutter-texture",
+            "osr-cpu-owned-window",
+            "same host request context",
+        ):
+            self.assertIn(token, LINUX_ARTIFACT_DOC.lower())
+
+    def test_linux_clean_environment_has_no_host_engine(self) -> None:
+        for token in (
+            "assertCleanEnvironment",
+            "assertNoHostEngine",
+            "isNativeHostCefPath",
+            "isNativeWebKitGtkPath",
+            "isForbiddenNativeBackend",
+            "linuxNativeWorksWithoutGpu",
+        ):
+            self.assertIn(token, LINUX_ARTIFACT_DART)
+        for token in (
+            "assert_clean_environment",
+            "assert_no_host_engine",
+            "is_host_cef_path",
+            "is_webkitgtk_path",
+            "is_forbidden_backend",
+            "works_without_gpu",
+        ):
+            self.assertIn(token, LINUX_ARTIFACT_RUST)
+        # Debian runtime dependencies carry no WebKitGTK entry.
+        for control in (DEBIAN_CONTROL_2204, DEBIAN_CONTROL_2404):
+            self.assertNotIn("webkit", control.lower())
+            self.assertNotIn("wry", control.lower())
+        for source in (LINUX_ARTIFACT_DART, LINUX_ARTIFACT_RUST):
+            lowered = source.lower()
+            self.assertIn("cef-osr-cpu", lowered)
+            self.assertIn("bundled", lowered)
+
+    def test_linux_official_video_stays_native_external(self) -> None:
+        for token in (
+            "linuxOfficialVideoPath",
+            "linuxOfficialVideoUsesCef",
+            "assertLinuxVideoPreserved",
+            "native-yt-dlp-mpv-or-deliberate-external",
+        ):
+            self.assertIn(token, LINUX_ARTIFACT_DART)
+        for token in (
+            "LINUX_OFFICIAL_VIDEO_PATH",
+            "linux_official_video_uses_cef",
+            "assert_linux_video_preserved",
+            "native-yt-dlp-mpv-or-deliberate-external",
+        ):
+            self.assertIn(token, LINUX_ARTIFACT_RUST)
+        self.assertIn("mediaEmbedUsesCef", LINUX_ARTIFACT_TEST)
+        self.assertIn("isWindows", MEDIA_ADAPTER)
+        self.assertNotIn("isLinux", MEDIA_ADAPTER + LINUX_ARTIFACT_DART)
 
 if __name__ == "__main__":
     unittest.main()
