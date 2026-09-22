@@ -403,10 +403,23 @@ bool VerifyBundledRuntime(std::wstring& error) {
 
   // The M138+ bootstrap checks the signed bootstrap/client pair.  These
   // additional checks make a partial or host-installed CEF impossible to use.
-  const std::array<std::filesystem::path, 8> required = {
+  // The list mirrors the windows-x64 runtime allow-list in
+  // third_party/cef/cef.lock.json (flattened from Release/ into this
+  // directory, with bootstrap.exe renamed to cef_host.exe by CMake) and is
+  // cross-checked offline by tools/qualify_windows_artifact.py.  Only the
+  // en-US locale is required for startup; further locales are verified by the
+  // qualification gate against the staged manifest.
+  const std::array<std::filesystem::path, 18> required = {
       root / L"cef_host.exe",       root / L"client.dll",
       root / L"libcef.dll",         root / L"chrome_elf.dll",
-      root / L"v8_context_snapshot.bin", root / L"Resources" / L"icudtl.dat",
+      root / L"d3dcompiler_47.dll", root / L"dxcompiler.dll",
+      root / L"dxil.dll",           root / L"libEGL.dll",
+      root / L"libGLESv2.dll",      root / L"v8_context_snapshot.bin",
+      root / L"vk_swiftshader.dll", root / L"vk_swiftshader_icd.json",
+      root / L"vulkan-1.dll",
+      root / L"Resources" / L"chrome_100_percent.pak",
+      root / L"Resources" / L"chrome_200_percent.pak",
+      root / L"Resources" / L"icudtl.dat",
       root / L"Resources" / L"resources.pak",
       root / L"Resources" / L"locales" / L"en-US.pak",
   };

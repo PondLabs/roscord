@@ -97,6 +97,23 @@ jobs:
           --git_hash ${{ github.sha }}
           --build_detail ${{ matrix.platform }}-x64
 
+      - name: Qualify Windows CEF artifact
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $bundle = $env:BUNDLE
+          $payload = Join-Path $bundle "cef_host"
+          $stage = Join-Path $env:GITHUB_WORKSPACE ".cef-stage"
+          $metadata = Join-Path $env:GITHUB_WORKSPACE ".cef-metadata"
+          $archive = Get-ChildItem -LiteralPath (Join-Path $env:GITHUB_WORKSPACE ".cef-cache") -Filter "*.tar.bz2" -File -Recurse | Select-Object -First 1
+          if ($null -eq $archive) { throw "locked CEF archive was not cached" }
+          python tools/cef_runtime.py stage --platform windows-x64 $archive.FullName $stage --project-root $payload
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/cef_runtime.py metadata --platform windows-x64 $stage $metadata --project-root $payload
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/qualify_windows_artifact.py --bundle $bundle --metadata $metadata
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Package
         shell: bash
         run: |
