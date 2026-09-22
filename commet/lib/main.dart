@@ -56,7 +56,6 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:tiamat/config/style/theme_changer.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:tiamat/config/style/theme_dark.dart';
-import 'package:desktop_webview_window/desktop_webview_window.dart';
 import 'package:tiamat/tiamat.dart' as tiamat;
 
 final GlobalKey<NavigatorState> navigator = GlobalKey();
@@ -137,10 +136,6 @@ void main(List<String> args) async {
   commandLineArgs = args;
   print(args);
 
-  if (runWebViewTitleBarWidget(args)) {
-    return;
-  }
-
   final format = DateFormat('HH:mm:ss');
 
   Logger.root.onRecord.listen((record) {
@@ -220,11 +215,14 @@ Future<void> initNecessary() async {
     _rustLibReady = true;
   }
 
-  // The Windows adapter starts its single authenticated CEF host lazily on
-  // the first surface open; constructing it here makes the public runtime
-  // available to desktop callers without starting a process during startup.
+  // The desktop adapters start their single authenticated CEF host lazily
+  // on the first surface open; constructing them here makes the public
+  // runtime available to desktop callers without starting a process during
+  // startup. Windows uses named pipes, Linux uses an owner-only Unix socket.
   if (PlatformUtils.isWindows) {
     browserRuntime ??= WindowsBrowserRuntime();
+  } else if (PlatformUtils.isLinux) {
+    browserRuntime ??= LinuxBrowserRuntime();
   }
 
   fileCache = FileCache.getFileCacheInstance();

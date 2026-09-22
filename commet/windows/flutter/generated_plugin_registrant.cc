@@ -9,7 +9,6 @@
 #include <connectivity_plus/connectivity_plus_windows_plugin.h>
 #include <dart_ipc/dart_ipc_plugin_c_api.h>
 #include <desktop_drop/desktop_drop_plugin.h>
-#include <desktop_webview_window/desktop_webview_window_plugin.h>
 #include <dynamic_color/dynamic_color_plugin_c_api.h>
 #include <file_selector_windows/file_selector_windows.h>
 #include <flutter_inappwebview_windows/flutter_inappwebview_windows_plugin_c_api.h>
@@ -36,8 +35,6 @@ void RegisterPlugins(flutter::PluginRegistry* registry) {
       registry->GetRegistrarForPlugin("DartIpcPluginCApi"));
   DesktopDropPluginRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("DesktopDropPlugin"));
-  DesktopWebviewWindowPluginRegisterWithRegistrar(
-      registry->GetRegistrarForPlugin("DesktopWebviewWindowPlugin"));
   DynamicColorPluginCApiRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("DynamicColorPluginCApi"));
   FileSelectorWindowsRegisterWithRegistrar(

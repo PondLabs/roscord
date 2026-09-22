@@ -15,7 +15,7 @@ use serde_json::Value;
 // original four-operation seam.  The implementation lives in its own module
 // so platform adapters can share it without pulling in CEF types.
 pub use crate::browser_runtime_lifecycle::{
-    CommandOutcome, CommandOutcomeReason, CommandToken, FailureClass, FailureScope, FaultPoint,
+    CommandOutcome, CommandOutcomeReason, CommandToken, FailureClass, FailureScope,
     LifecycleBrowserRuntime, LifecycleError, RuntimeEvent, RuntimeEventKind, RuntimeFailure,
     RuntimeLifecycle, RuntimeState,
 };

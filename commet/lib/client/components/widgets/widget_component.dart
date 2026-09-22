@@ -25,9 +25,8 @@ abstract class UserWidgetInfo {
 
 enum WidgetHostType {
   embedded,
-  childProcess,
+  standalone,
   remoteHttpClient,
-  externalBrowser,
   androidActivity,
 }
 

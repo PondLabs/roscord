@@ -22,7 +22,7 @@ use crate::browser_runtime::{
     SurfaceEvent, SurfaceId, SurfaceSpec, WireMessage, DEFAULT_MAX_FRAME_BYTES,
 };
 use crate::browser_runtime_lifecycle::{
-    FailureClass, FaultPoint, RuntimeEvent, RuntimeEventKind, RuntimeLifecycle, RuntimeState,
+    FailureClass, RuntimeEvent, RuntimeEventKind, RuntimeLifecycle, RuntimeState,
 };
 
 const HOST_START_TIMEOUT: Duration = Duration::from_secs(5);
@@ -96,8 +96,6 @@ pub struct LinuxBrowserRuntime {
     pending_commands: BTreeMap<u64, VecDeque<PendingCommand>>,
     acknowledged_commands: BTreeMap<SurfaceId, VecDeque<u64>>,
     held_presentation: BTreeMap<(SurfaceId, u8), SurfaceCommand>,
-    validation_build: bool,
-    fault_point: Option<FaultPoint>,
 }
 
 impl LinuxBrowserRuntime {
@@ -105,28 +103,6 @@ impl LinuxBrowserRuntime {
     /// endpoint.  CEF and sandbox validation remains in `cef_host` so the
     /// parent cannot accidentally weaken the host's launch boundary.
     pub fn start(config: LinuxBrowserRuntimeConfig) -> Result<Self, RuntimeError> {
-        Self::start_with_validation_fault(config, None)
-    }
-
-    /// Validation-only launch hook used by deterministic lifecycle tests.
-    /// Release builds reject the option before spawning the host.
-    pub fn start_with_validation_fault(
-        config: LinuxBrowserRuntimeConfig,
-        fault_point: Option<FaultPoint>,
-    ) -> Result<Self, RuntimeError> {
-        if fault_point.is_some() && !cfg!(debug_assertions) {
-            return Err(runtime_error(
-                "CEF fault injection is unavailable in production builds",
-            ));
-        }
-        Self::start_with_options(config, fault_point.is_some(), fault_point)
-    }
-
-    fn start_with_options(
-        config: LinuxBrowserRuntimeConfig,
-        validation_build: bool,
-        fault_point: Option<FaultPoint>,
-    ) -> Result<Self, RuntimeError> {
         validate_start_path(&config.host_binary, "host binary", true)?;
         validate_start_path(&config.cef_root, "CEF root", false)?;
         validate_absolute(&config.profile_root, "profile root")?;
@@ -136,7 +112,7 @@ impl LinuxBrowserRuntime {
             ));
         }
 
-        let transport = spawn_host(&config, validation_build, fault_point)?;
+        let transport = spawn_host(&config)?;
 
         let mut lifecycle = RuntimeLifecycle::new();
         let mut lifecycle_events = lifecycle
@@ -166,8 +142,6 @@ impl LinuxBrowserRuntime {
             pending_commands: BTreeMap::new(),
             acknowledged_commands: BTreeMap::new(),
             held_presentation: BTreeMap::new(),
-            validation_build,
-            fault_point,
         })
     }
 
@@ -313,7 +287,7 @@ impl LinuxBrowserRuntime {
     }
 
     fn connect_transport(&mut self) -> Result<(), RuntimeError> {
-        let transport = spawn_host(&self.config, self.validation_build, self.fault_point)?;
+        let transport = spawn_host(&self.config)?;
         self.child = transport.child;
         self.stream = transport.stream;
         self.codec = transport.codec;
@@ -944,11 +918,7 @@ impl Drop for LinuxBrowserRuntime {
     }
 }
 
-fn spawn_host(
-    config: &LinuxBrowserRuntimeConfig,
-    validation_build: bool,
-    fault_point: Option<FaultPoint>,
-) -> Result<HostTransport, RuntimeError> {
+fn spawn_host(config: &LinuxBrowserRuntimeConfig) -> Result<HostTransport, RuntimeError> {
     let nonce = Uuid::new_v4().simple().to_string();
     let codec = FramedCodec::with_limit(nonce.clone(), config.max_frame_bytes)
         .map_err(RuntimeError::Protocol)?;
@@ -969,12 +939,6 @@ fn spawn_host(
         .arg(&config.profile_root)
         .arg("--max-frame-bytes")
         .arg(config.max_frame_bytes.to_string());
-    if validation_build {
-        command.arg("--cef-validation");
-    }
-    if let Some(fault_point) = fault_point {
-        command.arg(format!("--cef-fault={}", fault_name(fault_point)));
-    }
     let mut child = match command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1007,22 +971,6 @@ fn spawn_host(
         codec,
         socket_root,
     })
-}
-
-fn fault_name(fault_point: FaultPoint) -> &'static str {
-    match fault_point {
-        FaultPoint::HostCrash => "host_crash",
-        FaultPoint::HostUnresponsive => "host_unresponsive",
-        FaultPoint::RendererCrash => "renderer_crash",
-        FaultPoint::RendererOom => "renderer_oom",
-        FaultPoint::RendererHang => "renderer_hang",
-        FaultPoint::GpuCrash => "gpu_crash",
-        FaultPoint::UtilityCrash => "utility_crash",
-        FaultPoint::BadBundle => "bad_bundle",
-        FaultPoint::BadProtocol => "bad_protocol",
-        FaultPoint::SandboxFailure => "sandbox_failure",
-        FaultPoint::ProfileLock => "profile_lock",
-    }
 }
 
 fn failure_class_for_code(code: &str) -> Option<FailureClass> {

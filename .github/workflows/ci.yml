@@ -47,8 +47,7 @@ jobs:
             echo "dart=true" >> "$GITHUB_OUTPUT"
           fi
 
-          # Only crates that have tests: rust_lib_commet pulls in wry/tao and
-          # would need the whole GTK/WebKit stack just to compile.
+          # Only crates that have tests.
           crates=""
           for manifest in rust/*/Cargo.toml; do
             dir=$(dirname "$manifest")

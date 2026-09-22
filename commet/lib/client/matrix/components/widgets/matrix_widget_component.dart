@@ -2,11 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:commet/browser_runtime.dart';
 import 'package:commet/client/client.dart';
 import 'package:commet/client/components/widgets/widget_component.dart';
+import 'package:commet/client/matrix/components/widgets/matrix_widget_adapter.dart';
 import 'package:commet/client/matrix/components/widgets/runners/android_activity/matrix_widget_android_runner.dart';
 import 'package:commet/client/matrix/components/widgets/runners/in_app_web_view/matrix_widget_inappwebview_runner.dart';
-import 'package:commet/client/matrix/components/widgets/runners/subprocess/matrix_widget_desktop_runner.dart';
 import 'package:commet/client/matrix/components/widgets/runners/remote_http/self_signed_https_server.dart';
 import 'package:commet/client/matrix/components/widgets/runners/remote_http/matrix_widget_remote_http_runner.dart';
 import 'package:commet/client/matrix/matrix_client.dart';
@@ -21,12 +22,28 @@ import 'package:commet/ui/organisms/overlay_windows/overlay_window_manager.dart'
 import 'package:commet/utils/color_utils.dart';
 import 'package:commet/utils/error_utils.dart';
 import 'package:commet/utils/image_or_icon.dart';
+import 'package:commet/utils/links/link_utils.dart';
 import 'package:dart_ipc/dart_ipc.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:matrix/matrix.dart' show StrippedStateEvent;
 import 'package:matrix/matrix_api_lite/utils/try_get_map_extension.dart';
 import 'package:network_info_plus/network_info_plus.dart';
+
+/// Whether desktop Matrix widgets route through the CEF [MatrixWidgetAdapter]
+/// instead of a legacy runner.
+///
+/// Pure predicate over platform flags so it is unit-testable: Windows and
+/// Linux use the bundled CEF runtime unconditionally after the cutover. Web,
+/// Android, macOS, and iOS keep their existing runners; there is no legacy,
+/// system, or unowned-browser branch left on desktop.
+bool matrixWidgetUsesCef({
+  required bool isWeb,
+  required bool isWindows,
+  required bool isLinux,
+}) =>
+    !isWeb && (isWindows || isLinux);
 
 class MatrixUserWidgetInfo implements UserWidgetInfo {
   late String _name;
@@ -142,16 +159,12 @@ class MatrixWidgetComponent implements WidgetComponent<MatrixClient> {
 
   @override
   WidgetHostType get defaultHostType {
-    if (PlatformUtils.isWindows) {
+    if (PlatformUtils.isWindows || PlatformUtils.isLinux) {
       return WidgetHostType.embedded;
     }
 
     if (PlatformUtils.isAndroid) {
       return WidgetHostType.androidActivity;
-    }
-
-    if (PlatformUtils.isLinux) {
-      return WidgetHostType.externalBrowser;
     }
 
     if (PlatformUtils.isWeb) {
@@ -163,23 +176,16 @@ class MatrixWidgetComponent implements WidgetComponent<MatrixClient> {
 
   @override
   List<WidgetHostType> supportedHostTypes() {
-    if (PlatformUtils.isWindows) {
+    if (PlatformUtils.isWindows || PlatformUtils.isLinux) {
       return const [
-        WidgetHostType.childProcess,
         WidgetHostType.embedded,
+        WidgetHostType.standalone,
         WidgetHostType.remoteHttpClient
       ];
     }
 
     if (PlatformUtils.isAndroid) {
       return const [WidgetHostType.androidActivity, WidgetHostType.embedded];
-    }
-
-    if (PlatformUtils.isLinux) {
-      return const [
-        WidgetHostType.remoteHttpClient,
-        WidgetHostType.externalBrowser,
-      ];
     }
 
     if (PlatformUtils.isWeb) {
@@ -239,19 +245,29 @@ class MatrixWidgetComponent implements WidgetComponent<MatrixClient> {
 
       switch (runnerType) {
         case WidgetHostType.embedded:
+          // Desktop embedded Matrix widgets run unconditionally through the
+          // bundled CEF runtime after the cutover; every other platform keeps
+          // its existing in-app runner. There is no WebView, Wry, system CEF,
+          // or unowned-browser branch left on desktop.
+          if (matrixWidgetUsesCef(
+            isWeb: PlatformUtils.isWeb,
+            isWindows: PlatformUtils.isWindows,
+            isLinux: PlatformUtils.isLinux,
+          )) {
+            await openCefMatrixWidget(
+              info,
+              widget,
+              room,
+              context,
+              presentation: PresentationMode.embedded,
+            );
+            return;
+          }
           uri = Uri.parse(url);
 
-          HttpServer? server;
-
-          // On windows, we need to serve the initial embedded page
-          // from an actual http server, otherwise the browser wont
-          // recognise our 'localhost' as a secure context.
-          // All communication is still done through webview js handlers,
-          // and the server will be killed after the initial request.
-          if (PlatformUtils.isWindows) {
-            server = await spawnServerWithOpenPort();
-          }
-
+          // Preserved web/Android/macOS/iOS path: the in-app runner serves
+          // from an in-memory page. Desktop Windows/Linux never reach this
+          // branch; they open through the CEF adapter above.
           uri = Uri(
               scheme: uri.scheme,
               host: uri.host,
@@ -260,29 +276,30 @@ class MatrixWidgetComponent implements WidgetComponent<MatrixClient> {
               fragment: uri.fragment.isEmpty ? null : uri.fragment,
               queryParameters: {
                 ...uri.queryParameters,
-                "parentUrl": server == null
-                    ? "http://localhost/widget"
-                    : "http://localhost:${server.port}",
+                "parentUrl": "http://localhost/widget",
                 "widgetId": info.id,
               });
 
           url = uri.toString();
 
-          await createEmbeddedWidget(url, info, widget, room, context,
-              server: server);
+          await createEmbeddedWidget(url, info, widget, room, context);
           return;
-        case WidgetHostType.childProcess:
-          await spawnChildProcess(url, room, widget);
+        case WidgetHostType.standalone:
+          // Desktop standalone Matrix widgets open in a roscord-owned CEF
+          // window through the same runtime, account context, policy, and
+          // permission mediation as embedded. Standalone is only offered on
+          // desktop; other platforms never reach this branch.
+          await openCefMatrixWidget(
+            info,
+            widget,
+            room,
+            context,
+            presentation: PresentationMode.standalone,
+          );
           return;
         case WidgetHostType.remoteHttpClient:
           await createRemoteHttpWidgetRunner(url, room, widget,
               useInsecureHttp: false, allowRemoteConnection: true);
-          return;
-        case WidgetHostType.externalBrowser:
-          await createRemoteHttpWidgetRunner(url, room, widget,
-              launchBrowser: true,
-              useInsecureHttp: true,
-              allowRemoteConnection: false);
           return;
         case WidgetHostType.androidActivity:
           uri = Uri(
@@ -422,29 +439,66 @@ class MatrixWidgetComponent implements WidgetComponent<MatrixClient> {
     OverlayWindowsManager.of(context).addWindow(window);
   }
 
-  Future<void> spawnChildProcess(
-      String url, Room room, MatrixUserWidgetInfo widget) async {
-    var exe = Platform.resolvedExecutable;
-    var process = await Process.start(
-      exe,
-      ['--widget_runner', '--title="roscord | Widget Runner"', '--url=${url}'],
+  /// Opens a desktop Matrix widget through the bundled CEF runtime.
+  ///
+  /// Unconditional after the cutover: Windows and Linux embedded and
+  /// standalone presentations share one lazily started host, one account
+  /// request context, one policy, and one permission mediation. There is no
+  /// validation switch, no legacy runner, and no fallback engine.
+  Future<void> openCefMatrixWidget(
+    MatrixUserWidgetInfo info,
+    MatrixUserWidgetInfo widget,
+    Room room,
+    BuildContext context, {
+    required PresentationMode presentation,
+  }) async {
+    final runtime = browserRuntime;
+    if (runtime == null) {
+      throw StateError('Embedded browser unavailable on this platform');
+    }
+    final matrixRoom = room as MatrixRoom;
+    final launch = MatrixWidgetAdapterLaunch.fromMatrixWidget(
+      info: info,
+      room: matrixRoom,
+      colorScheme: ColorScheme.of(context),
+      brightness: Theme.of(context).brightness,
+      presentation: presentation,
+    );
+    final adapter = MatrixWidgetAdapter(runtime: runtime);
+    final runner = await adapter.open(
+      launch: launch,
+      room: matrixRoom,
+      client: room.client as MatrixClient,
+      info: info,
+      context: context,
+    );
+    registerRunner(runner);
+
+    final onExitController = StreamController();
+    runner.onClosed.listen((_) {
+      if (!onExitController.isClosed) onExitController.add(null);
+    });
+
+    final builtWidget = _CefMatrixWidget(
+      component: this,
+      adapter: adapter,
+      runner: runner,
+      launch: launch,
+      presentation: presentation,
+      onExitController: onExitController,
     );
 
-    var runner = MatrixUserWidgetSubprocessRunner(
-        process: process,
-        room: room as MatrixRoom,
-        context: navigator.currentContext!,
-        widgetId: widget.id,
-        info: widget,
-        client: room.client as MatrixClient);
+    final window = OverlayWindow(
+        widget: builtWidget,
+        title: info.name,
+        onClose: onExitController.stream);
 
-    registerRunner(runner);
+    OverlayWindowsManager.of(context).addWindow(window);
   }
 
   Future<void> createRemoteHttpWidgetRunner(
       String url, Room room, MatrixUserWidgetInfo widget,
-      {bool launchBrowser = false,
-      bool useInsecureHttp = false,
+      {bool useInsecureHttp = false,
       bool allowRemoteConnection = false}) async {
     final info = NetworkInfo();
 
@@ -462,16 +516,13 @@ class MatrixWidgetComponent implements WidgetComponent<MatrixClient> {
 
     Log.i("Got IP: $ip");
 
+    // Preserved remote-device flow only: the client connects from another
+    // device via QR/link. There is no local system-browser branch anymore.
     HttpServer? server;
-    if (launchBrowser) {
-      ip = "localhost";
+    if (useInsecureHttp) {
       server = await spawnServerWithOpenPort();
     } else {
-      if (useInsecureHttp) {
-        server = await spawnServerWithOpenPort();
-      } else {
-        server = await spawnSelfSignedHttpsServer(ip!);
-      }
+      server = await spawnSelfSignedHttpsServer(ip!);
     }
 
     Log.i("Hosted server: ${ip}");
@@ -484,11 +535,348 @@ class MatrixWidgetComponent implements WidgetComponent<MatrixClient> {
         info: widget,
         server: server,
         allowRemoteConnection: allowRemoteConnection,
-        launchBrowser: launchBrowser,
         context: navigator.currentContext!,
         useInsecureHttp: useInsecureHttp,
         hostName: ip!);
 
     registerRunner(runner);
+  }
+}
+
+/// Desktop Matrix widget presentation through the bundled CEF runtime.
+///
+/// Replaces the deleted legacy branches (in-app web view and Wry
+/// child-process) on Windows and Linux: the adapter launch opens as an
+/// embedded [BrowserRuntime] surface shown in
+/// normal Flutter composition, or as a standalone surface in a roscord-owned
+/// window. The provider allowlist and navigation policy travel in the
+/// [SurfaceSpec]; disallowed links become explicit external actions via
+/// `LinkUtils`, and closing the overlay closes the surface so no profile,
+/// host, or owned-window leaks. Loading, Retry, Close, and error chrome
+/// match the other CEF surfaces. Web, Android, macOS, and iOS never reach
+/// this widget (see [matrixWidgetUsesCef]).
+class _CefMatrixWidget extends StatefulWidget {
+  const _CefMatrixWidget({
+    required this.component,
+    required this.adapter,
+    required this.runner,
+    required this.launch,
+    required this.presentation,
+    required this.onExitController,
+  });
+
+  final MatrixWidgetComponent component;
+  final MatrixWidgetAdapter adapter;
+  final MatrixWidgetBrowserRuntimeRunner runner;
+  final MatrixWidgetAdapterLaunch launch;
+  final PresentationMode presentation;
+  final StreamController onExitController;
+
+  @override
+  State<_CefMatrixWidget> createState() => _CefMatrixWidgetState();
+}
+
+class _CefMatrixWidgetState extends State<_CefMatrixWidget> {
+  late MatrixWidgetAdapter _adapter;
+  EmbeddedBrowserSurface? _embeddedSurface;
+  StandaloneBrowserSurface? _standaloneSurface;
+  StreamSubscription<SurfaceEvent>? _eventSubscription;
+  StreamSubscription<void>? _closedSubscription;
+  Object? _error;
+  int _revision = 0;
+  Size? _lastSize;
+  final FocusNode _focusNode = FocusNode(debugLabel: 'CefMatrixWidget');
+
+  BrowserRuntime? get _runtime => browserRuntime;
+
+  late final MatrixRoom _room;
+  late final MatrixClient _client;
+  late final UserWidgetInfo _info;
+
+  @override
+  void initState() {
+    super.initState();
+    _adapter = widget.adapter;
+    _room = widget.runner.room as MatrixRoom;
+    _client = widget.runner.client;
+    _info = widget.runner.info;
+    _attach(widget.runner);
+  }
+
+  void _attach(MatrixWidgetBrowserRuntimeRunner runner) {
+    final runtime = _runtime!;
+    final spec = widget.launch.toSurfaceSpec();
+    if (widget.presentation == PresentationMode.standalone) {
+      _standaloneSurface = StandaloneBrowserSurface.attached(
+        runtime: runtime,
+        spec: spec,
+        surfaceId: runner.surfaceId,
+      );
+    } else {
+      _embeddedSurface = EmbeddedBrowserSurface.attached(
+        runtime: runtime,
+        spec: spec,
+        surfaceId: runner.surfaceId,
+      );
+    }
+    _eventSubscription = runner.surfaceEvents.listen(_onSurfaceEvent);
+    _closedSubscription?.cancel();
+    _closedSubscription = runner.onClosed.listen((_) {
+      if (!widget.onExitController.isClosed) {
+        widget.onExitController.add(null);
+      }
+    });
+  }
+
+  void _onSurfaceEvent(SurfaceEvent event) {
+    if (!mounted) return;
+    // Disallowed links become explicit external actions; the embed stays.
+    if (event is NavigationEvent &&
+        event.navigation.outcome == NavigationOutcome.external) {
+      final target = Uri.tryParse(event.navigation.url);
+      if (target != null) LinkUtils.open(target, context: context);
+      return;
+    }
+    if (event is FailedEvent) {
+      setState(() => _error ??= StateError(event.failure.message));
+    } else if (event is ClosedEvent) {
+      // An unexpected close (anything but dispose) surfaces retryable UI
+      // instead of stranding a dead frame.
+      setState(() => _error ??= StateError('Embedded browser closed'));
+    }
+  }
+
+  Future<void> _retry() async {
+    setState(() {
+      _error = null;
+      _revision += 1;
+      _lastSize = null;
+    });
+    await _eventSubscription?.cancel();
+    _eventSubscription = null;
+    await _closedSubscription?.cancel();
+    _closedSubscription = null;
+    await _embeddedSurface?.dispose();
+    _embeddedSurface = null;
+    await _standaloneSurface?.dispose();
+    _standaloneSurface = null;
+    try {
+      // The adapter serializes opens and disposes the previous session, so
+      // the retry closes the failed surface before opening a fresh one with
+      // no profile, host, or owned-window leak.
+      final runner = await _adapter.open(
+        launch: widget.launch,
+        room: _room,
+        client: _client,
+        info: _info,
+        context: context,
+      );
+      if (!mounted) {
+        await runner.dispose();
+        return;
+      }
+      // Registered through the component so capability prompts and the
+      // one-active-session rule keep working across retries.
+      widget.component.registerRunner(runner);
+      setState(() => _attach(runner));
+    } catch (e, s) {
+      Log.onError(e, s, content: 'Failed to reopen Matrix widget surface');
+      if (mounted) setState(() => _error = e);
+    }
+  }
+
+  @override
+  void dispose() {
+    // State.dispose cannot await: subscriptions and presentation state are
+    // torn down first, then the adapter closes the runtime surface and the
+    // host destroys the browser and releases the surface.
+    unawaited(_eventSubscription?.cancel());
+    unawaited(_closedSubscription?.cancel());
+    unawaited(_embeddedSurface?.dispose());
+    unawaited(_standaloneSurface?.dispose());
+    unawaited(_adapter.dispose());
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  void _forwardResize(Size size) {
+    final surface = _embeddedSurface;
+    if (surface == null || !surface.isReady || _error != null) return;
+    if (_lastSize == size) return;
+    _lastSize = size;
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    unawaited(
+      surface
+          .resize(size.width.round(), size.height.round(), dpr)
+          .then<void>((_) {}, onError: (Object _, StackTrace __) {}),
+    );
+  }
+
+  Future<void> _forwardPointer(Future<void> Function() send) async {
+    try {
+      await send();
+    } catch (_) {
+      // Input after close is a cancellation, not an error.
+    }
+  }
+
+  KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
+    final surface = _embeddedSurface;
+    if (surface == null || _error != null) return KeyEventResult.ignored;
+    if (event is! KeyDownEvent && event is! KeyUpEvent) {
+      return KeyEventResult.ignored;
+    }
+    // Ordered keyboard input for the embedded page. IME composition stays a
+    // follow-up; the surface seam already carries it once a method channel
+    // exists.
+    unawaited(
+      _forwardPointer(
+        () => surface.key(
+          event.logicalKey.keyLabel,
+          event.logicalKey.debugName ?? '',
+          pressed: event is KeyDownEvent,
+        ),
+      ),
+    );
+    return KeyEventResult.handled;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final error = _error;
+    if (error != null) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.error_outline_rounded, size: 36),
+            const SizedBox(height: 12),
+            const Text('Unable to load this widget'),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _retry,
+                  icon: const Icon(Icons.refresh_rounded),
+                  label: const Text('Retry'),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  onPressed: () {
+                    // Firing the exit stream removes the overlay window,
+                    // which disposes this widget and closes the surface.
+                    if (!widget.onExitController.isClosed) {
+                      widget.onExitController.add(null);
+                    }
+                  },
+                  icon: const Icon(Icons.close_rounded),
+                  label: const Text('Close'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (widget.presentation == PresentationMode.standalone) {
+      final surface = _standaloneSurface;
+      if (surface == null) {
+        return const Center(child: CircularProgressIndicator());
+      }
+      // Windowed CEF presents natively in its owned window; Flutter shows
+      // only the status placeholder, never a texture or another engine view.
+      return StandaloneBrowserWindow(
+        key: ValueKey(_revision),
+        surface: surface,
+      );
+    }
+
+    final surface = _embeddedSurface;
+    if (surface == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    return Focus(
+      focusNode: _focusNode,
+      autofocus: true,
+      onKeyEvent: _onKeyEvent,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          if (constraints.maxWidth > 0 && constraints.maxHeight > 0) {
+            _forwardResize(
+              Size(constraints.maxWidth, constraints.maxHeight),
+            );
+          }
+          // Pointer, wheel, and focus stay ordered through the surface so
+          // the widget keeps its click and scroll contract.
+          return Listener(
+            behavior: HitTestBehavior.opaque,
+            onPointerDown: (event) {
+              final current = _embeddedSurface;
+              if (current == null) return;
+              unawaited(_forwardPointer(() => current.setFocus(true)));
+              unawaited(
+                _forwardPointer(
+                  () => current.pointer(
+                    PointerKind.down,
+                    event.localPosition.dx,
+                    event.localPosition.dy,
+                    buttons: event.buttons,
+                  ),
+                ),
+              );
+            },
+            onPointerMove: (event) {
+              final current = _embeddedSurface;
+              if (current == null) return;
+              unawaited(
+                _forwardPointer(
+                  () => current.pointer(
+                    PointerKind.move,
+                    event.localPosition.dx,
+                    event.localPosition.dy,
+                    buttons: event.buttons,
+                  ),
+                ),
+              );
+            },
+            onPointerUp: (event) {
+              final current = _embeddedSurface;
+              if (current == null) return;
+              unawaited(
+                _forwardPointer(
+                  () => current.pointer(
+                    PointerKind.up,
+                    event.localPosition.dx,
+                    event.localPosition.dy,
+                  ),
+                ),
+              );
+            },
+            onPointerSignal: (signal) {
+              if (signal is! PointerScrollEvent) return;
+              final current = _embeddedSurface;
+              if (current == null) return;
+              unawaited(
+                _forwardPointer(
+                  () => current.wheel(
+                    signal.localPosition.dx,
+                    signal.localPosition.dy,
+                    signal.scrollDelta.dx,
+                    signal.scrollDelta.dy,
+                  ),
+                ),
+              );
+            },
+            child: EmbeddedBrowserView(
+              key: ValueKey(_revision),
+              surface: surface,
+            ),
+          );
+        },
+      ),
+    );
   }
 }

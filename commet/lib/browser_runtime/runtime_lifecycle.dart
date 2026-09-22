@@ -741,34 +741,11 @@ class RuntimeLifecycle {
   }
 }
 
-enum FaultPoint {
-  hostCrash,
-  hostUnresponsive,
-  rendererCrash,
-  rendererOom,
-  rendererHang,
-  gpuCrash,
-  utilityCrash,
-  badBundle,
-  badProtocol,
-  sandboxFailure,
-  profileLock,
-}
-
-FaultPoint? parseFaultPoint(String value, {required bool validationBuild}) {
-  if (!validationBuild) return null;
-  for (final point in FaultPoint.values) {
-    if (point.name == value ||
-        point.name.replaceAllMapped(
-              RegExp(r'[A-Z]'),
-              (match) => '_${match.group(0)!.toLowerCase()}',
-            ) ==
-            value) {
-      return point;
-    }
-  }
-  return null;
-}
+/// The cutover deleted validation-only fault injection: there is no
+/// `--cef-validation` switch, no `--cef-fault` point, and no `FaultPoint`
+/// type. Recovery is driven only by real host, renderer, GPU, utility, and
+/// profile observations through [RuntimeLifecycle]; production binaries
+/// cannot select a fault path.
 
 String _sanitize(String value, int maxLength) {
   final cleaned = value

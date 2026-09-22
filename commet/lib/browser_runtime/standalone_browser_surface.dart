@@ -69,6 +69,33 @@ class StandaloneBrowserSurface {
   final BrowserRuntime _runtime;
   final SurfaceSpec _spec;
 
+  /// Attach presentation to a surface that an adapter (for example
+  /// [MatrixWidgetAdapter]) already opened through the same [runtime].
+  ///
+  /// The adapter resolves its open only after the host's `ReadyEvent`, so an
+  /// attached surface is ready by construction; subsequent window changes
+  /// and lifecycle events flow through the new subscription. Protocol
+  /// ownership (close/dispose of the runtime surface) stays with the
+  /// adapter: callers must [dispose] the presentation without [close], then
+  /// dispose the adapter session.
+  StandaloneBrowserSurface.attached({
+    required BrowserRuntime runtime,
+    required SurfaceSpec spec,
+    required SurfaceId surfaceId,
+  })  : _runtime = runtime,
+        _spec = spec {
+    if (spec.presentation != PresentationMode.standalone) {
+      throw ArgumentError.value(
+        spec.presentation,
+        'spec.presentation',
+        'StandaloneBrowserSurface requires PresentationMode.standalone',
+      );
+    }
+    _surfaceId = surfaceId;
+    _ready = true;
+    _subscription = _runtime.events().listen(_onEvent);
+  }
+
   final StreamController<SurfaceEvent> _surfaceEvents =
       StreamController<SurfaceEvent>.broadcast();
 

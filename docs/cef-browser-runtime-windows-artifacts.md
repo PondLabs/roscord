@@ -104,12 +104,21 @@ notices, CycloneDX SBOM, and provenance are complete and lock-consistent;
 native binaries pass hash checks (and detached `signatures.json` checks with
 `--require-signatures`); the sandbox/bootstrap pair is present with no
 bypass switch in shipped configs; no foreign backend (`WebView2Loader.dll`,
-`desktop_webview_window`, Windows `inappwebview`, Wry, WebKitGTK), no shipped
+`desktop_webview_window`, Wry, WebKitGTK), no shipped
 CEF archive, and no CEF download reference; and the SwiftShader/ANGLE/Direct3D
 inputs for forced CPU mode.  Symbols (`.pdb`), import libraries,
 `bootstrapc.exe`, and debug/test trees always fail.  The desktop-build and
 release workflows run this gate after the Windows build; a failure blocks the
 artifact.
+
+The `flutter_inappwebview_windows` plugin name still appears in the bundle
+(it now denotes the cutover stub in
+`third_party/flutter_inappwebview_windows_stub/`, a no-op native registration
+with no engine), so the filename gate no longer flags that name. Instead the
+gate scans every app-side binary outside the manifest-pinned CEF payload for
+engine-evidence bytes (`CreateCoreWebView2`, `EdgeWebView2`,
+`WebView2Loader`, `Microsoft.Web.WebView2`): the stub passes only when its
+bytes are clean, and any other binary carrying those markers fails closed.
 
 ## Sandbox and bootstrap failures block opening
 

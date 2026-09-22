@@ -158,17 +158,21 @@ void main() {
     );
   });
 
-  test('fault injection parser is validation-only', () {
-    expect(
-      parseFaultPoint('hostCrash', validationBuild: true),
-      FaultPoint.hostCrash,
+  test('validation switch and fault injection controls are gone', () {
+    // The cutover removed `--cef-validation`, `--cef-fault`, `FaultPoint`,
+    // and `parseFaultPoint`: recovery is driven only by real host
+    // observations. The lifecycle still classifies a real host crash without
+    // any injection hook.
+    final lifecycle = RuntimeLifecycle();
+    lifecycle.start(0);
+    lifecycle.hostReady(0);
+    final events = lifecycle.reportFailure(
+      FailureClass.hostCrash,
+      1,
+      message: 'real host exit',
     );
-    expect(
-      parseFaultPoint('host_crash', validationBuild: true),
-      FaultPoint.hostCrash,
-    );
-    expect(parseFaultPoint('hostCrash', validationBuild: false), isNull);
-    expect(parseFaultPoint('future', validationBuild: true), isNull);
+    expect(events.first.kind.type, RuntimeEventType.failure);
+    expect(events.first.kind.failure?.kind, FailureClass.hostCrash);
   });
 
   test('diagnostics use the stable snake_case wire vocabulary', () {
