@@ -160,8 +160,8 @@ class _MediaKitAudioInstance implements SoundboardAudioInstance {
   /// mpv clamps `volume` to `volume-max` (default 130), so raise it before
   /// the first setVolume: normalization boosts go past 100 — user 1.5 * gain
   /// +18 dB is about 229 on mpv's cubic scale.
-  Future<void> _configure() => setMpvProperty(_player, 'volume-max',
-      MediaKitSoundboardPlayer.mpvVolumeMax.toString());
+  Future<void> _configure() => setMpvProperty(
+      _player, 'volume-max', MediaKitSoundboardPlayer.mpvVolumeMax.toString());
 
   @override
   late final Stream<void> finished = _finishedStream();

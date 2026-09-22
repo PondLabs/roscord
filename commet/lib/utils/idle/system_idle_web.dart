@@ -95,8 +95,9 @@ void _startDetector() async {
     detector.addEventListener(
         'change',
         ((web.Event _) {
-          _idleSince =
-              detector.userState == 'idle' ? _idleSince ?? DateTime.now() : null;
+          _idleSince = detector.userState == 'idle'
+              ? _idleSince ?? DateTime.now()
+              : null;
         }).toJS);
     await detector
         .start({'threshold': _detectorThreshold.inMilliseconds}.jsify()

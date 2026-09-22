@@ -1,7 +1,13 @@
 name: desktop-build
 
 # Reusable: builds the desktop bundles for the given platforms in one mode and
-# uploads each as an artifact named roscord-<version>-<platform>-x64-<mode>.
+# uploads each as an artifact named roscord-<version>-<platform>-<arch>-<mode>.
+#
+# Also runnable by hand, on any branch, which ci.yml is not: a push to main
+# there cuts a release, so it is a costly way to find out whether a platform
+# still builds. Dispatching this one just leaves an artifact behind. GitHub
+# only lists a workflow_dispatch workflow that exists on the default branch,
+# though the run itself can then be pointed at any branch.
 on:
   workflow_call:
     inputs:
@@ -18,6 +24,23 @@ on:
         required: false
         type: string
         default: '["windows", "linux"]'
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: JSON array of platforms to build, from windows, linux and macos
+        required: false
+        type: string
+        default: '["macos"]'
+      build_mode:
+        description: release or debug
+        required: false
+        type: string
+        default: release
+      version:
+        description: Version tag baked into the build, e.g. v0.5.0
+        required: false
+        type: string
+        default: v0.0.0
 
 jobs:
   build:
@@ -28,10 +51,12 @@ jobs:
         platform: ${{ fromJSON(inputs.platforms) }}
     # Blacksmith has no macOS image, so that one leg runs on GitHub's.
     runs-on: ${{ matrix.platform == 'windows' && 'blacksmith-4vcpu-windows-2025' || matrix.platform == 'macos' && 'macos-15' || 'blacksmith-4vcpu-ubuntu-2404' }}
-    # macOS is the newest target and has never been built here, so it does not
-    # get to hold up a release: the leg goes red on its own and publish still
-    # runs, with whatever it managed to upload.
-    continue-on-error: ${{ matrix.platform == 'macos' }}
+    # macOS is the newest target and does not yet build, so it does not get to
+    # hold up a release: the leg goes red on its own and publish still runs,
+    # with whatever it managed to upload. Not when it was asked for by hand,
+    # though — that is someone working on the macOS build, and they want to
+    # see it fail.
+    continue-on-error: ${{ matrix.platform == 'macos' && github.event_name != 'workflow_dispatch' }}
     env:
       # Flutter builds macOS release binaries for both architectures.
       ARCH: ${{ matrix.platform == 'macos' && 'universal' || 'x64' }}

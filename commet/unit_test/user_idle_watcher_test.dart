@@ -33,8 +33,8 @@ void main() {
     await watcher.poll();
 
     expect(watcher.isAway.value, isTrue);
-    expect(published,
-        [UserPresenceStatus.online, UserPresenceStatus.unavailable]);
+    expect(
+        published, [UserPresenceStatus.online, UserPresenceStatus.unavailable]);
   });
 
   test('touching anything brings them back', () async {
@@ -44,8 +44,8 @@ void main() {
     await watcher.poll();
 
     expect(watcher.isAway.value, isFalse);
-    expect(published,
-        [UserPresenceStatus.unavailable, UserPresenceStatus.online]);
+    expect(
+        published, [UserPresenceStatus.unavailable, UserPresenceStatus.online]);
   });
 
   test('a status that has not changed is not published again', () async {
