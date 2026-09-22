@@ -5,6 +5,7 @@ export 'browser_runtime/file_access.dart';
 export 'browser_runtime/flatpak_presenter.dart';
 export 'browser_runtime/linux_embedded_presenter.dart';
 export 'browser_runtime/linux_standalone_presenter.dart';
+export 'browser_runtime/linux_artifact_qualification.dart';
 export 'browser_runtime/media_permission.dart';
 export 'browser_runtime/recovery_surface_ui.dart';
 export 'browser_runtime/runtime_lifecycle.dart';
