@@ -35,6 +35,7 @@
 #include "include/cef_app.h"
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
+#include "include/cef_command_line.h"
 #include "include/cef_cookie.h"
 #include "include/cef_callback.h"
 #include "include/cef_dialog_handler.h"
@@ -57,6 +58,12 @@
 #include "include/cef_v8.h"
 #include "include/cef_version_info.h"
 #include "include/wrapper/cef_helpers.h"
+
+// Windows embedded widget surface: CEF windowless OSR with CPU OnPaint copied
+// into client-owned memory and presented as a Flutter texture.  Only the
+// bundled runtime is ever loaded and only owned request contexts and owned
+// OSR browsers are ever created; a surface failure is a typed failure or
+// bounded recovery that never selects another engine.
 
 namespace roscord::cef_host {
 
@@ -206,6 +213,10 @@ struct HostArgs {
   std::wstring module_name;
   bool validation = false;
   std::optional<std::string> fault;
+  // Forced software rendering.  Available in every build (not validation-only):
+  // the CPU OnPaint path is release-authoritative and must satisfy the same
+  // frame/input/resize/focus contract as the default path.
+  bool software_rendering = false;
 };
 
 struct ParsedCommandLine {
@@ -288,6 +299,7 @@ bool IsKnownFaultPoint(std::wstring_view fault) {
 std::optional<HostArgs> ValidateHostArgs(const ParsedCommandLine& command_line,
                                           std::wstring& error) {
   bool validation = false;
+  bool software_rendering = false;
   std::optional<std::wstring> fault_name;
   for (const auto& value : command_line.values) {
     const std::wstring lowered = Lowercase(value);
@@ -299,7 +311,12 @@ std::optional<HostArgs> ValidateHostArgs(const ParsedCommandLine& command_line,
         return std::nullopt;
       }
     }
-    if (lowered == L"--cef-validation") {
+    if (lowered == L"--cef-software-rendering") {
+      // Forced software rendering is a supported production switch.  It keeps
+      // the CPU OnPaint frame ring authoritative when GPU import is
+      // unavailable; it never selects another browser engine.
+      software_rendering = true;
+    } else if (lowered == L"--cef-validation") {
 #ifdef NDEBUG
       error = L"CEF validation controls are disabled in production builds";
       return std::nullopt;
@@ -354,6 +371,7 @@ std::optional<HostArgs> ValidateHostArgs(const ParsedCommandLine& command_line,
   result.module_name = *module;
   result.validation = validation;
   result.fault = fault;
+  result.software_rendering = software_rendering;
   result.pipe_name = *pipe;
   result.profile_root = std::filesystem::path(*profile_root);
   result.nonce.assign(nonce->begin(), nonce->end());
@@ -1760,6 +1778,24 @@ struct SurfaceState {
   uint64_t next_event_sequence = 2;
   CefRefPtr<CefBrowser> browser;
   bool close_requested = false;
+  // Embedded OSR presentation state.  The view rectangle is owned here so
+  // GetViewRect/GetScreenInfo stay consistent with the last validated resize
+  // command; DPI is carried as a device scale factor and applied on resize.
+  int view_width = 1024;
+  int view_height = 768;
+  double device_scale_factor = 1.0;
+  // Client-owned frame ring.  OnPaint copies CEF's buffer into frame_pixels
+  // (never retaining the CEF pointer) and publishes a frame_ready event that
+  // references only slot/size/stride/format/sequence.  The newest frame
+  // coalesces older pending frames on the Dart side; release_frame only
+  // advances slot reuse accounting and never exposes a CEF handle.
+  static constexpr int kFrameRingSlots = 3;
+  int frame_slot = 0;
+  uint64_t next_frame_sequence = 1;
+  int frame_width = 0;
+  int frame_height = 0;
+  int frame_stride = 0;
+  std::vector<uint8_t> frame_pixels;
   struct PendingPopup {
     int popup_id = 0;
     std::string url;
@@ -1891,7 +1927,35 @@ class BrowserClient final : public CefClient,
       CefRefPtr<CefFileDialogCallback> callback) override;
 
   bool GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect) override {
-    rect = CefRect(0, 0, 1024, 768);
+    CEF_REQUIRE_UI_THREAD();
+    (void)browser;
+    int width = 1024;
+    int height = 768;
+    double device_scale_factor = 1.0;
+    if (controller_->GetViewSize(surface_id_, width, height,
+                                 device_scale_factor)) {
+      rect = CefRect(0, 0, width, height);
+    } else {
+      rect = CefRect(0, 0, 1024, 768);
+    }
+    return true;
+  }
+
+  bool GetScreenInfo(CefRefPtr<CefBrowser> browser,
+                     CefScreenInfo& screen_info) override {
+    CEF_REQUIRE_UI_THREAD();
+    (void)browser;
+    int width = 1024;
+    int height = 768;
+    double device_scale_factor = 1.0;
+    controller_->GetViewSize(surface_id_, width, height, device_scale_factor);
+    screen_info.device_scale_factor =
+        static_cast<float>(device_scale_factor);
+    screen_info.depth = 24;
+    screen_info.depth_per_component = 8;
+    screen_info.is_monochrome = false;
+    screen_info.rect = CefRect(0, 0, width, height);
+    screen_info.available_rect = CefRect(0, 0, width, height);
     return true;
   }
 
@@ -1901,17 +1965,16 @@ class BrowserClient final : public CefClient,
                const void* buffer,
                int width,
                int height) override {
-    // The first host milestone proves lifecycle and protocol ownership.  The
-    // embedded frame-ring/Flutter texture adapter consumes this callback in
-    // the next ticket.  Do not retain |buffer|: it belongs to CEF only for the
-    // duration of this callback.
+    // Embedded OSR presentation: copy the CPU buffer into client-owned
+    // memory synchronously.  |buffer| belongs to CEF only for the duration
+    // of this callback and must never be retained or passed to Dart.
     CEF_REQUIRE_UI_THREAD();
     (void)browser;
-    (void)type;
     (void)dirty_rects;
-    (void)buffer;
-    (void)width;
-    (void)height;
+    if (type != PET_VIEW || buffer == nullptr || width <= 0 || height <= 0) {
+      return;
+    }
+    controller_->OnPaintFrame(surface_id_, buffer, width, height);
   }
 
   uint64_t surface_id() const { return surface_id_; }
@@ -2041,6 +2104,18 @@ class HostController {
                           std::string_view operation);
   void SendScriptMessage(uint64_t surface_id,
                          CefRefPtr<CefDictionaryValue> envelope);
+  void SendFrameReady(uint64_t surface_id, int slot, int width, int height,
+                      int stride, uint64_t frame_sequence);
+  void OnPaintFrame(uint64_t surface_id, const void* buffer, int width,
+                    int height);
+  bool GetViewSize(uint64_t surface_id, int& width, int& height,
+                   double& device_scale_factor);
+  void ApplyResizeOnUi(uint64_t surface_id, int width, int height,
+                       double device_scale_factor);
+  void ApplyFocusOnUi(uint64_t surface_id, bool focused);
+  void ApplyInputOnUi(uint64_t surface_id,
+                      CefRefPtr<CefDictionaryValue> input);
+  void ApplyReleaseFrame(uint64_t surface_id, int frame_sequence);
   std::optional<SurfaceState> GetSurface(uint64_t surface_id);
   bool HasSurface(uint64_t surface_id);
 
@@ -2114,6 +2189,66 @@ class NavigateBrowserTask final : public CefTask {
 void NavigateBrowserTask::Execute() {
   controller_->NavigateBrowserOnUi(surface_id_, std::move(url_));
 }
+
+class ResizeSurfaceTask final : public CefTask {
+ public:
+  ResizeSurfaceTask(HostController* controller, uint64_t surface_id, int width,
+                    int height, double device_scale_factor)
+      : controller_(controller),
+        surface_id_(surface_id),
+        width_(width),
+        height_(height),
+        device_scale_factor_(device_scale_factor) {}
+
+  void Execute() override {
+    controller_->ApplyResizeOnUi(surface_id_, width_, height_,
+                                 device_scale_factor_);
+  }
+
+ private:
+  HostController* controller_;
+  uint64_t surface_id_;
+  int width_;
+  int height_;
+  double device_scale_factor_;
+  IMPLEMENT_REFCOUNTING(ResizeSurfaceTask);
+};
+
+class FocusSurfaceTask final : public CefTask {
+ public:
+  FocusSurfaceTask(HostController* controller, uint64_t surface_id,
+                   bool focused)
+      : controller_(controller),
+        surface_id_(surface_id),
+        focused_(focused) {}
+
+  void Execute() override { controller_->ApplyFocusOnUi(surface_id_, focused_); }
+
+ private:
+  HostController* controller_;
+  uint64_t surface_id_;
+  bool focused_;
+  IMPLEMENT_REFCOUNTING(FocusSurfaceTask);
+};
+
+class InputSurfaceTask final : public CefTask {
+ public:
+  InputSurfaceTask(HostController* controller, uint64_t surface_id,
+                   CefRefPtr<CefDictionaryValue> input)
+      : controller_(controller),
+        surface_id_(surface_id),
+        input_(std::move(input)) {}
+
+  void Execute() override {
+    controller_->ApplyInputOnUi(surface_id_, input_);
+  }
+
+ private:
+  HostController* controller_;
+  uint64_t surface_id_;
+  CefRefPtr<CefDictionaryValue> input_;
+  IMPLEMENT_REFCOUNTING(InputSurfaceTask);
+};
 
 class ExecuteScriptTask final : public CefTask {
  public:
@@ -2284,6 +2419,234 @@ void HostController::SendClosed(uint64_t surface_id, uint64_t sequence) {
   wire->SetString("type", "event");
   wire->SetDictionary("payload", payload);
   SendMessage(wire);
+}
+
+void HostController::SendFrameReady(uint64_t surface_id, int slot, int width,
+                                    int height, int stride,
+                                    uint64_t frame_sequence) {
+  uint64_t sequence = 0;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return;
+    // Embedded presentation only: standalone HWND surfaces never emit frames
+    // through Flutter.
+    if (iterator->second.presentation != "embedded") return;
+    sequence = iterator->second.next_event_sequence++;
+  }
+  auto frame = NewDictionary();
+  frame->SetInt("slot", slot);
+  frame->SetInt("width", width);
+  frame->SetInt("height", height);
+  frame->SetInt("stride", stride);
+  frame->SetString("format", "bgra_premultiplied");
+  frame->SetInt("sequence", static_cast<int>(frame_sequence));
+
+  auto event_payload = NewDictionary();
+  event_payload->SetInt("surface_id", static_cast<int>(surface_id));
+  event_payload->SetInt("sequence", static_cast<int>(sequence));
+  event_payload->SetDictionary("frame", frame);
+  auto event = NewDictionary();
+  event->SetString("type", "frame_ready");
+  event->SetDictionary("payload", event_payload);
+  auto payload = NewDictionary();
+  payload->SetDictionary("event", event);
+  auto wire = NewDictionary();
+  wire->SetString("type", "event");
+  wire->SetDictionary("payload", payload);
+  SendMessage(wire);
+}
+
+void HostController::OnPaintFrame(uint64_t surface_id, const void* buffer,
+                                  int width, int height) {
+  CEF_REQUIRE_UI_THREAD();
+  if (buffer == nullptr || width <= 0 || height <= 0) return;
+  // Clamp absurd dimensions before allocating client-owned memory.
+  if (width > 7680 || height > 4320) return;
+  const int stride = width * 4;
+  const size_t byte_count = static_cast<size_t>(stride) *
+                            static_cast<size_t>(height);
+  // 1280x720 BGRA is ~3.7 MiB; refuse frames that cannot be framed safely.
+  if (byte_count == 0 || byte_count > 128u * 1024u * 1024u) return;
+  int slot = 0;
+  uint64_t frame_sequence = 0;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return;
+    if (iterator->second.presentation != "embedded") return;
+    SurfaceState& surface = iterator->second;
+    // Copy into client-owned memory synchronously; the CEF buffer is only
+    // valid for this callback.  The copy is the only pixel data the Dart
+    // texture presenter may reference via the shared frame ring.
+    surface.frame_pixels.assign(static_cast<const uint8_t*>(buffer),
+                                static_cast<const uint8_t*>(buffer) +
+                                    byte_count);
+    surface.frame_width = width;
+    surface.frame_height = height;
+    surface.frame_stride = stride;
+    surface.frame_slot =
+        (surface.frame_slot + 1) % SurfaceState::kFrameRingSlots;
+    slot = surface.frame_slot;
+    frame_sequence = surface.next_frame_sequence++;
+  }
+  SendFrameReady(surface_id, slot, width, height, stride, frame_sequence);
+}
+
+bool HostController::GetViewSize(uint64_t surface_id, int& width, int& height,
+                                 double& device_scale_factor) {
+  std::lock_guard lock(state_mutex_);
+  const auto iterator = surfaces_.find(surface_id);
+  if (iterator == surfaces_.end()) return false;
+  width = iterator->second.view_width;
+  height = iterator->second.view_height;
+  device_scale_factor = iterator->second.device_scale_factor;
+  return true;
+}
+
+void HostController::ApplyResizeOnUi(uint64_t surface_id, int width,
+                                     int height,
+                                     double device_scale_factor) {
+  CEF_REQUIRE_UI_THREAD();
+  CefRefPtr<CefBrowser> browser;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return;
+    iterator->second.view_width = width;
+    iterator->second.view_height = height;
+    iterator->second.device_scale_factor = device_scale_factor;
+    browser = iterator->second.browser;
+  }
+  if (browser != nullptr) {
+    browser->GetHost()->WasResized();
+    browser->GetHost()->NotifyScreenInfoChanged();
+  }
+}
+
+void HostController::ApplyFocusOnUi(uint64_t surface_id, bool focused) {
+  CEF_REQUIRE_UI_THREAD();
+  CefRefPtr<CefBrowser> browser;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return;
+    browser = iterator->second.browser;
+  }
+  if (browser != nullptr) {
+    browser->GetHost()->SetFocus(focused);
+  }
+}
+
+void HostController::ApplyReleaseFrame(uint64_t surface_id,
+                                       int frame_sequence) {
+  // Release is accounting-only: the client-owned ring slot becomes reusable
+  // for the next OnPaint copy.  Unknown or stale sequences are ignored rather
+  // than treated as protocol violations so coalesced frames stay lossless.
+  std::lock_guard lock(state_mutex_);
+  const auto iterator = surfaces_.find(surface_id);
+  if (iterator == surfaces_.end()) return;
+  (void)frame_sequence;
+}
+
+void HostController::ApplyInputOnUi(
+    uint64_t surface_id, CefRefPtr<CefDictionaryValue> input) {
+  CEF_REQUIRE_UI_THREAD();
+  CefRefPtr<CefBrowser> browser;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return;
+    browser = iterator->second.browser;
+  }
+  if (browser == nullptr || input == nullptr ||
+      input->GetType("type") != VTYPE_STRING) {
+    return;
+  }
+  const std::string input_type = input->GetString("type").ToString();
+  const auto payload = input->GetDictionary("payload");
+  if (payload == nullptr) return;
+  CefRefPtr<CefBrowserHost> host = browser->GetHost();
+  if (host == nullptr) return;
+  if (input_type == "pointer") {
+    const std::string kind = payload->GetType("kind") == VTYPE_STRING
+                                 ? payload->GetString("kind").ToString()
+                                 : "move";
+    const int x = payload->GetType("x") == VTYPE_DOUBLE
+                      ? static_cast<int>(payload->GetDouble("x"))
+                      : payload->GetInt("x");
+    const int y = payload->GetType("y") == VTYPE_DOUBLE
+                      ? static_cast<int>(payload->GetDouble("y"))
+                      : payload->GetInt("y");
+    CefMouseEvent event;
+    event.x = x;
+    event.y = y;
+    event.modifiers = 0;
+    if (kind == "down" || kind == "up") {
+      const cef_mouse_button_type_t button = MBT_LEFT;
+      host->SendMouseClickEvent(event, button, kind == "up", 1);
+    } else if (kind == "wheel") {
+      const int delta_x = payload->GetType("delta_x") == VTYPE_DOUBLE
+                              ? static_cast<int>(payload->GetDouble("delta_x"))
+                              : 0;
+      const int delta_y = payload->GetType("delta_y") == VTYPE_DOUBLE
+                              ? static_cast<int>(payload->GetDouble("delta_y"))
+                              : 0;
+      host->SendMouseWheelEvent(event, delta_x, delta_y);
+    } else {
+      // move, enter, and leave all route through mouse-move; CEF tracks
+      // enter/leave from the coordinates and focus state.
+      host->SendMouseMoveEvent(event, kind == "leave");
+    }
+  } else if (input_type == "keyboard") {
+    const std::string key =
+        payload->GetType("key") == VTYPE_STRING
+            ? payload->GetString("key").ToString()
+            : std::string();
+    const bool pressed =
+        payload->GetType("pressed") == VTYPE_BOOL
+            ? payload->GetBool("pressed")
+            : true;
+    CefKeyEvent event;
+    event.modifiers = 0;
+    event.is_system_key = false;
+    if (pressed) {
+      event.type = KEYEVENT_RAWKEYDOWN;
+      host->SendKeyEvent(event);
+      if (!key.empty() && key.size() == 1) {
+        event.type = KEYEVENT_CHAR;
+        event.character = static_cast<char16_t>(key[0]);
+        event.unmodified_character = static_cast<char16_t>(key[0]);
+        host->SendKeyEvent(event);
+      }
+    } else {
+      event.type = KEYEVENT_KEYUP;
+      host->SendKeyEvent(event);
+    }
+  } else if (input_type == "ime") {
+    const std::string phase =
+        payload->GetType("phase") == VTYPE_STRING
+            ? payload->GetString("phase").ToString()
+            : "commit";
+    const std::string text =
+        payload->GetType("text") == VTYPE_STRING
+            ? payload->GetString("text").ToString()
+            : std::string();
+    if (phase == "cancel") {
+      host->ImeCancelComposition();
+    } else if (phase == "start" || phase == "update") {
+      CefString cef_text(text);
+      std::vector<CefCompositionUnderline> underlines;
+      CefRange selection_range(0, static_cast<int>(text.size()));
+      host->ImeSetComposition(cef_text, underlines, CefRange(0, 0),
+                              selection_range);
+    } else {
+      // commit (and unknown phases fail closed to commit): deliver text and
+      // finish composition so focus transitions stay ordered.
+      host->ImeCommitText(CefString(text), CefRange(-1, -1), 0);
+      host->ImeFinishComposingText(false);
+    }
+  }
 }
 
 void HostController::SendNavigation(uint64_t surface_id, std::string_view url,
@@ -3425,8 +3788,7 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
       SendError(request_id, "invalid_command", "script envelope is malformed");
       return false;
     }
-    script_envelope = command_payload->GetDictionary("envelope");
-    if (script_envelope->GetType("source") != VTYPE_STRING ||
+    script_envelope = command_payload->GetDictionary("envelope");    if (script_envelope->GetType("source") != VTYPE_STRING ||
         script_envelope->GetType("origin") != VTYPE_STRING ||
         script_envelope->GetType("channel") != VTYPE_STRING ||
         script_envelope->GetType("request_id") != VTYPE_STRING ||
@@ -3458,6 +3820,68 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
       SendError(request_id, "invalid_command", "script operation is not supported");
       return false;
     }
+  }
+  CefRefPtr<CefDictionaryValue> input_value;
+  if (command_type == "input") {
+    if (command_payload->GetType("input") != VTYPE_DICTIONARY) {
+      SendError(request_id, "invalid_command", "input command is malformed");
+      return false;
+    }
+    input_value = command_payload->GetDictionary("input");
+    if (input_value->GetType("type") != VTYPE_STRING ||
+        input_value->GetType("payload") != VTYPE_DICTIONARY) {
+      SendError(request_id, "invalid_command", "input event is malformed");
+      return false;
+    }
+    const std::string input_kind = input_value->GetString("type").ToString();
+    if (input_kind != "pointer" && input_kind != "keyboard" &&
+        input_kind != "ime") {
+      SendError(request_id, "invalid_command", "input type is not supported");
+      return false;
+    }
+  }
+  int resize_width = 0;
+  int resize_height = 0;
+  double resize_scale = 1.0;
+  if (command_type == "resize") {
+    if (command_payload->GetType("width") != VTYPE_INT ||
+        command_payload->GetType("height") != VTYPE_INT ||
+        (command_payload->GetType("device_scale_factor") != VTYPE_DOUBLE &&
+         command_payload->GetType("device_scale_factor") != VTYPE_INT)) {
+      SendError(request_id, "invalid_command", "resize command is malformed");
+      return false;
+    }
+    resize_width = command_payload->GetInt("width");
+    resize_height = command_payload->GetInt("height");
+    resize_scale = command_payload->GetType("device_scale_factor") == VTYPE_DOUBLE
+                       ? command_payload->GetDouble("device_scale_factor")
+                       : static_cast<double>(
+                             command_payload->GetInt("device_scale_factor"));
+    if (resize_width <= 0 || resize_height <= 0 || resize_width > 7680 ||
+        resize_height > 4320 || !(resize_scale > 0) ||
+        !(resize_scale <= 4.0)) {
+      SendError(request_id, "invalid_command",
+                "resize dimensions and scale must be positive");
+      return false;
+    }
+  }
+  bool focus_value = false;
+  if (command_type == "focus") {
+    if (command_payload->GetType("focused") != VTYPE_BOOL) {
+      SendError(request_id, "invalid_command", "focus command is malformed");
+      return false;
+    }
+    focus_value = command_payload->GetBool("focused");
+  }
+  int release_frame_sequence = 0;
+  if (command_type == "release_frame") {
+    if (command_payload->GetType("frame_sequence") != VTYPE_INT ||
+        command_payload->GetInt("frame_sequence") <= 0) {
+      SendError(request_id, "invalid_command",
+                "frame sequence must be greater than zero");
+      return false;
+    }
+    release_frame_sequence = command_payload->GetInt("frame_sequence");
   }
   const auto surface = GetSurface(surface_id);
   if (!surface) {
@@ -3553,6 +3977,32 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
       command_type == "upload") {
     return ResolveFileAccessCommand(surface_id, request_id, command_type,
                                     command_payload);
+  }
+  if (command_type == "input") {
+    // Pointer, keyboard, wheel, and IME input route to the OSR browser on the
+    // CEF UI thread.  Selection is owned by the page; the host only delivers
+    // ordered input events and never synthesizes clipboard or focus changes.
+    CefTaskRunner::GetForThread(TID_UI)->PostTask(
+        new InputSurfaceTask(this, surface_id, std::move(input_value)));
+    return true;
+  }
+  if (command_type == "resize") {
+    // Resize and DPI update the owned view rectangle and notify CEF so the
+    // next OnPaint matches the Flutter layout size and device scale factor.
+    CefTaskRunner::GetForThread(TID_UI)->PostTask(new ResizeSurfaceTask(
+        this, surface_id, resize_width, resize_height, resize_scale));
+    return true;
+  }
+  if (command_type == "focus") {
+    CefTaskRunner::GetForThread(TID_UI)->PostTask(
+        new FocusSurfaceTask(this, surface_id, focus_value));
+    return true;
+  }
+  if (command_type == "release_frame") {
+    // Frame release is ring accounting only; the Dart side coalesces to the
+    // newest client-owned frame and releases older sequences.
+    ApplyReleaseFrame(surface_id, release_frame_sequence);
+    return true;
   }
   return true;
 }
@@ -4046,6 +4496,18 @@ int RunHost(HINSTANCE instance, void* sandbox_info) {
   settings.multi_threaded_message_loop = true;
   settings.windowless_rendering_enabled = true;
   settings.log_severity = LOGSEVERITY_DISABLE;
+
+  if (args->software_rendering) {
+    // Forced software rendering keeps the CPU OnPaint frame ring authoritative
+    // when GPU import is unavailable.  The same frame/input/resize/focus
+    // contract applies; no alternate engine is selected.
+    CefRefPtr<CefCommandLine> process_command_line =
+        CefCommandLine::GetGlobalCommandLine();
+    if (process_command_line != nullptr) {
+      process_command_line->AppendSwitch("disable-gpu");
+      process_command_line->AppendSwitch("disable-gpu-compositing");
+    }
+  }
 
   const bool initialized = CefInitialize(main_args, settings, app, sandbox_info);
   if (!initialized) {

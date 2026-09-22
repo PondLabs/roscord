@@ -85,6 +85,9 @@ RELEASE_WORKFLOW = (ROOT / ".github" / "workflows" / "release.yml").read_text(
 BUILD_WORKFLOW = (ROOT / ".github" / "workflows" / "build.yml").read_text(
     encoding="utf-8"
 )
+EMBEDDED_DART = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "embedded_browser_surface.dart"
+).read_text(encoding="utf-8")
 
 
 class CefHostContractTests(unittest.TestCase):
@@ -494,6 +497,117 @@ class CefHostContractTests(unittest.TestCase):
                 self.assertNotIn(token, source)
         self.assertNotIn("URLDownloadToFile", SOURCE)
         self.assertNotIn("getDisplayMedia", SOURCE)
+
+    def test_windows_embedded_frame_ring_is_client_owned(self) -> None:
+        for token in (
+            "OnPaintFrame",
+            "SendFrameReady",
+            "frame_pixels.assign",
+            "frame_ready",
+            "kFrameRingSlots",
+            "next_frame_sequence",
+            "bgra_premultiplied",
+            "PET_VIEW",
+            "ClientFrameRing",
+            "EmbeddedBrowserSurface",
+            "EmbeddedBrowserView",
+            "Texture(textureId",
+            "presentLatestAsTexture",
+            "release_frame",
+        ):
+            self.assertIn(
+                token, SOURCE + EMBEDDED_DART + BROWSER_RUNTIME_DART,
+                f"missing embedded frame-ring token: {token}",
+            )
+        # The CEF buffer is never retained: the copy is synchronous and the
+        # event carries only slot/size/stride/format/sequence.
+        self.assertIn("never be retained", SOURCE)
+        self.assertNotIn("CefBrowser;", EMBEDDED_DART)
+        self.assertNotIn("CefFrame", EMBEDDED_DART)
+
+    def test_windows_embedded_input_resize_focus_and_close(self) -> None:
+        for token in (
+            "ApplyInputOnUi",
+            "ApplyResizeOnUi",
+            "ApplyFocusOnUi",
+            "ApplyReleaseFrame",
+            "InputSurfaceTask",
+            "ResizeSurfaceTask",
+            "FocusSurfaceTask",
+            "SendMouseClickEvent",
+            "SendMouseMoveEvent",
+            "SendMouseWheelEvent",
+            "SendKeyEvent",
+            "ImeSetComposition",
+            "ImeCommitText",
+            "ImeCancelComposition",
+            "ImeFinishComposingText",
+            "WasResized",
+            "NotifyScreenInfoChanged",
+            "SetFocus",
+            "GetViewSize",
+            "GetScreenInfo",
+            "device_scale_factor",
+            "ImePhase",
+            "PointerKind.wheel",
+            "CloseBrowser(true)",
+        ):
+            self.assertIn(
+                token, SOURCE + EMBEDDED_DART,
+                f"missing embedded input token: {token}",
+            )
+
+    def test_windows_embedded_matrix_fixture_contract(self) -> None:
+        adapter = (
+            ROOT / "commet" / "lib" / "client" / "matrix" / "components"
+            / "widgets" / "matrix_widget_adapter.dart"
+        ).read_text(encoding="utf-8")
+        for token in (
+            "profileKey",
+            "allowedOrigins",
+            "DownloadCommand",
+            "ClipboardCommand",
+            "UploadCommand",
+            "PermissionCommand",
+            "profileMismatch",
+        ):
+            self.assertIn(
+                token,
+                BROWSER_RUNTIME_DART + EMBEDDED_DART,
+                f"missing matrix fixture token: {token}",
+            )
+        self.assertIn("commet://fixture/", SOURCE)
+        self.assertIn("MatrixWidgetAdapter", adapter)
+        self.assertIn("matrixWidgetBridgeInstallOperation", adapter)
+
+    def test_windows_embedded_software_rendering_matches_contract(self) -> None:
+        for token in (
+            "--cef-software-rendering",
+            "forceSoftwareRendering",
+            "software_rendering",
+            "disable-gpu",
+            "disable-gpu-compositing",
+            "CPU OnPaint",
+        ):
+            self.assertIn(
+                token, SOURCE + DART_RUNTIME + EMBEDDED_DART,
+                f"missing software-rendering token: {token}",
+            )
+
+    def test_windows_embedded_forbids_foreign_backends(self) -> None:
+        # No foreign engine backend may be reachable: the host links only the
+        # bundled runtime and the Dart presenter only builds a Flutter texture
+        # or placeholder for its owned surface.
+        self.assertNotIn("wry", SOURCE.lower())
+        self.assertNotIn("wry", EMBEDDED_DART.lower())
+        self.assertNotIn("webkit", SOURCE.lower())
+        self.assertNotIn("EdgeWebView2", SOURCE)
+        self.assertNotIn("CreateCoreWebView2", SOURCE)
+        self.assertNotIn("desktop_webview_window", EMBEDDED_DART)
+        self.assertNotIn("flutter_inappwebview", EMBEDDED_DART)
+        self.assertNotIn("CefBrowser;", EMBEDDED_DART)
+        self.assertIn("never selects another engine", SOURCE)
+        self.assertIn("only ever builds a Flutter texture", EMBEDDED_DART)
 
 
 if __name__ == "__main__":
