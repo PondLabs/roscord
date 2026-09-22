@@ -5,6 +5,7 @@ pub mod browser_file_access;
 pub mod browser_flatpak;
 pub mod browser_linux_embedded;
 pub mod browser_linux_standalone;
+pub mod browser_linux_artifacts;
 pub mod browser_media;
 pub mod browser_profile;
 pub mod browser_runtime;
