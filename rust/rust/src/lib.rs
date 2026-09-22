@@ -2,6 +2,7 @@ mod frb_generated;
 
 pub mod api;
 pub mod browser_file_access;
+pub mod browser_flatpak;
 pub mod browser_linux_embedded;
 pub mod browser_linux_standalone;
 pub mod browser_media;
