@@ -197,6 +197,15 @@ QUALIFY_FLATPAK_TOOL = (ROOT / "tools" / "qualify_flatpak_artifact.py").read_tex
 FLATPAK_ARTIFACT_DOC = (
     ROOT / "docs" / "cef-browser-runtime-flatpak-artifacts.md"
 ).read_text(encoding="utf-8")
+RELEASE_TOOL = (ROOT / "tools" / "qualify_release_candidate.py").read_text(
+    encoding="utf-8"
+)
+RELEASE_DOC = (
+    ROOT / "docs" / "cef-browser-runtime-release-candidate.md"
+).read_text(encoding="utf-8")
+RELEASE_TEST = (ROOT / "tools" / "test_qualify_release_candidate.py").read_text(
+    encoding="utf-8"
+)
 
 
 class CefHostContractTests(unittest.TestCase):
@@ -1811,6 +1820,122 @@ class CefHostContractTests(unittest.TestCase):
             self.assertIn(token, QUALIFY_FLATPAK_TOOL + FLATPAK_DART + FLATPAK_RUST)
         self.assertIn("cpu", FLATPAK_ARTIFACT_DOC.lower())
         self.assertIn("forced CPU", FLATPAK_ARTIFACT_DOC)
+
+
+    def test_release_matrix_covers_g_p_na_x(self) -> None:
+        for token in (
+            "mandatory_g_cells",
+            "preserved_p_cells",
+            "na_cells",
+            "prohibited_x_markers",
+            "windows-x64/matrix/embedded",
+            "windows-x64/matrix/standalone",
+            "windows-x64/official-video/embedded",
+            "native_g_cells",
+            "flatpak_g_cells",
+            "official-video/standalone",
+            "webview2",
+            "system-cef",
+            "unowned-browser",
+        ):
+            self.assertIn(token, RELEASE_TOOL)
+        for token in (
+            "23 mandatory",
+            "preserved",
+            "N/A",
+            "prohibited",
+            "Matrix widget / embedded",
+            "Matrix widget / standalone",
+            "Official video",
+        ):
+            self.assertIn(token, RELEASE_DOC)
+        self.assertIn("mandatory_g_cells", RELEASE_TEST)
+        self.assertIn("preserved_p_cells", RELEASE_TEST)
+        self.assertIn("na_cells", RELEASE_TEST)
+        self.assertIn("prohibited_x_markers", RELEASE_TEST)
+
+    def test_release_fault_injection_covers_all_families_and_cells(self) -> None:
+        for token in (
+            "FAULT_FAMILIES",
+            "required_fault_keys",
+            '"host"',
+            '"renderer"',
+            '"gpu"',
+            '"utility"',
+            '"heartbeat"',
+            '"bundle"',
+            '"protocol"',
+            '"sandbox"',
+            '"profile-lock"',
+            '"retry-budget"',
+            "fault {family} on {cell}",
+        ):
+            self.assertIn(token, RELEASE_TOOL)
+        for token in ("host", "renderer", "gpu", "heartbeat", "retry-budget", "230"):
+            self.assertIn(token, RELEASE_DOC.lower())
+        self.assertIn("required_fault_keys", RELEASE_TEST)
+        self.assertIn("single_fault_failure_blocks", RELEASE_TEST)
+
+    def test_release_performance_thresholds_are_enforced(self) -> None:
+        for token in (
+            "PERFORMANCE_THRESHOLDS",
+            "host_ready_s_cold_max",
+            "first_paint_s_after_open_max",
+            "surface_close_s_max",
+            "cpu_osr_fps_min",
+            "input_to_present_p95_ms_max",
+            "soak_rss_growth_pct_max",
+            "orphan_processes_max",
+            "perf {name}",
+        ):
+            self.assertIn(token, RELEASE_TOOL)
+        for token in ("5 s", "3 s", "2 s", "30 FPS", "100 ms", "15 %", "none"):
+            self.assertIn(token, RELEASE_DOC)
+        self.assertIn("performance_thresholds", RELEASE_TEST)
+        self.assertIn("each_perf_violation_blocks", RELEASE_TEST)
+
+    def test_release_manual_evidence_is_required(self) -> None:
+        for token in (
+            "MANUAL_TOPICS",
+            '"permissions"',
+            '"ime"',
+            '"accessibility"',
+            '"cpu-fallback"',
+            '"official-video"',
+            '"recovery"',
+            '"rollback"',
+            "manual evidence",
+        ):
+            self.assertIn(token, RELEASE_TOOL)
+        for token in (
+            "permissions",
+            "IME",
+            "accessibility",
+            "forced-CPU",
+            "official-video",
+            "recovery",
+            "rollback",
+        ):
+            self.assertIn(token.lower(), RELEASE_DOC.lower())
+        self.assertIn("manual_topics", RELEASE_TEST)
+        self.assertIn("each_missing_manual_topic_blocks", RELEASE_TEST)
+
+    def test_release_single_failed_mandatory_cell_blocks_candidate(self) -> None:
+        for token in (
+            "one failed mandatory cell",
+            "blocks the candidate",
+            "CandidateBlocked",
+            "def qualify",
+            "def evaluate",
+            "example_report",
+            "--self-check",
+        ):
+            self.assertIn(token, RELEASE_TOOL)
+        self.assertIn("One failed mandatory cell", RELEASE_DOC)
+        self.assertIn("complete desktop set", RELEASE_DOC)
+        self.assertIn("single_failed_mandatory_cell_blocks", RELEASE_TEST)
+        self.assertIn("self-check", RELEASE_TEST)
+        self.assertIn("qualify_release_candidate", RELEASE_WORKFLOW)
 
 
 if __name__ == "__main__":

@@ -441,6 +441,11 @@ jobs:
           python tools/cef_runtime.py metadata --platform linux-x64 "$STAGE" "$METADATA"
           python tools/qualify_flatpak_artifact.py --bundle commet/linux/flatpak/build-dir/files --metadata "$METADATA" --manifest commet/linux/flatpak/chat.commet.commetapp.yaml
           rm -rf "$STAGE" "$METADATA"
+
+      - name: Qualify release candidate gate
+        run: |
+          python tools/qualify_release_candidate.py --self-check
+          python -m unittest tools.test_qualify_release_candidate tools.test_cef_host_contract
       
       - name: Upload to release
         if: github.event_name == 'release'
