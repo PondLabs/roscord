@@ -1,5 +1,6 @@
 export 'browser_runtime/browser_runtime.dart';
 export 'browser_runtime/embedded_browser_surface.dart';
+export 'browser_runtime/standalone_browser_surface.dart';
 export 'browser_runtime/file_access.dart';
 export 'browser_runtime/flatpak_presenter.dart';
 export 'browser_runtime/linux_embedded_presenter.dart';

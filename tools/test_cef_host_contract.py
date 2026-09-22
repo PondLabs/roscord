@@ -131,6 +131,9 @@ FLATPAK_TEST = (
 FLATPAK_MANIFEST = (
     ROOT / "commet" / "linux" / "flatpak" / "chat.commet.commetapp.yaml"
 ).read_text(encoding="utf-8")
+STANDALONE_DART = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "standalone_browser_surface.dart"
+).read_text(encoding="utf-8")
 
 
 class CefHostContractTests(unittest.TestCase):
@@ -287,7 +290,7 @@ class CefHostContractTests(unittest.TestCase):
         self.assertIn("ClearCertificateExceptions", SOURCE)
         self.assertIn("ClearHttpAuthCredentials", SOURCE)
         self.assertIn("RejectReparseBelow", SOURCE)
-        self.assertIn("SetAsPopup", SOURCE)
+        self.assertIn("SetAsChild", SOURCE)
         self.assertIn("--profile-root=$profileRoot", DART_RUNTIME)
 
         self.assertIn("same_account_shares_persistent_context", PROFILE_RUNTIME)
@@ -1118,6 +1121,107 @@ class CefHostContractTests(unittest.TestCase):
         ):
             self.assertIn(token, FLATPAK_TEST.lower())
             self.assertIn(token, FLATPAK_DOC.lower())
+
+    def test_windows_standalone_shares_host_profile_policy_and_permissions(self) -> None:
+        for token in (
+            "StandaloneBrowserSurface",
+            "StandaloneBrowserWindow",
+            "PresentationMode.standalone",
+            "shares one runtime",
+            "same account",
+            "profileKey",
+            "profileMismatch",
+            "PermissionCommand",
+            "DownloadCommand",
+            "ClipboardCommand",
+            "UploadCommand",
+            "PopupCommand",
+        ):
+            self.assertIn(
+                token, STANDALONE_DART + BROWSER_RUNTIME_DART,
+                f"missing standalone sharing token: {token}",
+            )
+        # The host uses one ProfileManager context per account for both
+        # presentations; standalone never starts a second host process.
+        for token in (
+            "profiles_.Open",
+            "CefRequestContext::CreateContext",
+            "SetAsChild",
+            "owned_window",
+        ):
+            self.assertIn(token, SOURCE, f"missing standalone host token: {token}")
+        self.assertNotIn("Process.start", STANDALONE_DART)
+
+    def test_windows_standalone_owned_window_behavior(self) -> None:
+        for token in (
+            "CreateStandaloneWindow",
+            "DestroyStandaloneWindow",
+            "RegisterStandaloneWindowClass",
+            "StandaloneWindowProc",
+            "RoscordBrowserStandalone",
+            "SetAsChild",
+            "SetWindowPos",
+            "BringWindowToTop",
+            "SetForegroundWindow",
+            "NotifyMoveOrResizeStarted",
+            "NotifyScreenInfoChanged",
+            "SendWindowChanged",
+            "window_changed",
+            "ApplyResizeOnUi",
+            "ApplyFocusOnUi",
+            "ApplyInputOnUi",
+            "ImeSetComposition",
+            "ImeCommitText",
+            "ImeCancelComposition",
+            "SendMouseClickEvent",
+            "SendMouseMoveEvent",
+            "SendMouseWheelEvent",
+            "SendKeyEvent",
+            "SetFocus",
+            "CloseBrowser(true)",
+            "device_scale_factor",
+            "bringToFront",
+            "setFocus",
+            "StandaloneWindowGeometry",
+        ):
+            self.assertIn(
+                token, SOURCE + STANDALONE_DART,
+                f"missing standalone window token: {token}",
+            )
+        # Standalone windows never emit frames through Flutter.
+        self.assertIn("never emit frames", SOURCE)
+        self.assertNotIn("Texture(textureId", STANDALONE_DART)
+        self.assertNotIn("frame_ready", STANDALONE_DART)
+        self.assertNotIn("CefBrowser;", STANDALONE_DART)
+
+    def test_windows_standalone_shared_state_software_and_cleanup(self) -> None:
+        for token in (
+            "forceSoftwareRendering",
+            "--cef-software-rendering",
+            "disable-gpu",
+            "CPU",
+            "same",
+            "close",
+            "CloseBrowser(true)",
+            "OnBrowserClosed",
+            "DestroyStandaloneWindow",
+            "profiles_.Release",
+        ):
+            self.assertIn(
+                token, SOURCE + STANDALONE_DART + DART_RUNTIME,
+                f"missing standalone software/cleanup token: {token}",
+            )
+
+    def test_windows_standalone_forbids_foreign_backends(self) -> None:
+        self.assertNotIn("wry", STANDALONE_DART.lower())
+        self.assertNotIn("webkit", SOURCE.lower())
+        self.assertNotIn("EdgeWebView2", SOURCE)
+        self.assertNotIn("CreateCoreWebView2", SOURCE)
+        self.assertNotIn("desktop_webview_window", STANDALONE_DART)
+        self.assertNotIn("flutter_inappwebview", STANDALONE_DART)
+        self.assertNotIn("SetAsPopup", SOURCE)
+        self.assertIn("never selects another engine", SOURCE)
+        self.assertIn("never builds a", STANDALONE_DART)
 
 
 if __name__ == "__main__":
