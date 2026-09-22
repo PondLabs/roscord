@@ -167,3 +167,18 @@ never adapted.
   browser; web, macOS, Android, and iOS keep their existing paths. No CEF
   fallback and no standalone surface is added for Linux. The WebView branch
   stays reachable on non-Windows platforms until the final cutover deletion.
+
+## Recovery, diagnostics, and observability fan-in (#127)
+
+`surface_recovery.dart`, `surface_diagnostics.dart`, and
+`recovery_surface_ui.dart` integrate bounded recovery across every surface
+above (Windows embedded/standalone, Linux embedded/standalone, Flatpak both
+presentations, official video). Host restart restores only declarative
+`SurfaceSpec` state in stable `SurfaceId` order; side-effecting commands,
+permissions, downloads, and history are never replayed. Renderer recovery is
+surface-scoped, GPU failure degrades to CPU, and retry budgets plus terminal
+states are enforced by `RuntimeLifecycle`. Reconnecting, crashed-surface,
+retry, close, and diagnostic-reporting UI is accessible, logs/metrics/dumps
+and diagnostic IDs are consent-gated, rate-limited, and redacted, and clean
+close drains surfaces and host processes without orphaning. See
+`docs/cef-browser-runtime-recovery.md`.

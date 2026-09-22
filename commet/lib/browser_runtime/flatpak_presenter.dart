@@ -90,7 +90,8 @@ String flatpakPresentationPath(
 ) {
   return switch (presentation) {
     PresentationMode.embedded => flatpakEmbeddedPresentationPath(compositor),
-    PresentationMode.standalone => flatpakStandalonePresentationPath(compositor),
+    PresentationMode.standalone =>
+      flatpakStandalonePresentationPath(compositor),
   };
 }
 
@@ -454,6 +455,7 @@ class FlatpakEmbeddedPresenter {
   int _nextCommandSequence = 1;
   FrameReadyEvent? _pendingFrame;
   bool _closed = false;
+  bool _hostLost = false;
 
   FlatpakEmbeddedPresenter({
     required this.runtime,
@@ -487,6 +489,13 @@ class FlatpakEmbeddedPresenter {
 
   /// Newest pending client-owned CPU frame, if any.
   FrameReadyEvent? get pendingFrame => _pendingFrame;
+
+  /// Accessible reconnecting state shown when the host is lost. Host loss
+  /// never takes down the app: the pending frame is dropped, the surface
+  /// reports reconnecting, and [close] still wins.
+  bool get isReconnecting => _hostLost && !_closed;
+  bool get isHostLost => _hostLost;
+  bool get isClosed => _closed;
 
   void noteEvent(SurfaceEvent event) {
     if (event.surfaceId != surfaceId) return;
@@ -552,6 +561,20 @@ class FlatpakEmbeddedPresenter {
     _closed = true;
     _pendingFrame = null;
     await runtime.close(surfaceId);
+  }
+
+  /// Records a host-loss observation without taking down the app. The
+  /// pending frame is dropped, the surface reports reconnecting, and
+  /// [close] still wins. Other surfaces on the same runtime are untouched.
+  void noteHostLost() {
+    if (_closed) return;
+    _hostLost = true;
+    _pendingFrame = null;
+  }
+
+  /// Clears the reconnecting state after the host restores this surface.
+  void noteRestored() {
+    _hostLost = false;
   }
 
   Future<void> _command(SurfaceCommand command) async {
@@ -871,6 +894,11 @@ class FlatpakStandalonePresenter {
     if (_closed) return;
     _hostLost = true;
     _pendingFrame = null;
+  }
+
+  /// Clears the reconnecting state after the host restores this surface.
+  void noteRestored() {
+    _hostLost = false;
   }
 
   Future<void> close() async {

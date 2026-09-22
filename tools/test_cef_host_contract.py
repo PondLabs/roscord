@@ -134,6 +134,33 @@ FLATPAK_MANIFEST = (
 STANDALONE_DART = (
     ROOT / "commet" / "lib" / "browser_runtime" / "standalone_browser_surface.dart"
 ).read_text(encoding="utf-8")
+RECOVERY_DART = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "surface_recovery.dart"
+).read_text(encoding="utf-8")
+DIAGNOSTICS_DART = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "surface_diagnostics.dart"
+).read_text(encoding="utf-8")
+RECOVERY_UI_DART = (
+    ROOT / "commet" / "lib" / "browser_runtime" / "recovery_surface_ui.dart"
+).read_text(encoding="utf-8")
+RECOVERY_TEST = (
+    ROOT / "commet" / "unit_test" / "surface_recovery_test.dart"
+).read_text(encoding="utf-8")
+DIAGNOSTICS_TEST = (
+    ROOT / "commet" / "unit_test" / "surface_diagnostics_test.dart"
+).read_text(encoding="utf-8")
+RECOVERY_UI_TEST = (
+    ROOT / "commet" / "unit_test" / "recovery_surface_ui_test.dart"
+).read_text(encoding="utf-8")
+MEDIA_ADAPTER = (
+    ROOT
+    / "commet"
+    / "lib"
+    / "client"
+    / "components"
+    / "video_embed"
+    / "media_embed_adapter.dart"
+).read_text(encoding="utf-8")
 
 
 class CefHostContractTests(unittest.TestCase):
@@ -1222,6 +1249,103 @@ class CefHostContractTests(unittest.TestCase):
         self.assertNotIn("SetAsPopup", SOURCE)
         self.assertIn("never selects another engine", SOURCE)
         self.assertIn("never builds a", STANDALONE_DART)
+
+    def test_recovery_restores_declarative_state_without_replay(self) -> None:
+        for token in (
+            "SurfaceRecoveryCoordinator",
+            "SurfaceRecoveryRegistry",
+            "restoreOrder",
+            "declarativeSnapshots",
+            "isSideEffectingCommand",
+            "isIdempotentPresentationCommand",
+            "shouldReplayCommand",
+            "shutdownDrainOrder",
+            "SurfaceHostLossTracker",
+        ):
+            self.assertIn(token, RECOVERY_DART)
+        for token in (
+            "stable",
+            "never replayed",
+            "close always wins",
+        ):
+            self.assertIn(token.lower(), RECOVERY_DART.lower())
+        for token in (
+            "noteHostLost",
+            "isReconnecting",
+            "noteRestored",
+        ):
+            for source in (
+                EMBEDDED_DART,
+                STANDALONE_DART,
+                LINUX_EMBEDDED_DART,
+                LINUX_STANDALONE_DART,
+                FLATPAK_DART,
+                MEDIA_ADAPTER,
+            ):
+                self.assertIn(token, source, f"missing {token}")
+        self.assertIn("surface_recovery", DART_BARREL)
+        self.assertIn("restore plan is in stable", RECOVERY_TEST.lower())
+
+    def test_renderer_gpu_budgets_and_terminal_states_are_shared(self) -> None:
+        for token in (
+            "maxRendererRecoveries",
+            "maxGpuFailures",
+            "gpuDisabled",
+            "surfaceRecovering",
+            "surfaceRestored",
+            "surfaceFailed",
+        ):
+            self.assertIn(token, RECOVERY_DART + LIFECYCLE_DART)
+        self.assertIn("surface-scoped", RECOVERY_DART.lower())
+        self.assertIn("degrades to cpu", (RECOVERY_DART + RECOVERY_TEST).lower())
+
+    def test_recovery_ui_is_accessible(self) -> None:
+        for token in (
+            "ReconnectingBrowserOverlay",
+            "CrashedSurfaceCard",
+            "RuntimeUnavailableCard",
+            "Reconnecting browser",
+            "This embedded page crashed. Retry",
+            "Graphics unavailable. Retry",
+            "Embedded browser unavailable. Retry browser",
+            "Copy diagnostic ID",
+            "liveRegion",
+        ):
+            self.assertIn(token, RECOVERY_UI_DART)
+        self.assertIn("recovery_surface_ui", DART_BARREL)
+        for forbidden in (
+            "CefBrowser",
+            "GetNamedPipeClientProcessId",
+        ):
+            self.assertNotIn(forbidden, RECOVERY_UI_DART)
+
+    def test_diagnostics_are_consent_gated_rate_limited_and_redacted(
+        self,
+    ) -> None:
+        for token in (
+            "DiagnosticConsent",
+            "hashProfileKey",
+            "diagnosticOrigin",
+            "redactDiagnosticMessage",
+            "DiagnosticId",
+            "RateLimitedDiagnosticStore",
+            "tryCapture",
+            "tryUpload",
+            "copyDiagnosticId",
+            "wouldExceedDiskBudget",
+        ):
+            self.assertIn(token, DIAGNOSTICS_DART)
+        self.assertIn("surface_diagnostics", DART_BARREL)
+        self.assertIn("consent", DIAGNOSTICS_DART.lower())
+        self.assertIn("rate", DIAGNOSTICS_DART.lower())
+        self.assertIn("redact", DIAGNOSTICS_DART.lower())
+
+    def test_clean_close_drains_without_orphaning(self) -> None:
+        self.assertIn("shutdownDrainOrder", RECOVERY_DART)
+        self.assertIn("close always wins", RECOVERY_DART.lower())
+        self.assertIn("clean stop", RECOVERY_DART.lower())
+        self.assertIn("close", MEDIA_ADAPTER.lower())
+        self.assertIn("shutdown", RECOVERY_TEST.lower())
 
 
 if __name__ == "__main__":
