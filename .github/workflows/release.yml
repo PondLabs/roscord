@@ -444,8 +444,14 @@ jobs:
 
       - name: Qualify release candidate gate
         run: |
+          # Atomic rule: one failed mandatory cell blocks the complete
+          # Windows/Linux set; rollback always covers the whole set.
+          # Publication uploads below run only after this gate passes;
+          # otherwise every desktop artifact is withheld together.
           python tools/qualify_release_candidate.py --self-check
-          python -m unittest tools.test_qualify_release_candidate tools.test_cef_host_contract
+          python tools/release_record.py --self-check
+          python tools/rollback_release.py --self-check
+          python -m unittest tools.test_qualify_release_candidate tools.test_cef_host_contract tools.test_release_record tools.test_rollback_release
       
       - name: Upload to release
         if: github.event_name == 'release'
@@ -605,3 +611,37 @@ jobs:
         with:
           name: roscord-web.tar.gz
           path: commet/build/roscord-web.tar.gz
+
+  atomic-release-gate:
+    # Final atomic gate for the CEF BrowserRuntime cutover (epic #110,
+    # ticket #133). Windows and all released Linux artifacts are published
+    # or withheld together; rollback withdraws/stops the complete desktop
+    # set and installs the last known-good complete application without
+    # reviving a legacy engine.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          submodules: 'true'
+
+      - name: Validate locked CEF tuple
+        run: |
+          python3 tools/cef_runtime.py validate-lock
+
+      - name: Signed release record gate
+        run: |
+          python3 tools/release_record.py --self-check
+          python3 tools/release_record.py --example > /tmp/release-example.json
+          python3 tools/release_record.py --report /tmp/release-example.json --require-signatures
+
+      - name: Atomic rollback gate
+        run: |
+          python3 tools/rollback_release.py --self-check
+          python3 tools/rollback_release.py --example > /tmp/rollback-example.json
+          python3 tools/rollback_release.py --plan /tmp/rollback-example.json
+
+      - name: Matrix, contract, and gate unit tests
+        run: |
+          python3 tools/qualify_release_candidate.py --self-check
+          python3 -m unittest tools.test_cef_runtime tools.test_cef_host_contract tools.test_qualify_release_candidate tools.test_qualify_windows_artifact tools.test_qualify_flatpak_artifact tools.test_release_record tools.test_rollback_release

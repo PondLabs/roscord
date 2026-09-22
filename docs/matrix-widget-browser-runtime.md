@@ -69,9 +69,10 @@ the previous one. Closing sends
 the typed BrowserRuntime close operation, waits for the closed event (with a
 bounded timeout), and then tears down the transceiver and event subscriptions.
 
-Android, web, iOS, macOS, remote HTTP, and deliberate external-browser flows
-continue to use their existing runners until those platform-specific
-presenters migrate. The adapter does not add a fallback browser backend.
+Android, web, iOS, macOS, remote HTTP, calendar, and deliberate
+external-browser flows keep their existing runners as preserved paths (see
+`docs/cef-browser-runtime-preserved-flows.md`). The adapter does not add a
+fallback browser backend.
 
 ## Windows embedded presentation (#121)
 
@@ -165,8 +166,9 @@ never adapted.
 - Routing is Windows-only (`mediaEmbedUsesCef`: `!isWeb && isWindows`).
   Linux keeps native yt-dlp/mpv when available or a deliberate external
   browser; web, macOS, Android, and iOS keep their existing paths. No CEF
-  fallback and no standalone surface is added for Linux. The WebView branch
-  stays reachable on non-Windows platforms until the final cutover deletion.
+  fallback and no standalone surface is added for Linux. The legacy WebView
+  branches were deleted at the cutover (#132); desktop routing is now
+  unconditional (see below).
 
 ## Recovery, diagnostics, and observability fan-in (#127)
 
