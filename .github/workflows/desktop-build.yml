@@ -87,6 +87,14 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # The image still defaults to Xcode 16, but connectivity_plus 7.1 calls
+      # NWPath.isUltraConstrained, which only the macOS 26 SDK has (it needs
+      # Xcode 26.1.1 or later). This only changes the SDK the app is built
+      # against. The deployment target stays at 10.15.
+      - name: Select Xcode 26
+        if: matrix.platform == 'macos'
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app
+
       # The Blacksmith Windows image ships VS Build Tools without ATL, and
       # flutter_local_notifications_windows needs atlbase.h.
       - name: Install ATL
