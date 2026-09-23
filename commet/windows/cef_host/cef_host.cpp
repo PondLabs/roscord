@@ -1,5 +1,10 @@
+// CMakeLists.txt defines NOMINMAX as well; redefining it is C4005 under /WX.
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 
 #include <windows.h>
 #include <aclapi.h>

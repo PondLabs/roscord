@@ -20,6 +20,11 @@ if(NOT EXISTS "${CEF_ROOT}/include/cef_app.h")
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CEF_ROOT}/cmake")
+# CEF builds libcef_dll_wrapper against the static CRT (/MT) by default, but
+# client.dll uses the dynamic CRT like the rest of the Flutter build, and the
+# two cannot be linked together.
+set(CEF_RUNTIME_LIBRARY_FLAG "/MD" CACHE STRING
+  "CRT flag for the CEF wrapper, matching client.dll" FORCE)
 find_package(CEF REQUIRED)
 
 # libcef_dll_wrapper is the only CEF library linked by the client DLL.  The
@@ -49,7 +54,8 @@ set_target_properties(cef_host_client PROPERTIES
   SUFFIX ".dll"
 )
 
-target_compile_features(cef_host_client PRIVATE cxx_std_17)
+# The CEF headers use C++20 concepts.
+target_compile_features(cef_host_client PRIVATE cxx_std_20)
 target_compile_definitions(cef_host_client PRIVATE
   UNICODE
   _UNICODE
@@ -58,13 +64,20 @@ target_compile_definitions(cef_host_client PRIVATE
   USE_SANDBOX
   CEF_API_VERSION=CEF_API_VERSION_LAST
 )
-target_compile_options(cef_host_client PRIVATE /W4 /WX /EHsc /wd4100)
+# Beyond /wd4100, the same warnings CEF disables for its own /W4 /WX targets
+# (see CEF_COMPILER_FLAGS in cmake/cef_variables.cmake).
+target_compile_options(cef_host_client PRIVATE /W4 /WX /EHsc /wd4100
+  /wd4127 /wd4244 /wd4324 /wd4481 /wd4512 /wd4701 /wd4702 /wd4996)
 target_include_directories(cef_host_client PRIVATE
   "${CEF_ROOT}"
   "${CEF_ROOT}/include"
 )
+# libcef.lib is the import library for libcef.dll, which implements the C API
+# the wrapper calls.
 target_link_libraries(cef_host_client PRIVATE
   libcef_dll_wrapper
+  "${CEF_ROOT}/Release/libcef.lib"
+  ${CEF_STANDARD_LIBS}
   advapi32.lib
   shell32.lib
 )
