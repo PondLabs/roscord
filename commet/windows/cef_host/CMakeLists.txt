@@ -65,9 +65,10 @@ target_compile_definitions(cef_host_client PRIVATE
   CEF_API_VERSION=CEF_API_VERSION_LAST
 )
 # Beyond /wd4100, the same warnings CEF disables for its own /W4 /WX targets
-# (see CEF_COMPILER_FLAGS in cmake/cef_variables.cmake).
+# (see CEF_COMPILER_FLAGS in cmake/cef_variables.cmake), plus C4505 for the
+# file-access helpers that nothing calls yet.
 target_compile_options(cef_host_client PRIVATE /W4 /WX /EHsc /wd4100
-  /wd4127 /wd4244 /wd4324 /wd4481 /wd4512 /wd4701 /wd4702 /wd4996)
+  /wd4127 /wd4244 /wd4324 /wd4481 /wd4505 /wd4512 /wd4701 /wd4702 /wd4996)
 target_include_directories(cef_host_client PRIVATE
   "${CEF_ROOT}"
   "${CEF_ROOT}/include"
