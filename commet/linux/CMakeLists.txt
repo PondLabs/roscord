@@ -120,13 +120,28 @@ install(CODE "
 set(INSTALL_BUNDLE_DATA_DIR "${CMAKE_INSTALL_PREFIX}/data")
 set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}/lib")
 
+# The Flutter project root. flutter/CMakeLists.txt gets PROJECT_DIR from the
+# generated config, but only in its own scope.
+set(PROJECT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
+
 # Linux CEF is a separate process.  Build the transport host from the same
 # Rust crate as the BrowserRuntime contract and install it beside the Flutter
 # executable so native packages and Flatpak share one host topology.  The
 # host requires an explicit staged CEF root at launch; it never searches the
 # system for libcef.so.
-option(ROSCORD_BUILD_CEF_HOST "Build and bundle the Linux CEF host" ON)
+#
+# Opt-in, like the Windows host: only a job that has staged the locked CEF
+# inputs builds it.  The Flutter tool passes no -D options, so the switch, the
+# SDK and the staged runtime below also come from the environment.
+option(ROSCORD_BUILD_CEF_HOST "Build and bundle the Linux CEF host" OFF)
+if("$ENV{ROSCORD_BUILD_CEF_HOST}" STREQUAL "ON")
+  set(ROSCORD_BUILD_CEF_HOST ON)
+endif()
 set(ROSCORD_CEF_SDK_ROOT "" CACHE PATH "Full CEF SDK used to build cef_host")
+if(NOT ROSCORD_CEF_SDK_ROOT AND DEFINED ENV{ROSCORD_CEF_SDK_ROOT})
+  set(ROSCORD_CEF_SDK_ROOT "$ENV{ROSCORD_CEF_SDK_ROOT}" CACHE PATH
+    "Full CEF SDK used to build cef_host" FORCE)
+endif()
 if(ROSCORD_BUILD_CEF_HOST)
   if(NOT ROSCORD_CEF_SDK_ROOT)
     message(FATAL_ERROR
@@ -171,6 +186,10 @@ endif()
 # stage.  Leaving it unset is safe: cef_host refuses to start without the
 # explicit runtime and the app never falls back to a system browser.
 set(ROSCORD_CEF_RUNTIME_DIR "" CACHE PATH "Staged locked Linux CEF runtime")
+if(NOT ROSCORD_CEF_RUNTIME_DIR AND DEFINED ENV{ROSCORD_CEF_RUNTIME_DIR})
+  set(ROSCORD_CEF_RUNTIME_DIR "$ENV{ROSCORD_CEF_RUNTIME_DIR}" CACHE PATH
+    "Staged locked Linux CEF runtime" FORCE)
+endif()
 if(ROSCORD_CEF_RUNTIME_DIR)
   if(NOT EXISTS "${ROSCORD_CEF_RUNTIME_DIR}/Release/libcef.so")
     message(FATAL_ERROR "ROSCORD_CEF_RUNTIME_DIR is not a staged Linux CEF runtime")
