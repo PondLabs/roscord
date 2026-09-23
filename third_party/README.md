@@ -47,6 +47,10 @@ wherever the server's offer has it (`lib/src/core/engine.dart`).
 the nine, so a copy went back to `stopAudioCaptureOnMute: true` and dropped
 the `processor`, which took the web AudioWorklet off the track whenever the
 microphone was restarted to change one option.
+The iOS and macOS podspecs pin `WebRTC-SDK` to `150.7871.01`, the version the
+vendored `flutter-webrtc` pins (upstream livekit_client made the same move in
+2.13.0). CocoaPods installs a single copy of the pod, so if the two pins
+differ `pod install` fails. Bump them together.
 
 `tray_manager` shows the system tray icon (voice status: idle, live, muted).
 The `// COMMET` change makes the Linux appindicator optional: without
