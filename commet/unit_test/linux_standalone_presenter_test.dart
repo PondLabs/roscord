@@ -185,7 +185,8 @@ void main() {
     });
   });
 
-  group('owned-window geometry, z-order, focus, input, IME, resize/DPI, '
+  group(
+      'owned-window geometry, z-order, focus, input, IME, resize/DPI, '
       'popup, and close on both compositors', () {
     for (final compositor in LinuxStandaloneCompositor.values) {
       test('$compositor tracks geometry, z-order, and focus', () async {
@@ -481,7 +482,8 @@ void main() {
       }
     });
 
-    test('webkit, wry, system CEF, child embedding, and unowned windows '
+    test(
+        'webkit, wry, system CEF, child embedding, and unowned windows '
         'are denied', () {
       for (final name in [
         'WebKitGTK',

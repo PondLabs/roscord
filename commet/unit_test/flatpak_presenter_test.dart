@@ -48,8 +48,7 @@ List<String> _leastPrivilegeArgs() => const [
 Future<void> _flush() => Future<void>.delayed(Duration.zero);
 
 void main() {
-  group('both presentations load without host CEF, host WebKitGTK, or GPU',
-      () {
+  group('both presentations load without host CEF, host WebKitGTK, or GPU', () {
     test('X11 and Wayland cells share the bundled OSR/CPU paths', () {
       expect(parseFlatpakCompositor('x11'), FlatpakCompositor.x11);
       expect(parseFlatpakCompositor('wayland'), FlatpakCompositor.wayland);
@@ -154,8 +153,7 @@ void main() {
       await standalonePresenter.close();
     });
 
-    test('frames coalesce to the newest client-owned CPU reference',
-        () async {
+    test('frames coalesce to the newest client-owned CPU reference', () async {
       final runtime = FakeBrowserRuntime();
       final surface = await runtime.open(_flatpakEmbeddedSpec());
       final presenter = FlatpakEmbeddedPresenter(
@@ -474,8 +472,7 @@ void main() {
         );
       }
       expect(isFlatpakHostFilesystemPath('/app/cef/libcef.so'), isFalse);
-      expect(
-          () => assertNoFlatpakHostFilesystemAccess('/app/cef/libcef.so'),
+      expect(() => assertNoFlatpakHostFilesystemAccess('/app/cef/libcef.so'),
           returnsNormally);
     });
 

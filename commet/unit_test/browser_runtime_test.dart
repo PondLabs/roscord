@@ -383,8 +383,7 @@ void main() {
     );
   });
 
-  test('media grants support deny, once, session, and scoped persistence',
-      () {
+  test('media grants support deny, once, session, and scoped persistence', () {
     final store = MediaGrantStore();
     final scope = MediaGrantScope(
       profileKey: ProfileKey('account-a'),
@@ -489,8 +488,7 @@ void main() {
           origins: ['https://widget.test', 'https://other.test']),
       isFalse,
     );
-    expect(
-        coversScope(other(capability: MediaCapability.microphone)), isFalse);
+    expect(coversScope(other(capability: MediaCapability.microphone)), isFalse);
 
     // Every use rechecks current policy and OS mediation.
     expect(coversScope(scope), isTrue);
@@ -591,8 +589,7 @@ void main() {
       expect(message.toLowerCase(), isNot(contains('token')));
       expect(message, isNot(contains('/')));
     }
-    expect(CapturePortalOutcome.parse('granted'),
-        CapturePortalOutcome.granted);
+    expect(CapturePortalOutcome.parse('granted'), CapturePortalOutcome.granted);
     expect(CapturePortalOutcome.granted.deniesPage, isFalse);
     expect(CapturePortalOutcome.parse('bogus'), isNull);
     expect(

@@ -56,7 +56,12 @@ import sys
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
-from tools import cef_runtime
+# Run as `python tools/<script>.py`, sys.path starts at tools/, not the root.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from tools import cef_runtime  # noqa: E402
 
 
 LOCK_PATH = cef_runtime.LOCK_PATH

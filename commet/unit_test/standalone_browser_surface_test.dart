@@ -227,8 +227,8 @@ void main() {
     await _flush();
     expect(surface.geometry.width, 1920);
     expect(surface.geometry.deviceScaleFactor, 2.0);
-    final resized = events.whereType<WindowChangedEvent>().last.change
-        as ResizedWindow;
+    final resized =
+        events.whereType<WindowChangedEvent>().last.change as ResizedWindow;
     expect(resized.width, 1920);
     expect(resized.deviceScaleFactor, 2.0);
 
@@ -241,8 +241,8 @@ void main() {
     await surface.bringToFront();
     await _flush();
     expect(surface.isFocused, isTrue);
-    final focused = events.whereType<WindowChangedEvent>().last.change
-        as FocusedWindow;
+    final focused =
+        events.whereType<WindowChangedEvent>().last.change as FocusedWindow;
     expect(focused.focused, isTrue);
     await subscription.cancel();
 
@@ -428,7 +428,8 @@ void main() {
     await embedded.dispose();
   });
 
-  test('WebView2, Wry, system CEF, unowned browsers, and fallback are impossible',
+  test(
+      'WebView2, Wry, system CEF, unowned browsers, and fallback are impossible',
       () async {
     // Standalone presentation is the only admitted mode for this surface.
     expect(

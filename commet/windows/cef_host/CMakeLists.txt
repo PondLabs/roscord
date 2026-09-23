@@ -20,6 +20,11 @@ if(NOT EXISTS "${CEF_ROOT}/include/cef_app.h")
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CEF_ROOT}/cmake")
+# CEF builds libcef_dll_wrapper against the static CRT (/MT) by default, but
+# client.dll uses the dynamic CRT like the rest of the Flutter build, and the
+# two cannot be linked together.
+set(CEF_RUNTIME_LIBRARY_FLAG "/MD" CACHE STRING
+  "CRT flag for the CEF wrapper, matching client.dll" FORCE)
 find_package(CEF REQUIRED)
 
 # libcef_dll_wrapper is the only CEF library linked by the client DLL.  The
@@ -49,7 +54,8 @@ set_target_properties(cef_host_client PROPERTIES
   SUFFIX ".dll"
 )
 
-target_compile_features(cef_host_client PRIVATE cxx_std_17)
+# The CEF headers use C++20 concepts.
+target_compile_features(cef_host_client PRIVATE cxx_std_20)
 target_compile_definitions(cef_host_client PRIVATE
   UNICODE
   _UNICODE
@@ -58,13 +64,21 @@ target_compile_definitions(cef_host_client PRIVATE
   USE_SANDBOX
   CEF_API_VERSION=CEF_API_VERSION_LAST
 )
-target_compile_options(cef_host_client PRIVATE /W4 /WX /EHsc /wd4100)
+# Beyond /wd4100, the same warnings CEF disables for its own /W4 /WX targets
+# (see CEF_COMPILER_FLAGS in cmake/cef_variables.cmake), plus C4505 for the
+# file-access helpers that nothing calls yet.
+target_compile_options(cef_host_client PRIVATE /W4 /WX /EHsc /wd4100
+  /wd4127 /wd4244 /wd4324 /wd4481 /wd4505 /wd4512 /wd4701 /wd4702 /wd4996)
 target_include_directories(cef_host_client PRIVATE
   "${CEF_ROOT}"
   "${CEF_ROOT}/include"
 )
+# libcef.lib is the import library for libcef.dll, which implements the C API
+# the wrapper calls.
 target_link_libraries(cef_host_client PRIVATE
   libcef_dll_wrapper
+  "${CEF_ROOT}/Release/libcef.lib"
+  ${CEF_STANDARD_LIBS}
   advapi32.lib
   shell32.lib
 )
@@ -92,9 +106,16 @@ add_custom_command(TARGET cef_host_client POST_BUILD
 
 # CEF's standard distribution keeps the Release/Resources split.  Copying the
 # runtime at install time preserves that layout and prevents a system CEF lookup.
-install(TARGETS cef_host_client RUNTIME DESTINATION cef_host LIBRARY DESTINATION cef_host)
-install(FILES "${CEF_RELEASE_DIR}/bootstrap.exe" DESTINATION cef_host RENAME cef_host.exe)
-install(DIRECTORY "${CEF_RELEASE_DIR}/" DESTINATION cef_host
+#
+# The Flutter runner's install prefix is $<TARGET_FILE_DIR:commet>, so, like
+# the runner's own rules, destinations are absolute paths under it; relative
+# ones would resolve against the unexpanded expression.  Only client.dll is
+# installed, not its import library, since the payload is allow-listed.
+set(CEF_HOST_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/cef_host")
+install(FILES "$<TARGET_FILE:cef_host_client>" DESTINATION "${CEF_HOST_INSTALL_DIR}")
+install(FILES "${CEF_RELEASE_DIR}/bootstrap.exe"
+  DESTINATION "${CEF_HOST_INSTALL_DIR}" RENAME cef_host.exe)
+install(DIRECTORY "${CEF_RELEASE_DIR}/" DESTINATION "${CEF_HOST_INSTALL_DIR}"
   FILES_MATCHING
   PATTERN "*.dll"
   PATTERN "*.exe"
@@ -103,9 +124,10 @@ install(DIRECTORY "${CEF_RELEASE_DIR}/" DESTINATION cef_host
   PATTERN "*.pak"
   PATTERN "bootstrap.exe" EXCLUDE
 )
-install(DIRECTORY "${CEF_RESOURCES_DIR}/" DESTINATION cef_host/Resources)
+install(DIRECTORY "${CEF_RESOURCES_DIR}/"
+  DESTINATION "${CEF_HOST_INSTALL_DIR}/Resources")
 install(FILES
   "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
   "${CMAKE_CURRENT_SOURCE_DIR}/fixture.html"
-  DESTINATION cef_host/fixtures
+  DESTINATION "${CEF_HOST_INSTALL_DIR}/fixtures"
 )

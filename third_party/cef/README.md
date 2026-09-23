@@ -73,12 +73,15 @@ route is accepted when the kernel permits it; no native Wayland child
 embedding is required.
 
 The Linux CMake build needs a full CEF SDK for the C API bridge and a staged
-runtime for packaging; the staged runtime intentionally contains no headers:
+runtime for packaging; the staged runtime intentionally contains no headers.
+Like the Windows host it is opt-in, and because the Flutter tool passes no
+`-D` options, all three settings are read from the environment too:
 
 ```text
-cmake -S commet/linux -B build/linux \
-  -DROSCORD_CEF_SDK_ROOT=/path/to/cef-sdk \
-  -DROSCORD_CEF_RUNTIME_DIR=/path/to/staged/cef
+ROSCORD_BUILD_CEF_HOST=ON \
+ROSCORD_CEF_SDK_ROOT=/path/to/cef-sdk \
+ROSCORD_CEF_RUNTIME_DIR=/path/to/staged/cef \
+  flutter build linux --release
 ```
 
 `cef_host` opens `Release/libcef.so` from the explicit `--cef-root` at

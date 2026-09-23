@@ -1,5 +1,10 @@
+// CMakeLists.txt defines NOMINMAX as well; redefining it is C4005 under /WX.
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 
 #include <windows.h>
 #include <aclapi.h>
@@ -148,7 +153,8 @@ std::wstring ProfileDirectoryName(std::string_view key) {
 
 std::wstring ModuleDirectory() {
   std::array<wchar_t, MAX_PATH> buffer{};
-  DWORD length = GetModuleFileNameW(nullptr, buffer.data(), buffer.size());
+  DWORD length = GetModuleFileNameW(nullptr, buffer.data(),
+                                    static_cast<DWORD>(buffer.size()));
   if (length == 0 || length == buffer.size()) {
     return {};
   }
@@ -159,7 +165,8 @@ std::wstring ModuleDirectory() {
 
 std::wstring ModulePath(HMODULE module) {
   std::array<wchar_t, MAX_PATH> buffer{};
-  DWORD length = GetModuleFileNameW(module, buffer.data(), buffer.size());
+  DWORD length = GetModuleFileNameW(module, buffer.data(),
+                                    static_cast<DWORD>(buffer.size()));
   if (length == 0 || length == buffer.size()) {
     return {};
   }
@@ -508,7 +515,7 @@ bool IsOwnerControlled(const std::filesystem::path& path) {
     if (header->AceType != ACCESS_ALLOWED_ACE_TYPE) continue;
     const auto* ace = static_cast<const ACCESS_ALLOWED_ACE*>(raw_ace);
     if (!owner_matches ||
-        !EqualSid(&ace->SidStart, owner)) {
+        !EqualSid(const_cast<DWORD*>(&ace->SidStart), owner)) {
       only_owner = false;
     }
   }
@@ -951,17 +958,17 @@ class BrowserRuntimeSendHandler final : public CefV8Handler {
       return false;
     }
     const auto context = CefV8Context::GetCurrentContext();
-    if (context == nullptr || context->GetBrowser() == nullptr) {
+    const auto frame = context == nullptr ? nullptr : context->GetFrame();
+    if (frame == nullptr) {
       exception = "BrowserRuntime bridge has no browser context";
       return false;
     }
     auto message = CefProcessMessage::Create("roscord_browser_runtime_send");
     message->GetArgumentList()->SetString(
         0, arguments[0]->GetStringValue());
-    if (!context->GetBrowser()->SendProcessMessage(PID_BROWSER, message)) {
-      exception = "BrowserRuntime bridge could not reach the host";
-      return false;
-    }
+    // Process messages are sent through a frame, and delivery is not
+    // acknowledged: the host answers on the bridge if it needs to.
+    frame->SendProcessMessage(PID_BROWSER, message);
     return true;
   }
 
@@ -1067,9 +1074,8 @@ class ProfileManager {
       std::filesystem::path profile_path;
       if (!EnsureProfile(key, profile_path, error)) return false;
       CefRequestContextSettings settings;
-      settings.cache_path = profile_path.wstring();
+      CefString(&settings.cache_path) = profile_path.wstring();
       settings.persist_session_cookies = true;
-      settings.persist_user_preferences = true;
       context = CefRequestContext::CreateContext(settings, nullptr);
       if (context == nullptr) {
         error = "persistent request context could not be created";
@@ -1088,9 +1094,8 @@ class ProfileManager {
     }
 
     CefRequestContextSettings settings;
-    settings.cache_path.clear();
+    CefString(&settings.cache_path).clear();
     settings.persist_session_cookies = false;
-    settings.persist_user_preferences = false;
     context = CefRequestContext::CreateContext(settings, nullptr);
     if (context == nullptr) {
       error = "private request context could not be created";
@@ -1350,22 +1355,28 @@ std::string Lowercase(std::string value) {
   return value;
 }
 
+// CefURLParts fields are raw cef_string_t structs.
+std::string UrlPart(const cef_string_t& part) {
+  return CefString(&part).ToString();
+}
+
 std::optional<std::string> UrlOrigin(std::string_view url) {
   CefURLParts parts;
   if (!CefParseURL(std::string(url), parts)) return std::nullopt;
-  const std::string scheme = Lowercase(parts.scheme.ToString());
+  const std::string scheme = Lowercase(UrlPart(parts.scheme));
   if (scheme != "https" && scheme != "http" && scheme != "commet") {
     return std::nullopt;
   }
-  if (parts.host.empty() || !parts.username.empty() || !parts.password.empty()) {
+  if (UrlPart(parts.host).empty() || !UrlPart(parts.username).empty() ||
+      !UrlPart(parts.password).empty()) {
     return std::nullopt;
   }
-  std::string host = Lowercase(parts.host.ToString());
+  std::string host = Lowercase(UrlPart(parts.host));
   if (host.find(':') != std::string::npos && host.front() != '[') {
     host = "[" + host + "]";
   }
   std::string origin = scheme + "://" + host;
-  const std::string port = parts.port.ToString();
+  const std::string port = UrlPart(parts.port);
   if (!port.empty()) origin += ":" + port;
   return origin;
 }
@@ -1373,10 +1384,10 @@ std::optional<std::string> UrlOrigin(std::string_view url) {
 bool IsLoopbackOrigin(std::string_view origin) {
   CefURLParts parts;
   if (!CefParseURL(std::string(origin), parts) ||
-      Lowercase(parts.scheme.ToString()) != "http" || parts.port.empty()) {
+      Lowercase(UrlPart(parts.scheme)) != "http" || UrlPart(parts.port).empty()) {
     return false;
   }
-  std::string host = Lowercase(parts.host.ToString());
+  std::string host = Lowercase(UrlPart(parts.host));
   if (host.size() >= 2 && host.front() == '[' && host.back() == ']') {
     host = host.substr(1, host.size() - 2);
   }
@@ -1950,7 +1961,9 @@ class BrowserClient final : public CefClient,
                                  TerminationStatus status,
                                  int error_code,
                                  const CefString& error_string) override;
-  void OnRenderProcessUnresponsive(CefRefPtr<CefBrowser> browser) override;
+  bool OnRenderProcessUnresponsive(
+      CefRefPtr<CefBrowser> browser,
+      CefRefPtr<CefUnresponsiveProcessCallback> callback) override;
   bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
                                 CefRefPtr<CefFrame> frame,
                                 CefProcessId source_process,
@@ -1958,73 +1971,34 @@ class BrowserClient final : public CefClient,
   // Mediated file access: downloads always pause for an explicit app
   // approval and commit atomically from temporary staging; file dialogs
   // never open inline and instead emit one upload_request per gesture.
-  void OnBeforeDownload(
+  bool OnBeforeDownload(
       CefRefPtr<CefBrowser> browser,
       CefRefPtr<CefDownloadItem> download_item,
       const CefString& suggested_name,
       CefRefPtr<CefBeforeDownloadCallback> callback) override;
   void OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
                          CefRefPtr<CefDownloadItem> download_item,
-                         const CefString& full_path,
-                         bool is_complete) override;
+                         CefRefPtr<CefDownloadItemCallback> callback) override;
   bool OnFileDialog(
       CefRefPtr<CefBrowser> browser,
       CefDialogHandler::FileDialogMode mode,
       const CefString& title,
       const CefString& default_file_path,
       const std::vector<CefString>& accept_filters,
+      const std::vector<CefString>& accept_extensions,
+      const std::vector<CefString>& accept_descriptions,
       CefRefPtr<CefFileDialogCallback> callback) override;
 
-  bool GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect) override {
-    CEF_REQUIRE_UI_THREAD();
-    (void)browser;
-    int width = 1024;
-    int height = 768;
-    double device_scale_factor = 1.0;
-    if (controller_->GetViewSize(surface_id_, width, height,
-                                 device_scale_factor)) {
-      rect = CefRect(0, 0, width, height);
-    } else {
-      rect = CefRect(0, 0, 1024, 768);
-    }
-    return true;
-  }
-
+  // Defined after HostController, which they call into.
+  void GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect) override;
   bool GetScreenInfo(CefRefPtr<CefBrowser> browser,
-                     CefScreenInfo& screen_info) override {
-    CEF_REQUIRE_UI_THREAD();
-    (void)browser;
-    int width = 1024;
-    int height = 768;
-    double device_scale_factor = 1.0;
-    controller_->GetViewSize(surface_id_, width, height, device_scale_factor);
-    screen_info.device_scale_factor =
-        static_cast<float>(device_scale_factor);
-    screen_info.depth = 24;
-    screen_info.depth_per_component = 8;
-    screen_info.is_monochrome = false;
-    screen_info.rect = CefRect(0, 0, width, height);
-    screen_info.available_rect = CefRect(0, 0, width, height);
-    return true;
-  }
-
+                     CefScreenInfo& screen_info) override;
   void OnPaint(CefRefPtr<CefBrowser> browser,
                PaintElementType type,
                const RectList& dirty_rects,
                const void* buffer,
                int width,
-               int height) override {
-    // Embedded OSR presentation: copy the CPU buffer into client-owned
-    // memory synchronously.  |buffer| belongs to CEF only for the duration
-    // of this callback and must never be retained or passed to Dart.
-    CEF_REQUIRE_UI_THREAD();
-    (void)browser;
-    (void)dirty_rects;
-    if (type != PET_VIEW || buffer == nullptr || width <= 0 || height <= 0) {
-      return;
-    }
-    controller_->OnPaintFrame(surface_id_, buffer, width, height);
-  }
+               int height) override;
 
   uint64_t surface_id() const { return surface_id_; }
 
@@ -2094,6 +2068,17 @@ class HostController {
                          CefRefPtr<CefDictionaryValue> envelope);
   void OnRendererFailure(uint64_t surface_id, std::string_view code,
                          std::string_view message);
+  // Called by BrowserClient's render handler and the resize, focus and
+  // input tasks posted to the UI thread.
+  void OnPaintFrame(uint64_t surface_id, const void* buffer, int width,
+                    int height);
+  bool GetViewSize(uint64_t surface_id, int& width, int& height,
+                   double& device_scale_factor);
+  void ApplyResizeOnUi(uint64_t surface_id, int width, int height,
+                       double device_scale_factor);
+  void ApplyFocusOnUi(uint64_t surface_id, bool focused);
+  void ApplyInputOnUi(uint64_t surface_id,
+                      CefRefPtr<CefDictionaryValue> input);
   bool ClearData(std::string_view profile_key, std::string& error) {
     std::lock_guard lock(state_mutex_);
     if (std::any_of(surfaces_.begin(), surfaces_.end(),
@@ -2158,15 +2143,6 @@ class HostController {
   void SendWindowChanged(uint64_t surface_id, bool resized, int width,
                          int height, double device_scale_factor, bool focused);
   void DestroyStandaloneWindowOnUi(uint64_t surface_id);
-  void OnPaintFrame(uint64_t surface_id, const void* buffer, int width,
-                    int height);
-  bool GetViewSize(uint64_t surface_id, int& width, int& height,
-                   double& device_scale_factor);
-  void ApplyResizeOnUi(uint64_t surface_id, int width, int height,
-                       double device_scale_factor);
-  void ApplyFocusOnUi(uint64_t surface_id, bool focused);
-  void ApplyInputOnUi(uint64_t surface_id,
-                      CefRefPtr<CefDictionaryValue> input);
   void ApplyReleaseFrame(uint64_t surface_id, int frame_sequence);
   std::optional<SurfaceState> GetSurface(uint64_t surface_id);
   bool HasSurface(uint64_t surface_id);
@@ -2785,7 +2761,7 @@ void HostController::ApplyInputOnUi(
     } else {
       // commit (and unknown phases fail closed to commit): deliver text and
       // finish composition so focus transitions stay ordered.
-      host->ImeCommitText(CefString(text), CefRange(-1, -1), 0);
+      host->ImeCommitText(CefString(text), CefRange::InvalidRange(), 0);
       host->ImeFinishComposingText(false);
     }
   }
@@ -4175,7 +4151,7 @@ void HostController::CreateBrowserOnUi(uint64_t surface_id, std::string url,
   CefWindowInfo window_info;
   HWND owned_window = nullptr;
   if (presentation == "embedded") {
-    window_info.SetAsWindowless(nullptr, false);
+    window_info.SetAsWindowless(nullptr);
   } else {
     // Standalone windowed CEF in a roscord-owned top-level HWND.  The host
     // creates and shows the window first, then parents the CEF browser as
@@ -4450,7 +4426,7 @@ bool BrowserClient::OnBeforePopup(
                                        target_url.ToString(), user_gesture);
 }
 
-void BrowserClient::OnBeforeDownload(
+bool BrowserClient::OnBeforeDownload(
     CefRefPtr<CefBrowser> browser, CefRefPtr<CefDownloadItem> download_item,
     const CefString& suggested_name,
     CefRefPtr<CefBeforeDownloadCallback> callback) {
@@ -4461,37 +4437,43 @@ void BrowserClient::OnBeforeDownload(
   // account/user destination (no traversal, reparse paths, or silent
   // overwrite).  Denial, timeout, navigation, close, or host loss cancels the
   // pending request terminally via CancelPendingFileAccess.
-  if (callback != nullptr) callback->Cancel();
-  if (browser == nullptr || download_item == nullptr) return;
+  //
+  // Claiming the download (returning true) without ever calling
+  // |callback|->Continue cancels it once CEF releases the callback.
+  (void)callback;
+  if (browser == nullptr || download_item == nullptr) return true;
   controller_->OnDownloadRequested(surface_id_,
                                    download_item->GetURL().ToString(),
                                    suggested_name.ToString());
+  return true;
 }
 
-void BrowserClient::OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
-                                      CefRefPtr<CefDownloadItem> download_item,
-                                      const CefString& full_path,
-                                      bool is_complete) {
+void BrowserClient::OnDownloadUpdated(
+    CefRefPtr<CefBrowser> browser, CefRefPtr<CefDownloadItem> download_item,
+    CefRefPtr<CefDownloadItemCallback> callback) {
   CEF_REQUIRE_UI_THREAD();
   (void)browser;
-  (void)full_path;
+  (void)callback;
   // The inline download path is always canceled in OnBeforeDownload, so any
   // update here is terminal bookkeeping: a canceled or interrupted item must
   // leave no partial file behind.  Staged approvals complete through
   // AtomicCommitDownload instead of this callback.
   (void)download_item;
-  (void)is_complete;
 }
 
 bool BrowserClient::OnFileDialog(
     CefRefPtr<CefBrowser> browser, CefDialogHandler::FileDialogMode mode,
     const CefString& title, const CefString& default_file_path,
     const std::vector<CefString>& accept_filters,
+    const std::vector<CefString>& accept_extensions,
+    const std::vector<CefString>& accept_descriptions,
     CefRefPtr<CefFileDialogCallback> callback) {
   CEF_REQUIRE_UI_THREAD();
   (void)browser;
   (void)title;
   (void)default_file_path;
+  (void)accept_extensions;
+  (void)accept_descriptions;
   // Uploads never open inline: cancel the default dialog and emit one
   // upload_request.  On AcceptUpload the host shows exactly one OS chooser in
   // FILE_DIALOG_OPEN mode, stages the explicit selection as read-only copies
@@ -4600,11 +4582,66 @@ void BrowserClient::OnRenderProcessTerminated(
   controller_->OnRendererFailure(surface_id_, code, message);
 }
 
-void BrowserClient::OnRenderProcessUnresponsive(CefRefPtr<CefBrowser> browser) {
+bool BrowserClient::OnRenderProcessUnresponsive(
+    CefRefPtr<CefBrowser> browser,
+    CefRefPtr<CefUnresponsiveProcessCallback> callback) {
   CEF_REQUIRE_UI_THREAD();
   (void)browser;
+  (void)callback;
   controller_->OnRendererFailure(surface_id_, "renderer_unresponsive",
                                  "renderer process is unresponsive");
+  // Keep waiting without CEF's own "Page unresponsive" UI; recovery is the
+  // app's decision.
+  return true;
+}
+
+void BrowserClient::GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)browser;
+  int width = 1024;
+  int height = 768;
+  double device_scale_factor = 1.0;
+  if (controller_->GetViewSize(surface_id_, width, height,
+                               device_scale_factor)) {
+    rect = CefRect(0, 0, width, height);
+  } else {
+    rect = CefRect(0, 0, 1024, 768);
+  }
+}
+
+bool BrowserClient::GetScreenInfo(CefRefPtr<CefBrowser> browser,
+                                  CefScreenInfo& screen_info) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)browser;
+  int width = 1024;
+  int height = 768;
+  double device_scale_factor = 1.0;
+  controller_->GetViewSize(surface_id_, width, height, device_scale_factor);
+  screen_info.device_scale_factor = static_cast<float>(device_scale_factor);
+  screen_info.depth = 24;
+  screen_info.depth_per_component = 8;
+  screen_info.is_monochrome = false;
+  screen_info.rect = CefRect(0, 0, width, height);
+  screen_info.available_rect = CefRect(0, 0, width, height);
+  return true;
+}
+
+void BrowserClient::OnPaint(CefRefPtr<CefBrowser> browser,
+                            PaintElementType type,
+                            const RectList& dirty_rects,
+                            const void* buffer,
+                            int width,
+                            int height) {
+  // Embedded OSR presentation: copy the CPU buffer into client-owned
+  // memory synchronously.  |buffer| belongs to CEF only for the duration
+  // of this callback and must never be retained or passed to Dart.
+  CEF_REQUIRE_UI_THREAD();
+  (void)browser;
+  (void)dirty_rects;
+  if (type != PET_VIEW || buffer == nullptr || width <= 0 || height <= 0) {
+    return;
+  }
+  controller_->OnPaintFrame(surface_id_, buffer, width, height);
 }
 
 int RunHost(HINSTANCE instance, void* sandbox_info) {

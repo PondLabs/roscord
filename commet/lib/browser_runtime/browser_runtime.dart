@@ -759,8 +759,7 @@ sealed class SurfaceCommand {
           sequence: sequence,
           profileKey: profile,
           requestId: _requiredString(payload, 'request_id'),
-          decision:
-              _uploadDecisionFromJson(_requiredMap(payload, 'decision')),
+          decision: _uploadDecisionFromJson(_requiredMap(payload, 'decision')),
         ),
       'release_frame' => ReleaseFrameCommand(
           sequence: sequence,
@@ -2187,9 +2186,7 @@ bool _hasValidAuthority(String url) {
   if (firstColon != authority.lastIndexOf(':')) return false;
   final host = authority.substring(0, firstColon);
   final port = authority.substring(firstColon + 1);
-  return host.isNotEmpty &&
-      port.isNotEmpty &&
-      port.runes.every(_isAsciiDigit);
+  return host.isNotEmpty && port.isNotEmpty && port.runes.every(_isAsciiDigit);
 }
 
 bool _isAsciiDigit(int rune) => rune >= 0x30 && rune <= 0x39;
@@ -2201,9 +2198,8 @@ void _validateDeclaredOrigin(String origin, {required bool loopback}) {
   final normalized = _urlOrigin(origin);
   final parsed = Uri.tryParse(origin);
   final scheme = parsed?.scheme.toLowerCase();
-  final validScheme = loopback
-      ? scheme == 'http'
-      : scheme == 'https' || scheme == 'commet';
+  final validScheme =
+      loopback ? scheme == 'http' : scheme == 'https' || scheme == 'commet';
   final validLoopback = !loopback ||
       parsed != null &&
           parsed.hasPort &&

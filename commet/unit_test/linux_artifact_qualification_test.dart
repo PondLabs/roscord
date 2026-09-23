@@ -47,8 +47,7 @@ void main() {
       }
     });
 
-    test('staged payload covers resources, locales, helpers, and graphics',
-        () {
+    test('staged payload covers resources, locales, helpers, and graphics', () {
       for (final required in [
         'Release/libcef.so',
         'Release/chrome-sandbox',
@@ -79,7 +78,8 @@ void main() {
       ]) {
         expect(requiredLinuxGraphicsFiles, contains(graphic), reason: graphic);
       }
-      expect(requiredLinuxNoticeFiles, containsAll(['LICENSE.txt', 'CREDITS.html']));
+      expect(requiredLinuxNoticeFiles,
+          containsAll(['LICENSE.txt', 'CREDITS.html']));
     });
 
     test('sandbox bypass flags are rejected', () {
@@ -214,11 +214,10 @@ void main() {
     });
   });
 
-  group('Linux official video remains the preserved native/external path',
-      () {
+  group('Linux official video remains the preserved native/external path', () {
     test('video never routes through CEF', () {
-      expect(linuxOfficialVideoPath,
-          'native-yt-dlp-mpv-or-deliberate-external');
+      expect(
+          linuxOfficialVideoPath, 'native-yt-dlp-mpv-or-deliberate-external');
       expect(linuxOfficialVideoUsesCef, isFalse);
       // The adapter keeps Linux on its native path: only Windows uses CEF.
       expect(mediaEmbedUsesCef(isWeb: false, isWindows: false), isFalse);

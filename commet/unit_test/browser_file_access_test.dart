@@ -171,8 +171,7 @@ void main() {
       final registry = PendingFileAccessRegistry()
         ..register(request('a'))
         ..register(request('b', const SurfaceId(2)));
-      final cancelled =
-          registry.cancelForNavigation(const SurfaceId(1));
+      final cancelled = registry.cancelForNavigation(const SurfaceId(1));
       expect(cancelled.map((r) => r.requestId), ['a']);
       expect(registry.contains('a'), isFalse);
       expect(registry.contains('b'), isTrue);
@@ -193,8 +192,7 @@ void main() {
       final registry = PendingFileAccessRegistry()..register(request('a'));
       expect(registry.expire(1000 + fileAccessRequestTimeoutMs), hasLength(1));
       registry.register(request('b'));
-      expect(registry.cancelForUnavailableUi(const SurfaceId(1)),
-          hasLength(1));
+      expect(registry.cancelForUnavailableUi(const SurfaceId(1)), hasLength(1));
       expect(registry.resolve('missing'), isFalse);
     });
 

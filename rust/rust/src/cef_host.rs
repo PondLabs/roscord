@@ -13,10 +13,12 @@ use std::collections::BTreeMap;
 use std::ffi::{c_char, c_int, c_void, CString, OsString};
 use std::fmt;
 use std::fs::{self, symlink_metadata};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt as UnixMetadataExt, PermissionsExt};
+use std::os::unix::fs::{
+    DirBuilderExt, FileTypeExt, MetadataExt as UnixMetadataExt, PermissionsExt,
+};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -715,8 +717,6 @@ impl UnixEndpoint {
             ));
         }
         let socket_stat = unsafe { socket_stat.assume_init() };
-        let device = socket_stat.st_dev as u64;
-        let inode = socket_stat.st_ino as u64;
         let mode = socket_stat.st_mode;
         let is_socket = mode & libc::S_IFMT == libc::S_IFSOCK;
         let owner_controlled = socket_stat.st_uid == unsafe { libc::geteuid() };
@@ -733,7 +733,14 @@ impl UnixEndpoint {
                 return Err(error.into());
             }
         };
-        if metadata.file_type().is_symlink() || metadata.dev() != device || metadata.ino() != inode
+        // fstat on the listener describes its sockfs inode, which never
+        // matches the filesystem inode bind() created, so the path is checked
+        // on its own: it must still be an owner-only socket, not a link or
+        // another file swapped in after bind.  Its identity is what Drop
+        // compares against before removing the endpoint.
+        if !metadata.file_type().is_socket()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o077 != 0
         {
             let _ = fs::remove_file(path);
             return Err(HostError::Permission(
@@ -743,8 +750,8 @@ impl UnixEndpoint {
         Ok(Self {
             listener,
             path: path.to_owned(),
-            device,
-            inode,
+            device: metadata.dev(),
+            inode: metadata.ino(),
         })
     }
 
@@ -1620,18 +1627,36 @@ mod tests {
             profile_key: Some(ProfileKey::new("account-b").unwrap()),
             focused: true,
         };
-        assert!(host
+        // Rejections are answered with a wire error so the connection
+        // survives a bad command.
+        let replies = host
             .dispatch(WireMessage::Command {
                 request_id: 99,
                 surface_id: SurfaceId(1),
                 command,
             })
-            .is_err());
-        assert!(host
+            .unwrap();
+        assert!(matches!(
+            replies.as_slice(),
+            [WireMessage::Error {
+                request_id: Some(99),
+                code,
+                ..
+            }] if code == "runtime_failed"
+        ));
+        let replies = host
             .dispatch(WireMessage::Close {
                 surface_id: SurfaceId(99),
             })
-            .is_err());
+            .unwrap();
+        assert!(matches!(
+            replies.as_slice(),
+            [WireMessage::Error {
+                request_id: None,
+                code,
+                ..
+            }] if code == "runtime_failed"
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1902,9 +1927,7 @@ mod tests {
 
         let profile_path = host
             .profile_store
-            .persistent
-            .get(&key)
-            .and_then(|context| context.context.path())
+            .persistent_path(&key)
             .unwrap()
             .to_owned();
         fs::create_dir(profile_path.join("downloads")).unwrap();

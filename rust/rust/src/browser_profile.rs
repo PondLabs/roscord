@@ -288,6 +288,15 @@ impl ProfileStore {
         self.clearing.clear();
     }
 
+    /// Directory of an account's live persistent context, for tests outside
+    /// this module that plant files in it.
+    #[cfg(test)]
+    pub(crate) fn persistent_path(&self, key: &ProfileKey) -> Option<&Path> {
+        self.persistent
+            .get(key)
+            .and_then(|context| context.context.path())
+    }
+
     fn allocate_context_id(&mut self) -> Result<u64, ProfileError> {
         let id = self.next_context_id;
         self.next_context_id = self
@@ -548,7 +557,10 @@ fn write_manifest(directory: &Path, contents: &str) -> io::Result<()> {
     }
     let mut file = options.open(&temporary)?;
     #[cfg(unix)]
-    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+    }
     file.write_all(contents.as_bytes())?;
     file.sync_all()?;
     fs::rename(temporary, directory.join(PROFILE_MANIFEST))?;
@@ -670,6 +682,10 @@ mod tests {
         let key = ProfileKey::new("account-a").unwrap();
         let directory = root.join(profile_directory_name(&key));
         fs::create_dir(&directory).unwrap();
+        // Owner-only, so the missing manifest is what gets it quarantined
+        // rather than its permissions.
+        #[cfg(unix)]
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
         File::create(directory.join("old-cookie.sqlite")).unwrap();
         let mut store = ProfileStore::new(root.clone());
         assert_eq!(
@@ -691,10 +707,18 @@ mod tests {
 
         let mismatched = root.join(profile_directory_name(&key));
         fs::create_dir(&mismatched).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&mismatched, fs::Permissions::from_mode(0o700)).unwrap();
         let other_key = ProfileKey::new("account-b").unwrap();
         fs::write(
             mismatched.join(PROFILE_MANIFEST),
             profile_manifest(&other_key),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(
+            mismatched.join(PROFILE_MANIFEST),
+            fs::Permissions::from_mode(0o600),
         )
         .unwrap();
         assert_eq!(
@@ -760,7 +784,7 @@ mod tests {
         let mut store = ProfileStore::new(root.clone());
         // The generated name cannot select the arbitrary link, and a link used
         // as the app-data root is rejected before any profile is opened.
-        let linked_store = ProfileStore::new(link);
+        let mut linked_store = ProfileStore::new(link);
         assert_eq!(
             linked_store.open(&key, PrivacyMode::Persistent),
             Err(ProfileError::Security)

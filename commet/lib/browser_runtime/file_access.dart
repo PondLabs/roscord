@@ -188,7 +188,8 @@ class PendingFileAccessRequest {
     this.timeoutMs = fileAccessRequestTimeoutMs,
   });
 
-  bool get isClipboard => kind == FileAccessKind.clipboardRead ||
+  bool get isClipboard =>
+      kind == FileAccessKind.clipboardRead ||
       kind == FileAccessKind.clipboardWrite;
 
   bool expiredAt(int nowMs) => nowMs - createdMs >= timeoutMs;

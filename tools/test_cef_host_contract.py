@@ -575,7 +575,8 @@ class CefHostContractTests(unittest.TestCase):
         self.assertIn("CefRequestContext::CreateContext", SOURCE)
         self.assertIn("settings.cache_path", SOURCE)
         self.assertIn("persist_session_cookies", SOURCE)
-        self.assertIn("persist_user_preferences", SOURCE)
+        # No persist_user_preferences: the locked CEF has no such setting, and
+        # preferences persist whenever the context has a cache_path.
         self.assertIn("FILE_ATTRIBUTE_REPARSE_POINT", SOURCE)
         self.assertIn("profile.manifest", SOURCE)
         self.assertIn("MoveFileExW", SOURCE)

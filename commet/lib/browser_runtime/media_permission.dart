@@ -260,8 +260,7 @@ enum CapturePortalOutcome {
         CapturePortalOutcome.granted => 'system capture granted the request',
         CapturePortalOutcome.denied =>
           'system capture dialog denied the request',
-        CapturePortalOutcome.dismissed =>
-          'system capture dialog was dismissed',
+        CapturePortalOutcome.dismissed => 'system capture dialog was dismissed',
         CapturePortalOutcome.timedOut => 'system capture dialog timed out',
         CapturePortalOutcome.disconnected =>
           'system capture service disconnected during the request',
@@ -439,8 +438,7 @@ class HostPermissionRegistry {
       return false;
     }
     final registered = _pending.values.any(
-      (pending) =>
-          pending.surfaceId == surfaceId && pending.scope == scope,
+      (pending) => pending.surfaceId == surfaceId && pending.scope == scope,
     );
     if (!registered) return false;
     return _grants.takeGrant(

@@ -101,7 +101,8 @@ const Set<String> sandboxBypassFlags = {
 
 /// Linux official video remains the preserved native/external path, never a
 /// CEF surface.
-const String linuxOfficialVideoPath = 'native-yt-dlp-mpv-or-deliberate-external';
+const String linuxOfficialVideoPath =
+    'native-yt-dlp-mpv-or-deliberate-external';
 
 /// Parses a released native package id. Matching is exact and lowercase so an
 /// unknown package cannot silently qualify as a released artifact.
