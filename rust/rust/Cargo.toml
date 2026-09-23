@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+# rlib so the cef_host binary below can link the library it runs.
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [[bin]]
 name = "cef_host"
@@ -19,7 +20,7 @@ base64 = "0.22.1"
 flutter_rust_bridge = "=2.11.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-uuid = "1.23.0"
+uuid = { version = "1.23.0", features = ["v4"] }
 
 [build-dependencies]
 cc = "1.2"
