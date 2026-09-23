@@ -51,7 +51,7 @@ jobs:
         platform: ${{ fromJSON(inputs.platforms) }}
     # Blacksmith has no macOS image, so that one leg runs on GitHub's.
     runs-on: ${{ matrix.platform == 'windows' && 'blacksmith-4vcpu-windows-2025' || matrix.platform == 'macos' && 'macos-15' || 'blacksmith-4vcpu-ubuntu-2404' }}
-    # macOS is the newest target and does not yet build, so it does not get to
+    # macOS is the newest target and the least tested, so it does not get to
     # hold up a release: the leg goes red on its own and publish still runs,
     # with whatever it managed to upload. Not when it was asked for by hand,
     # though — that is someone working on the macOS build, and they want to
@@ -87,18 +87,41 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # The image still defaults to Xcode 16, but connectivity_plus 7.1 calls
+      # NWPath.isUltraConstrained, which only the macOS 26 SDK has (it needs
+      # Xcode 26.1.1 or later). This only changes the SDK the app is built
+      # against. The deployment target stays at 10.15.
+      - name: Select Xcode 26
+        if: matrix.platform == 'macos'
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app
+
       # The Blacksmith Windows image ships VS Build Tools without ATL, and
       # flutter_local_notifications_windows needs atlbase.h.
       - name: Install ATL
         if: matrix.platform == 'windows'
         uses: ./.github/actions/install-atl
 
+      - name: Stage locked CEF host SDK
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $cache = Join-Path $env:GITHUB_WORKSPACE ".cef-cache"
+          $sdk = Join-Path $env:GITHUB_WORKSPACE ".cef-sdk"
+          python tools/cef_runtime.py fetch --platform windows-x64 --cache-dir $cache
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $archive = Get-ChildItem -LiteralPath $cache -Filter "*.tar.bz2" -File -Recurse | Select-Object -First 1
+          if ($null -eq $archive) { throw "locked CEF archive was not fetched" }
+          python tools/cef_runtime.py stage-sdk --platform windows-x64 $archive.FullName $sdk
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "ROSCORD_BUILD_CEF_HOST=ON" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CEF_ROOT=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -y
           sudo apt-get install -y ninja-build libgtk-3-dev libmpv-dev mpv ffmpeg libmimalloc-dev \
-            libwebkit2gtk-4.1-dev libkeybinder-3.0-dev libayatana-appindicator3-dev libpulse-dev libasound2-dev clang lld cmake pkg-config
+            libkeybinder-3.0-dev libayatana-appindicator3-dev libpulse-dev libasound2-dev clang lld cmake pkg-config
 
       - name: Code generation
         working-directory: commet
@@ -113,6 +136,23 @@ jobs:
           --version_tag ${{ inputs.version }}
           --git_hash ${{ github.sha }}
           --build_detail ${{ matrix.platform }}-${{ env.ARCH }}
+
+      - name: Qualify Windows CEF artifact
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $bundle = $env:BUNDLE
+          $payload = Join-Path $bundle "cef_host"
+          $stage = Join-Path $env:GITHUB_WORKSPACE ".cef-stage"
+          $metadata = Join-Path $env:GITHUB_WORKSPACE ".cef-metadata"
+          $archive = Get-ChildItem -LiteralPath (Join-Path $env:GITHUB_WORKSPACE ".cef-cache") -Filter "*.tar.bz2" -File -Recurse | Select-Object -First 1
+          if ($null -eq $archive) { throw "locked CEF archive was not cached" }
+          python tools/cef_runtime.py stage --platform windows-x64 $archive.FullName $stage --project-root $payload
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/cef_runtime.py metadata --platform windows-x64 $stage $metadata --project-root $payload
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/qualify_windows_artifact.py --bundle $bundle --metadata $metadata
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Package
         shell: bash

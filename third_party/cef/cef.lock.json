@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "cef_version": "152.0.8+g1ce985c+chromium-152.0.7977.134",
+  "cef_branch": "7977",
+  "chromium_version": "152.0.7977.134",
+  "distribution": "standard",
+  "codec": {
+    "proprietary_codecs": false,
+    "ffmpeg_branding": "Chromium"
+  },
+  "source": {
+    "host": "cef-builds.spotifycdn.com",
+    "index_url": "https://cef-builds.spotifycdn.com/index.json",
+    "archive_base_url": "https://cef-builds.spotifycdn.com/"
+  },
+  "platforms": {
+    "windows-x64": {
+      "archive": {
+        "filename": "cef_binary_152.0.8+g1ce985c+chromium-152.0.7977.134_windows64.tar.bz2",
+        "url": "https://cef-builds.spotifycdn.com/cef_binary_152.0.8+g1ce985c+chromium-152.0.7977.134_windows64.tar.bz2",
+        "size": 359844028,
+        "sha1": "fcefc344b5508991727bae786b2392190379bbcc",
+        "upstream_sha1": "fcefc344b5508991727bae786b2392190379bbcc",
+        "sidecar_sha1": "fcefc344b5508991727bae786b2392190379bbcc",
+        "sha256": "390d03b92f5d30d8c68fc7934c7d3e8fda916f52c9131d796da171caae549920",
+        "project_sha256": "390d03b92f5d30d8c68fc7934c7d3e8fda916f52c9131d796da171caae549920"
+      },
+      "raw_manifest_sha256": "79279882bf41a685a549b174afb09100cd26e2928df5e239ed92ca752a8d8e75",
+      "bootstrap": {
+        "archive": [
+          "Release/bootstrap.exe"
+        ],
+        "project": [
+          "client.dll"
+        ]
+      },
+      "runtime": {
+        "required": [
+          "Release/bootstrap.exe",
+          "Release/chrome_elf.dll",
+          "Release/d3dcompiler_47.dll",
+          "Release/dxcompiler.dll",
+          "Release/dxil.dll",
+          "Release/libEGL.dll",
+          "Release/libGLESv2.dll",
+          "Release/libcef.dll",
+          "Release/v8_context_snapshot.bin",
+          "Release/vk_swiftshader.dll",
+          "Release/vk_swiftshader_icd.json",
+          "Release/vulkan-1.dll",
+          "Resources/chrome_100_percent.pak",
+          "Resources/chrome_200_percent.pak",
+          "Resources/icudtl.dat",
+          "Resources/resources.pak",
+          "Resources/locales/*.pak",
+          "LICENSE.txt",
+          "CREDITS.html"
+        ],
+        "allowlist": [
+          "Release/bootstrap.exe",
+          "Release/chrome_elf.dll",
+          "Release/d3dcompiler_47.dll",
+          "Release/dxcompiler.dll",
+          "Release/dxil.dll",
+          "Release/libEGL.dll",
+          "Release/libGLESv2.dll",
+          "Release/libcef.dll",
+          "Release/v8_context_snapshot.bin",
+          "Release/vk_swiftshader.dll",
+          "Release/vk_swiftshader_icd.json",
+          "Release/vulkan-1.dll",
+          "Resources/chrome_100_percent.pak",
+          "Resources/chrome_200_percent.pak",
+          "Resources/icudtl.dat",
+          "Resources/resources.pak",
+          "Resources/locales/*.pak",
+          "LICENSE.txt",
+          "CREDITS.html"
+        ],
+        "forbidden": [
+          "Release/bootstrapc.exe",
+          "Release/libcef.lib",
+          "Debug/**",
+          "include/**",
+          "libcef_dll/**",
+          "tests/**"
+        ]
+      },
+      "build_sdk": {
+        "required": [
+          "Release/libcef.lib",
+          "include/cef_app.h",
+          "cmake/cef_variables.cmake",
+          "libcef_dll/CMakeLists.txt"
+        ],
+        "allowlist": [
+          "Release/*.lib",
+          "cmake/**",
+          "include/**",
+          "libcef_dll/**"
+        ],
+        "forbidden": [
+          "Debug/**",
+          "tests/**",
+          "tools/**"
+        ]
+      }
+    },
+    "linux-x64": {
+      "archive": {
+        "filename": "cef_binary_152.0.8+g1ce985c+chromium-152.0.7977.134_linux64.tar.bz2",
+        "url": "https://cef-builds.spotifycdn.com/cef_binary_152.0.8+g1ce985c+chromium-152.0.7977.134_linux64.tar.bz2",
+        "size": 674894043,
+        "sha1": "add0a51f7333bc660e8e3bafd998e0122568f7d8",
+        "upstream_sha1": "add0a51f7333bc660e8e3bafd998e0122568f7d8",
+        "sidecar_sha1": "add0a51f7333bc660e8e3bafd998e0122568f7d8",
+        "sha256": "4967293a608424b98f2ff4ab15f4119064de966018df6458a80f2a7073dd1dc0",
+        "project_sha256": "4967293a608424b98f2ff4ab15f4119064de966018df6458a80f2a7073dd1dc0"
+      },
+      "raw_manifest_sha256": "fd82d90e1f0d6d632b8423499264c95e65a6a2eec623069faea51bc49b96612e",
+      "bootstrap": {
+        "archive": [],
+        "project": []
+      },
+      "runtime": {
+        "required": [
+          "Release/chrome-sandbox",
+          "Release/libEGL.so",
+          "Release/libGLESv2.so",
+          "Release/libcef.so",
+          "Release/libvk_swiftshader.so",
+          "Release/libvulkan.so.1",
+          "Release/v8_context_snapshot.bin",
+          "Release/vk_swiftshader_icd.json",
+          "Resources/chrome_100_percent.pak",
+          "Resources/chrome_200_percent.pak",
+          "Resources/icudtl.dat",
+          "Resources/resources.pak",
+          "Resources/locales/*.pak",
+          "LICENSE.txt",
+          "CREDITS.html"
+        ],
+        "allowlist": [
+          "Release/chrome-sandbox",
+          "Release/libEGL.so",
+          "Release/libGLESv2.so",
+          "Release/libcef.so",
+          "Release/libvk_swiftshader.so",
+          "Release/libvulkan.so.1",
+          "Release/v8_context_snapshot.bin",
+          "Release/vk_swiftshader_icd.json",
+          "Resources/chrome_100_percent.pak",
+          "Resources/chrome_200_percent.pak",
+          "Resources/icudtl.dat",
+          "Resources/resources.pak",
+          "Resources/locales/*.pak",
+          "LICENSE.txt",
+          "CREDITS.html"
+        ],
+        "forbidden": [
+          "Debug/**",
+          "include/**",
+          "libcef_dll/**",
+          "tests/**"
+        ]
+      }
+    }
+  },
+  "policy": {
+    "reject_redirects": true,
+    "reject_links": true,
+    "runtime_download": false,
+    "refresh_max_days": 28,
+    "high_severity_refresh_hours": 24,
+    "high_severity_release_hours": 72,
+    "lower_severity_release_days": 7,
+    "required_notice_files": [
+      "LICENSE.txt",
+      "CREDITS.html"
+    ],
+    "sbom_format": "CycloneDX-1.5"
+  }
+}

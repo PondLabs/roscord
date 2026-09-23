@@ -8,6 +8,8 @@ back to their origin; we change them here.
 | `livekit-client-sdk-flutter` | https://github.com/commetchat/livekit-client-sdk-flutter (branch `hkdf`) | `19f6b86d7a391876aceabf8ef3e117d399c23899` (2026-05-23) |
 | `flutter-webrtc` | https://github.com/flutter-webrtc/flutter-webrtc (tag `1.6.2+hotfix.2`) | `d77879b` (2026-09) |
 | `tray_manager` | https://pub.dev/packages/tray_manager | `0.5.3` (2026-09) |
+| `flutter_web_auth_2` | https://github.com/ThexXTURBOXx/flutter_web_auth_2 (tag `v4.1.0`) | `4.1.0` (2026) + cutover: `desktop_webview_window` dependency and `lib/src/webview.dart` deleted, `linows.dart` always uses the external-browser loopback server |
+| `flutter_inappwebview_windows_stub` | purpose-built cutover stub (no upstream) | `0.0.0-cutover.1`: keeps the `flutter_inappwebview_windows` plugin name with a no-op native registration; links no WebView2 |
 
 `example/`, `test/`, `testfiles/`, `.github/` and git metadata were dropped
 from the copies. Local changes are marked with `// COMMET:` comments in Dart
@@ -45,6 +47,10 @@ wherever the server's offer has it (`lib/src/core/engine.dart`).
 the nine, so a copy went back to `stopAudioCaptureOnMute: true` and dropped
 the `processor`, which took the web AudioWorklet off the track whenever the
 microphone was restarted to change one option.
+The iOS and macOS podspecs pin `WebRTC-SDK` to `150.7871.01`, the version the
+vendored `flutter-webrtc` pins (upstream livekit_client made the same move in
+2.13.0). CocoaPods installs a single copy of the pod, so if the two pins
+differ `pod install` fails. Bump them together.
 
 `tray_manager` shows the system tray icon (voice status: idle, live, muted).
 The `// COMMET` change makes the Linux appindicator optional: without

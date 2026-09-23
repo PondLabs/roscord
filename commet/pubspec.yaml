@@ -156,11 +156,8 @@ dependency_overrides:
       path: pkgs/markdown
 
   ## Fixes https://github.com/MixinNetwork/flutter-plugins/issues/457
-  desktop_webview_window:
-    git:
-      url: https://github.com/commetchat/mixin-flutter-plugins.git
-      ref: webview-patch
-      path: ./packages/desktop_webview_window
+  ## Cutover (#132): removed. Desktop web views are gone; every roscord-owned
+  ## desktop web surface renders through the bundled CEF BrowserRuntime.
 
   # Vendored copies (see third_party/README.md). We change them in place.
   # flutter_webrtc: upstream 1.6.2+hotfix.2, which adds system-audio capture
@@ -170,6 +167,20 @@ dependency_overrides:
 
   livekit_client:
     path: ../third_party/livekit-client-sdk-flutter
+
+  # Cutover stub (#132, epic #110): the upstream Windows webview plugin
+  # downloads WebView2/WIL through NuGet and links WebView2Loader.dll, so it
+  # cannot remain in the Windows target graph. The stub keeps the plugin name
+  # resolvable with a no-op native registration; Android/iOS/macOS/web
+  # implementations of the root flutter_inappwebview package are untouched.
+  flutter_inappwebview_windows:
+    path: ../third_party/flutter_inappwebview_windows_stub
+
+  # Vendored SSO (#132): desktop_webview_window removed (see third_party/).
+  # Desktop SSO authenticates through the external system browser plus the
+  # loopback server (useWebview: false); the WebView2 webview is deleted.
+  flutter_web_auth_2:
+    path: ../third_party/flutter_web_auth_2
 
   # tray_manager: the Linux appindicator made optional, so a build without it
   # runs without a tray icon instead of failing.

@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+# rlib so the cef_host binary below can link the library it runs.
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [[bin]]
-name = "widget_runner"
-path = "src/main.rs"
+name = "cef_host"
+path = "src/bin/cef_host.rs"
 
 
 [dependencies]
@@ -16,23 +17,16 @@ audio_decode = { path = "../audio_decode" }
 audio_dsp = { path = "../audio_dsp" }
 dj_audio = { path = "../dj_audio" }
 base64 = "0.22.1"
-bytes = "1.11.1"
 flutter_rust_bridge = "=2.11.1"
-hex = "0.4.3"
-image = "0.25.10"
-lazy_static = "1.5.0"
-log = "0.4.29"
-once_cell = "1.21.4"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-stderrlog = "0.6.0"
-tao = "0.34.6"
-tokio = { version = "1.50.0", features = ["io-util", "io-std"] }
-uuid = "1.23.0"
-wry = "0.54.4"
+uuid = { version = "1.23.0", features = ["v4"] }
+
+[build-dependencies]
+cc = "1.2"
 
 [target.'cfg(unix)'.dependencies]
-webrtc = "0.17.1"
+libc = "0.2"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)', 'cfg(roscord_cef_bridge)'] }

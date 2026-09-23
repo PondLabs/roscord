@@ -6,7 +6,6 @@ list(APPEND FLUTTER_PLUGIN_LIST
   connectivity_plus
   dart_ipc
   desktop_drop
-  desktop_webview_window
   dynamic_color
   file_selector_windows
   flutter_inappwebview_windows

@@ -16,6 +16,8 @@ Pod::Spec.new do |s|
   s.static_framework    = true
 
   s.dependency 'FlutterMacOS'
-  s.dependency 'WebRTC-SDK', '144.7559.01'
+  # COMMET: the same WebRTC-SDK as the vendored flutter_webrtc 1.6.2. CocoaPods
+  # installs one copy of the pod, so two different pins fail pod install.
+  s.dependency 'WebRTC-SDK', '150.7871.01'
   s.dependency 'flutter_webrtc'
 end

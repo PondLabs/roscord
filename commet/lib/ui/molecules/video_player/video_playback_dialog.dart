@@ -1,13 +1,16 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io' show File, HttpServer, InternetAddress, ContentType, Platform;
 
+import 'package:commet/browser_runtime.dart';
 import 'package:commet/cache/file_provider.dart';
+import 'package:commet/client/components/video_embed/media_embed_adapter.dart';
 import 'package:commet/client/components/video_embed/video_embed_info.dart';
 import 'package:commet/client/components/video_embed/video_playback_source.dart';
 import 'package:commet/debug/log.dart';
+import 'package:commet/main.dart' show browserRuntime;
 import 'package:commet/utils/links/link_utils.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -27,9 +30,13 @@ class VideoPlaybackDialog extends StatefulWidget {
   final bool autoplay;
 
   /// Whether this platform can render an [OfficialVideoEmbedSource] in the
-  /// dialog. flutter_inappwebview has no Linux implementation, and the web
-  /// build has no iframe path yet, so those open the link in the browser.
-  static bool get supportsOfficialEmbeds => !kIsWeb && !Platform.isLinux;
+  /// dialog. Windows plays official embeds unconditionally through the CEF
+  /// [MediaEmbedAdapter] after the cutover; macOS, Android, and iOS keep
+  /// their existing web view. Linux has no web view for the official player
+  /// and the web build has no iframe path yet, so those open the link in
+  /// the browser.
+  static bool get supportsOfficialEmbeds =>
+      !kIsWeb && !Platform.isLinux && !Platform.isWindows;
 
   /// Whether YouTube can play in the native player instead: mpv hands a
   /// YouTube page to yt-dlp itself, when it is installed. This is the in-app
@@ -385,111 +392,43 @@ class _OfficialVideoEmbedState extends State<_OfficialVideoEmbed> {
   String? error;
   int revision = 0;
 
-  /// Loopback server hosting the wrapper page on platforms where the webview
-  /// cannot give an in-memory page an origin. See [_needsLoopbackServer].
-  HttpServer? pageServer;
-  Uri? pageServerUri;
-
   bool get supportsInAppWebView => VideoPlaybackDialog.supportsOfficialEmbeds;
 
-  /// WebView2 (Windows) loads in-memory HTML with `NavigateToString`, which
-  /// ignores `baseUrl` and gives the page an opaque origin. Frames inside it
-  /// then send no Referer, and YouTube refuses to play (error 153). Serving
-  /// the same page from 127.0.0.1 gives it a real origin.
-  bool get _needsLoopbackServer => !kIsWeb && Platform.isWindows;
-
-  Uri get playbackUri {
-    final source = widget.source;
-    if (source.provider != OfficialVideoProvider.youtube || !widget.autoplay) {
-      return source.uri;
-    }
-    return source.uri.replace(
-      queryParameters: {
-        ...source.uri.queryParameters,
-        'autoplay': '1',
-      },
-    );
-  }
+  /// Playback URL with the preserved autoplay rule. Single source of truth
+  /// is [mediaEmbedPlaybackUri] so the CEF adapter serves the same URL.
+  Uri get playbackUri =>
+      mediaEmbedPlaybackUri(widget.source, autoplay: widget.autoplay);
 
   /// Origin the wrapper page claims to come from. YouTube's player checks
   /// that a Referer is present, so the page embedding it must have one.
-  String get pageOrigin => switch (widget.source.provider) {
-        OfficialVideoProvider.youtube => 'https://www.youtube.com',
-        _ => widget.source.uri.origin,
-      };
+  /// Single source of truth is [mediaEmbedPageOrigin].
+  String get pageOrigin => mediaEmbedPageOrigin(widget.source);
 
-  String get wrapperHtml {
-    final src = const HtmlEscape(HtmlEscapeMode.attribute)
-        .convert(playbackUri.toString());
-    return '''<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<meta name="referrer" content="strict-origin-when-cross-origin">
-<style>
-html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
-iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
-</style>
-</head>
-<body>
-<iframe src="$src"
-  allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
-  allowfullscreen
-  referrerpolicy="strict-origin-when-cross-origin"></iframe>
-</body>
-</html>''';
-  }
+  /// Loopback-hosted wrapper page. Single source of truth is
+  /// [mediaEmbedWrapperHtml] so the CEF adapter serves identical markup.
+  String get wrapperHtml => mediaEmbedWrapperHtml(playbackUri);
 
-  @override
-  void initState() {
-    super.initState();
-    if (supportsInAppWebView && _needsLoopbackServer) {
-      _startPageServer();
-    }
-  }
-
-  Future<void> _startPageServer() async {
-    try {
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      server.listen((request) {
-        request.response.headers.contentType = ContentType.html;
-        request.response.write(wrapperHtml);
-        request.response.close();
-      });
-      if (!mounted) {
-        await server.close(force: true);
-        return;
-      }
-      setState(() {
-        pageServer = server;
-        pageServerUri = Uri.http('127.0.0.1:${server.port}', '/embed');
-      });
-    } catch (e, s) {
-      Log.onError(e, s, content: 'Failed to start embed page server');
-      if (mounted) setState(() => error = e.toString());
-    }
-  }
-
-  @override
-  void dispose() {
-    pageServer?.close(force: true);
-    super.dispose();
-  }
-
-  bool _isAllowedNavigation(Uri target) {
-    final host = target.host.toLowerCase();
-    if (target.scheme == 'about') return true;
-    if (pageServerUri != null && host == pageServerUri!.host) return true;
-    if (host == widget.source.uri.host.toLowerCase()) return true;
-    if (host == Uri.parse(pageOrigin).host) return true;
-    return host.endsWith('.youtube.com') ||
-        host.endsWith('.youtube-nocookie.com') ||
-        host.endsWith('.instagram.com');
-  }
+  /// Whether a navigation target stays inside the embed. Single source of
+  /// truth is [mediaEmbedIsAllowedNavigation] so the CEF adapter enforces
+  /// the same provider allowlist.
+  bool _isAllowedNavigation(Uri target) => mediaEmbedIsAllowedNavigation(
+        target,
+        embedUri: widget.source.uri,
+        pageOrigin: pageOrigin,
+      );
 
   @override
   Widget build(BuildContext context) {
+    // Windows official-video playback runs through the CEF MediaEmbedAdapter;
+    // every other platform keeps its existing web-view/external path.
+    if (mediaEmbedUsesCef(isWeb: kIsWeb, isWindows: Platform.isWindows)) {
+      return _CefOfficialVideoEmbed(
+        video: widget.video,
+        source: widget.source,
+        autoplay: widget.autoplay,
+      );
+    }
+
     if (!supportsInAppWebView) {
       return ColoredBox(
         color: Colors.black,
@@ -523,25 +462,22 @@ iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
       );
     }
 
-    final waitingForServer = _needsLoopbackServer && pageServerUri == null;
-
+    // The remaining InAppWebView branch serves macOS, Android, and iOS only:
+    // Windows runs through CEF above, Linux and web fall into the external
+    // path. The legacy Windows loopback workaround is gone with the old
+    // Windows web view.
     return Stack(
       fit: StackFit.expand,
       children: [
-        if (!waitingForServer && error == null)
+        if (error == null)
           InAppWebView(
             key: ValueKey(revision),
-            initialUrlRequest: _needsLoopbackServer
-                ? URLRequest(url: WebUri(pageServerUri.toString()))
-                : null,
-            initialData: _needsLoopbackServer
-                ? null
-                : InAppWebViewInitialData(
-                    data: wrapperHtml,
-                    baseUrl: WebUri(pageOrigin),
-                    mimeType: 'text/html',
-                    encoding: 'utf-8',
-                  ),
+            initialData: InAppWebViewInitialData(
+              data: wrapperHtml,
+              baseUrl: WebUri(pageOrigin),
+              mimeType: 'text/html',
+              encoding: 'utf-8',
+            ),
             initialSettings: InAppWebViewSettings(
               javaScriptEnabled: true,
               mediaPlaybackRequiresUserGesture: !widget.autoplay,
@@ -579,59 +515,373 @@ iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
         if (!loaded && error == null)
           const Center(child: CircularProgressIndicator()),
         if (error != null)
-          ColoredBox(
-            color: Colors.black,
-            child: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(
-                    Icons.error_outline_rounded,
-                    color: Colors.white,
-                    size: 36,
-                  ),
-                  const SizedBox(height: 12),
-                  const Text(
-                    'Unable to load this video',
-                    style: TextStyle(color: Colors.white),
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      OutlinedButton.icon(
-                        onPressed: () {
-                          setState(() {
-                            error = null;
-                            loaded = false;
-                            revision += 1;
-                          });
-                          if (_needsLoopbackServer && pageServerUri == null) {
-                            _startPageServer();
-                          }
-                        },
-                        icon: const Icon(Icons.refresh_rounded),
-                        label: const Text('Retry'),
-                      ),
-                      const SizedBox(width: 8),
-                      OutlinedButton.icon(
-                        onPressed: () {
-                          Navigator.pop(context);
-                          LinkUtils.open(
-                            widget.video.originalUrl,
-                            context: context,
-                          );
-                        },
-                        icon: const Icon(Icons.open_in_new_rounded),
-                        label: const Text('Open in Browser'),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
+          _EmbedErrorView(
+            onRetry: () {
+              setState(() {
+                error = null;
+                loaded = false;
+                revision += 1;
+              });
+            },
+            onOpenInBrowser: () {
+              Navigator.pop(context);
+              LinkUtils.open(
+                widget.video.originalUrl,
+                context: context,
+              );
+            },
           ),
       ],
+    );
+  }
+}
+
+/// Shared retry/close/error chrome for official-video embeds.
+///
+/// Both the preserved web-view branch (macOS, Android, iOS) and the CEF
+/// branch render this on load failure so retry, close, and error behavior
+/// stay identical across the engine change.
+class _EmbedErrorView extends StatelessWidget {
+  const _EmbedErrorView({
+    required this.onRetry,
+    required this.onOpenInBrowser,
+  });
+
+  final VoidCallback onRetry;
+  final VoidCallback onOpenInBrowser;
+
+  @override
+  Widget build(BuildContext context) {
+    return ColoredBox(
+      color: Colors.black,
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.error_outline_rounded,
+              color: Colors.white,
+              size: 36,
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Unable to load this video',
+              style: TextStyle(color: Colors.white),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: onRetry,
+                  icon: const Icon(Icons.refresh_rounded),
+                  label: const Text('Retry'),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  onPressed: onOpenInBrowser,
+                  icon: const Icon(Icons.open_in_new_rounded),
+                  label: const Text('Open in Browser'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Windows official-video playback through the CEF [MediaEmbedAdapter].
+///
+/// Replaces the legacy Windows web-view branch: the same loopback-hosted
+/// wrapper page (origin and Referer preserved) opens as an embedded
+/// BrowserRuntime surface, the provider allowlist and navigation policy
+/// travel in the [SurfaceSpec], disallowed links become explicit external
+/// actions via `LinkUtils`, and closing the dialog closes the surface so no
+/// profile, host, or owned-window leaks. Loading, Retry, Close, and error
+/// chrome match the WebView branch. Linux, web, macOS, Android, and iOS
+/// never reach this widget (see [mediaEmbedUsesCef]).
+class _CefOfficialVideoEmbed extends StatefulWidget {
+  const _CefOfficialVideoEmbed({
+    required this.video,
+    required this.source,
+    required this.autoplay,
+  });
+
+  final VideoEmbedInfo video;
+  final OfficialVideoEmbedSource source;
+  final bool autoplay;
+
+  @override
+  State<_CefOfficialVideoEmbed> createState() => _CefOfficialVideoEmbedState();
+}
+
+class _CefOfficialVideoEmbedState extends State<_CefOfficialVideoEmbed> {
+  HttpServer? _pageServer;
+  Uri? _pageServerUri;
+  MediaEmbedAdapter? _adapter;
+  MediaEmbedSession? _session;
+  StreamSubscription<Uri>? _externalSubscription;
+  StreamSubscription<SurfaceEvent>? _eventSubscription;
+  Object? _error;
+  int _revision = 0;
+  Size? _lastSize;
+
+  /// Shared Windows runtime from `main.dart`; null until the app initializes
+  /// it (or in tests), in which case playback degrades to the retryable
+  /// error view with an explicit external-browser action instead of
+  /// crashing.
+  BrowserRuntime? get _runtime => browserRuntime;
+
+  @override
+  void initState() {
+    super.initState();
+    _start();
+  }
+
+  Future<void> _start() async {
+    await _startPageServer();
+    if (!mounted) return;
+    if (_error != null) {
+      setState(() {});
+      return;
+    }
+    await _openSession();
+  }
+
+  /// Loopback server hosting the wrapper page. Serving from 127.0.0.1 gives
+  /// the page a real origin so provider iframes send a Referer — the same
+  /// reason the legacy Windows web-view branch needed it.
+  Future<void> _startPageServer() async {
+    if (_pageServerUri != null) return;
+    try {
+      final html = MediaEmbedLaunch(
+        source: widget.source,
+        originalUrl: widget.video.originalUrl,
+        autoplay: widget.autoplay,
+      ).wrapperHtml;
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      server.listen((request) {
+        request.response.headers.contentType = ContentType.html;
+        request.response.write(html);
+        request.response.close();
+      });
+      if (!mounted) {
+        await server.close(force: true);
+        return;
+      }
+      _pageServer = server;
+      _pageServerUri = Uri.http('127.0.0.1:${server.port}', '/embed');
+    } catch (e, s) {
+      Log.onError(e, s, content: 'Failed to start embed page server');
+      _error = e;
+    }
+  }
+
+  Future<void> _openSession() async {
+    final runtime = _runtime;
+    final loopbackUri = _pageServerUri;
+    if (runtime == null || loopbackUri == null) {
+      if (mounted) {
+        setState(() {
+          _error ??= StateError('Embedded browser unavailable');
+        });
+      }
+      return;
+    }
+    try {
+      final adapter = MediaEmbedAdapter(runtime: runtime);
+      final session = await adapter.openSession(
+        MediaEmbedLaunch(
+          source: widget.source,
+          originalUrl: widget.video.originalUrl,
+          autoplay: widget.autoplay,
+          loopbackUri: loopbackUri,
+        ),
+      );
+      if (!mounted) {
+        await session.dispose();
+        return;
+      }
+      _adapter = adapter;
+      _session = session;
+      _eventSubscription = session.events.listen(_onSurfaceEvent);
+      // Disallowed links become explicit external actions; the embed stays.
+      _externalSubscription = session.externalNavigations.listen((uri) {
+        LinkUtils.open(uri, context: context);
+      });
+      setState(() {});
+    } catch (e, s) {
+      Log.onError(e, s, content: 'Failed to open official video surface');
+      if (mounted) {
+        setState(() => _error = e);
+      }
+    }
+  }
+
+  void _onSurfaceEvent(SurfaceEvent event) {
+    if (!mounted) return;
+    if (event is FailedEvent) {
+      setState(() => _error ??= StateError(event.failure.message));
+    } else if (event is ClosedEvent) {
+      // An unexpected close (anything but dispose) surfaces retryable UI
+      // instead of stranding a dead frame.
+      setState(() => _error ??= StateError('Embedded browser closed'));
+    }
+  }
+
+  Future<void> _retry() async {
+    setState(() {
+      _error = null;
+      _revision += 1;
+      _session = null;
+    });
+    await _eventSubscription?.cancel();
+    _eventSubscription = null;
+    await _externalSubscription?.cancel();
+    _externalSubscription = null;
+    await _adapter?.dispose();
+    _adapter = null;
+    await _startPageServer();
+    if (!mounted) return;
+    if (_error != null) {
+      setState(() {});
+      return;
+    }
+    await _openSession();
+  }
+
+  @override
+  void dispose() {
+    // State.dispose cannot await: the close command is queued on the runtime
+    // before subscriptions and the loopback server are torn down, so the
+    // host still destroys the browser and releases the surface.
+    unawaited(_eventSubscription?.cancel());
+    unawaited(_externalSubscription?.cancel());
+    unawaited(_adapter?.dispose());
+    unawaited(_pageServer?.close(force: true));
+    super.dispose();
+  }
+
+  void _forwardResize(Size size) {
+    final session = _session;
+    if (session == null || !session.isReady) return;
+    if (_lastSize == size) return;
+    _lastSize = size;
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    unawaited(
+      session.surface
+          .resize(size.width.round(), size.height.round(), dpr)
+          .then<void>((_) {}, onError: (Object _, StackTrace __) {}),
+    );
+  }
+
+  Future<void> _forwardPointer(
+    Future<void> Function() send,
+  ) async {
+    try {
+      await send();
+    } catch (_) {
+      // Input after close is a cancellation, not an error.
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final error = _error;
+    if (error != null) {
+      return _EmbedErrorView(
+        onRetry: _retry,
+        onOpenInBrowser: () {
+          Navigator.pop(context);
+          LinkUtils.open(
+            widget.video.originalUrl,
+            context: context,
+          );
+        },
+      );
+    }
+
+    final session = _session;
+    if (session == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth > 0 && constraints.maxHeight > 0) {
+          _forwardResize(
+            Size(constraints.maxWidth, constraints.maxHeight),
+          );
+        }
+        // Pointer, wheel, and focus stay ordered through the surface so the
+        // provider player keeps its click-to-play contract.
+        return Listener(
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: (event) {
+            final current = _session;
+            if (current == null) return;
+            unawaited(_forwardPointer(() => current.surface.setFocus(true)));
+            unawaited(
+              _forwardPointer(
+                () => current.surface.pointer(
+                  PointerKind.down,
+                  event.localPosition.dx,
+                  event.localPosition.dy,
+                  buttons: event.buttons,
+                ),
+              ),
+            );
+          },
+          onPointerMove: (event) {
+            final current = _session;
+            if (current == null) return;
+            unawaited(
+              _forwardPointer(
+                () => current.surface.pointer(
+                  PointerKind.move,
+                  event.localPosition.dx,
+                  event.localPosition.dy,
+                  buttons: event.buttons,
+                ),
+              ),
+            );
+          },
+          onPointerUp: (event) {
+            final current = _session;
+            if (current == null) return;
+            unawaited(
+              _forwardPointer(
+                () => current.surface.pointer(
+                  PointerKind.up,
+                  event.localPosition.dx,
+                  event.localPosition.dy,
+                ),
+              ),
+            );
+          },
+          onPointerSignal: (signal) {
+            if (signal is! PointerScrollEvent) return;
+            final current = _session;
+            if (current == null) return;
+            unawaited(
+              _forwardPointer(
+                () => current.surface.wheel(
+                  signal.localPosition.dx,
+                  signal.localPosition.dy,
+                  signal.scrollDelta.dx,
+                  signal.scrollDelta.dy,
+                ),
+              ),
+            );
+          },
+          child: EmbeddedBrowserView(
+            key: ValueKey(_revision),
+            surface: session.surface,
+          ),
+        );
+      },
     );
   }
 }

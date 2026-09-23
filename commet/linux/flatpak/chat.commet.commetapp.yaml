@@ -20,7 +20,7 @@ finish-args:
 - "--socket=wayland"
 - "--socket=pulseaudio"
 - "--share=network"
-- "--device=all"
+- "--device=dri"
 - "--filesystem=xdg-download"
 - "--talk-name=org.freedesktop.Notifications"
 - "--talk-name=org.freedesktop.Flatpak"

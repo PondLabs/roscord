@@ -154,7 +154,9 @@ final _legacyIdentityAllowlist = <_Allowance>[
   _Allowance(
     path: r'pubspec\.yaml',
     token: r'https://github\.com/commetchat/[^\s]+',
-    count: 9,
+    // Cutover #132 removed the desktop_webview_window override that pinned
+    // the commetchat mixin-flutter-plugins fork, dropping one commetchat URL.
+    count: 8,
     reason: _thirdPartyProject,
   ),
 ];

@@ -120,6 +120,84 @@ install(CODE "
 set(INSTALL_BUNDLE_DATA_DIR "${CMAKE_INSTALL_PREFIX}/data")
 set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}/lib")
 
+# The Flutter project root. flutter/CMakeLists.txt gets PROJECT_DIR from the
+# generated config, but only in its own scope.
+set(PROJECT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
+
+# Linux CEF is a separate process.  Build the transport host from the same
+# Rust crate as the BrowserRuntime contract and install it beside the Flutter
+# executable so native packages and Flatpak share one host topology.  The
+# host requires an explicit staged CEF root at launch; it never searches the
+# system for libcef.so.
+#
+# Opt-in, like the Windows host: only a job that has staged the locked CEF
+# inputs builds it.  The Flutter tool passes no -D options, so the switch, the
+# SDK and the staged runtime below also come from the environment.
+option(ROSCORD_BUILD_CEF_HOST "Build and bundle the Linux CEF host" OFF)
+if("$ENV{ROSCORD_BUILD_CEF_HOST}" STREQUAL "ON")
+  set(ROSCORD_BUILD_CEF_HOST ON)
+endif()
+set(ROSCORD_CEF_SDK_ROOT "" CACHE PATH "Full CEF SDK used to build cef_host")
+if(NOT ROSCORD_CEF_SDK_ROOT AND DEFINED ENV{ROSCORD_CEF_SDK_ROOT})
+  set(ROSCORD_CEF_SDK_ROOT "$ENV{ROSCORD_CEF_SDK_ROOT}" CACHE PATH
+    "Full CEF SDK used to build cef_host" FORCE)
+endif()
+if(ROSCORD_BUILD_CEF_HOST)
+  if(NOT ROSCORD_CEF_SDK_ROOT)
+    message(FATAL_ERROR
+      "ROSCORD_CEF_SDK_ROOT is required when ROSCORD_BUILD_CEF_HOST is enabled")
+  endif()
+  find_program(CARGO_EXECUTABLE cargo)
+  if(NOT CARGO_EXECUTABLE)
+    message(FATAL_ERROR "cargo is required to build cef_host")
+  endif()
+  set(CEF_HOST_TARGET_DIR "${PROJECT_BINARY_DIR}/cef-host-target")
+  set(CEF_HOST_BINARY "${CEF_HOST_TARGET_DIR}/release/cef_host")
+  set(CEF_HOST_BUILD_ENV "CARGO_TARGET_DIR=${CEF_HOST_TARGET_DIR}")
+  if(ROSCORD_CEF_SDK_ROOT)
+    list(APPEND CEF_HOST_BUILD_ENV "ROSCORD_CEF_SDK_ROOT=${ROSCORD_CEF_SDK_ROOT}")
+  endif()
+  add_custom_command(
+    OUTPUT "${CEF_HOST_BINARY}"
+    COMMAND ${CMAKE_COMMAND} -E env
+      ${CEF_HOST_BUILD_ENV}
+      "${CARGO_EXECUTABLE}" build --release --bin cef_host
+      --manifest-path "${PROJECT_DIR}/../rust/rust/Cargo.toml"
+    WORKING_DIRECTORY "${PROJECT_DIR}/.."
+    DEPENDS
+      "${PROJECT_DIR}/../Cargo.toml"
+      "${PROJECT_DIR}/../Cargo.lock"
+      "${PROJECT_DIR}/../rust/rust/Cargo.toml"
+      "${PROJECT_DIR}/../rust/rust/build.rs"
+      "${PROJECT_DIR}/../rust/rust/src/lib.rs"
+      "${PROJECT_DIR}/../rust/rust/src/cef_bridge.c"
+      "${PROJECT_DIR}/../rust/rust/src/cef_host.rs"
+      "${PROJECT_DIR}/../rust/rust/src/bin/cef_host.rs"
+      "${PROJECT_DIR}/../rust/rust/src/browser_runtime.rs"
+      "${PROJECT_DIR}/../rust/rust/src/linux_browser_runtime.rs"
+    VERBATIM
+  )
+  add_custom_target(cef_host_build ALL DEPENDS "${CEF_HOST_BINARY}")
+  add_dependencies(${BINARY_NAME} cef_host_build)
+  install(PROGRAMS "${CEF_HOST_BINARY}" DESTINATION "${CMAKE_INSTALL_PREFIX}")
+endif()
+
+# Release packaging can point this at the output of tools/cef_runtime.py
+# stage.  Leaving it unset is safe: cef_host refuses to start without the
+# explicit runtime and the app never falls back to a system browser.
+set(ROSCORD_CEF_RUNTIME_DIR "" CACHE PATH "Staged locked Linux CEF runtime")
+if(NOT ROSCORD_CEF_RUNTIME_DIR AND DEFINED ENV{ROSCORD_CEF_RUNTIME_DIR})
+  set(ROSCORD_CEF_RUNTIME_DIR "$ENV{ROSCORD_CEF_RUNTIME_DIR}" CACHE PATH
+    "Staged locked Linux CEF runtime" FORCE)
+endif()
+if(ROSCORD_CEF_RUNTIME_DIR)
+  if(NOT EXISTS "${ROSCORD_CEF_RUNTIME_DIR}/Release/libcef.so")
+    message(FATAL_ERROR "ROSCORD_CEF_RUNTIME_DIR is not a staged Linux CEF runtime")
+  endif()
+  install(DIRECTORY "${ROSCORD_CEF_RUNTIME_DIR}/"
+    DESTINATION "${CMAKE_INSTALL_PREFIX}/cef")
+endif()
+
 install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
   COMPONENT Runtime)
 

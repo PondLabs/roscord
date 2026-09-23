@@ -6,7 +6,6 @@ import 'package:commet/client/matrix/components/widgets/matrix_widget_component.
 import 'package:commet/client/matrix/components/widgets/matrix_widget_message_handler.dart';
 import 'package:commet/debug/log.dart';
 import 'package:matrix/matrix.dart';
-import 'package:matrix/matrix_api_lite/utils/try_get_map_extension.dart';
 
 class MatrixCapabilityReceiveStateEvent implements MatrixWidgetCapability {
   @override
