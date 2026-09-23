@@ -106,9 +106,16 @@ add_custom_command(TARGET cef_host_client POST_BUILD
 
 # CEF's standard distribution keeps the Release/Resources split.  Copying the
 # runtime at install time preserves that layout and prevents a system CEF lookup.
-install(TARGETS cef_host_client RUNTIME DESTINATION cef_host LIBRARY DESTINATION cef_host)
-install(FILES "${CEF_RELEASE_DIR}/bootstrap.exe" DESTINATION cef_host RENAME cef_host.exe)
-install(DIRECTORY "${CEF_RELEASE_DIR}/" DESTINATION cef_host
+#
+# The Flutter runner's install prefix is $<TARGET_FILE_DIR:commet>, so, like
+# the runner's own rules, destinations are absolute paths under it; relative
+# ones would resolve against the unexpanded expression.  Only client.dll is
+# installed, not its import library, since the payload is allow-listed.
+set(CEF_HOST_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/cef_host")
+install(FILES "$<TARGET_FILE:cef_host_client>" DESTINATION "${CEF_HOST_INSTALL_DIR}")
+install(FILES "${CEF_RELEASE_DIR}/bootstrap.exe"
+  DESTINATION "${CEF_HOST_INSTALL_DIR}" RENAME cef_host.exe)
+install(DIRECTORY "${CEF_RELEASE_DIR}/" DESTINATION "${CEF_HOST_INSTALL_DIR}"
   FILES_MATCHING
   PATTERN "*.dll"
   PATTERN "*.exe"
@@ -117,9 +124,10 @@ install(DIRECTORY "${CEF_RELEASE_DIR}/" DESTINATION cef_host
   PATTERN "*.pak"
   PATTERN "bootstrap.exe" EXCLUDE
 )
-install(DIRECTORY "${CEF_RESOURCES_DIR}/" DESTINATION cef_host/Resources)
+install(DIRECTORY "${CEF_RESOURCES_DIR}/"
+  DESTINATION "${CEF_HOST_INSTALL_DIR}/Resources")
 install(FILES
   "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
   "${CMAKE_CURRENT_SOURCE_DIR}/fixture.html"
-  DESTINATION cef_host/fixtures
+  DESTINATION "${CEF_HOST_INSTALL_DIR}/fixtures"
 )

@@ -52,23 +52,6 @@ add_subdirectory(${FLUTTER_MANAGED_DIR})
 # Application build; see runner/CMakeLists.txt.
 add_subdirectory("runner")
 
-# The CEF host is built only by the release/qualification job after the
-# locked CEF distribution has been staged. Keeping it opt-in means ordinary
-# Flutter development remains independent of a multi-hundred-megabyte native
-# runtime while still making the production target part of this project.
-option(ROSCORD_BUILD_CEF_HOST "Build the bundled Windows CEF host" OFF)
-if(DEFINED ENV{ROSCORD_BUILD_CEF_HOST} AND
-   "$ENV{ROSCORD_BUILD_CEF_HOST}" STREQUAL "ON")
-  set(ROSCORD_BUILD_CEF_HOST ON)
-endif()
-if((NOT DEFINED CEF_ROOT OR CEF_ROOT STREQUAL "") AND DEFINED ENV{CEF_ROOT})
-  set(CEF_ROOT "$ENV{CEF_ROOT}" CACHE PATH
-    "Locked CEF SDK/runtime staging directory" FORCE)
-endif()
-if(ROSCORD_BUILD_CEF_HOST)
-  add_subdirectory("cef_host")
-endif()
-
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
 include(flutter/generated_plugins.cmake)
@@ -116,3 +99,23 @@ install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
 install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   CONFIGURATIONS Profile;Release
   COMPONENT Runtime)
+
+# The CEF host is built only by the release/qualification job after the
+# locked CEF distribution has been staged. Keeping it opt-in means ordinary
+# Flutter development remains independent of a multi-hundred-megabyte native
+# runtime while still making the production target part of this project.
+option(ROSCORD_BUILD_CEF_HOST "Build the bundled Windows CEF host" OFF)
+if(DEFINED ENV{ROSCORD_BUILD_CEF_HOST} AND
+   "$ENV{ROSCORD_BUILD_CEF_HOST}" STREQUAL "ON")
+  set(ROSCORD_BUILD_CEF_HOST ON)
+endif()
+if((NOT DEFINED CEF_ROOT OR CEF_ROOT STREQUAL "") AND DEFINED ENV{CEF_ROOT})
+  set(CEF_ROOT "$ENV{CEF_ROOT}" CACHE PATH
+    "Locked CEF SDK/runtime staging directory" FORCE)
+endif()
+# Added after the installation settings above: cef_host installs into
+# ${CMAKE_INSTALL_PREFIX}/cef_host, and relative destinations would resolve
+# against the unexpanded $<TARGET_FILE_DIR:...> prefix.
+if(ROSCORD_BUILD_CEF_HOST)
+  add_subdirectory("cef_host")
+endif()
