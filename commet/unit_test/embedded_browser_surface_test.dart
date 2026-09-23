@@ -81,8 +81,7 @@ void main() {
     // Presenting releases the newest sequence; the release never carries a
     // CEF pointer, only the frame sequence.
     await surface.presentLatestAsTexture();
-    final release =
-        runtime.commands.whereType<ReleaseFrameCommand>().single;
+    final release = runtime.commands.whereType<ReleaseFrameCommand>().single;
     expect(release.frameSequence, 2);
 
     // Stale frames cannot regress the texture.
@@ -219,8 +218,10 @@ void main() {
     await surface.key('a', 'KeyA', pressed: true);
     await surface.key('a', 'KeyA', pressed: false);
     await surface.ime(ImePhase.start, 'ni', selectionStart: 0, selectionEnd: 2);
-    await surface.ime(ImePhase.update, 'nih', selectionStart: 0, selectionEnd: 3);
-    await surface.ime(ImePhase.commit, 'nihon', selectionStart: 5, selectionEnd: 5);
+    await surface.ime(ImePhase.update, 'nih',
+        selectionStart: 0, selectionEnd: 3);
+    await surface.ime(ImePhase.commit, 'nihon',
+        selectionStart: 5, selectionEnd: 5);
     await surface.ime(ImePhase.cancel, '');
     await surface.resize(1280, 720, 1.0);
     await surface.resize(1920, 1080, 2.0);
@@ -233,8 +234,9 @@ void main() {
     expect(inputs.whereType<KeyboardInput>(), hasLength(2));
     expect(inputs.whereType<ImeInput>(), hasLength(4));
 
-    final wheel =
-        inputs.whereType<PointerInput>().firstWhere((p) => p.kind == PointerKind.wheel);
+    final wheel = inputs
+        .whereType<PointerInput>()
+        .firstWhere((p) => p.kind == PointerKind.wheel);
     expect(wheel.deltaY, -120);
 
     final imePhases = inputs.whereType<ImeInput>().map((i) => i.phase).toList();
@@ -254,8 +256,8 @@ void main() {
     final subscription = surface.surfaceEvents.listen(events.add);
     await surface.resize(800, 600, 1.5);
     await _flush();
-    final resized = events.whereType<WindowChangedEvent>().last.change
-        as ResizedWindow;
+    final resized =
+        events.whereType<WindowChangedEvent>().last.change as ResizedWindow;
     expect(resized.width, 800);
     expect(resized.deviceScaleFactor, 1.5);
     await subscription.cancel();
@@ -300,7 +302,10 @@ void main() {
     final softwareId = await softwareSurface.open();
     await _flush();
 
-    for (final entry in [(defaultRuntime, defaultId), (softwareRuntime, softwareId)]) {
+    for (final entry in [
+      (defaultRuntime, defaultId),
+      (softwareRuntime, softwareId)
+    ]) {
       entry.$1.publishFrame(entry.$2, _frame(1));
     }
     await _flush();
@@ -325,7 +330,8 @@ void main() {
     await softwareSurface.dispose();
   });
 
-  test('WebView2, Wry, system CEF, unowned browsers, and fallback are impossible',
+  test(
+      'WebView2, Wry, system CEF, unowned browsers, and fallback are impossible',
       () async {
     // Embedded presentation is the only admitted mode for this surface.
     expect(
