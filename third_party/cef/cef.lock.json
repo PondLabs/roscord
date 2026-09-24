@@ -163,6 +163,23 @@
           "libcef_dll/**",
           "tests/**"
         ]
+      },
+      "build_sdk": {
+        "required": [
+          "include/cef_app.h",
+          "cmake/cef_variables.cmake",
+          "libcef_dll/CMakeLists.txt"
+        ],
+        "allowlist": [
+          "cmake/**",
+          "include/**",
+          "libcef_dll/**"
+        ],
+        "forbidden": [
+          "Debug/**",
+          "tests/**",
+          "tools/**"
+        ]
       }
     }
   },

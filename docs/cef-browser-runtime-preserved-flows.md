@@ -20,14 +20,15 @@ runner, and no CEF-owned surface silently substitutes another backend.
   normalized `external` outcomes the caller opens via `LinkUtils`; the
   runtime never navigates them inline.
 
-## Linux official video stays native/external
+## Linux official video without a usable CEF host
 
-Linux official video is not a CEF surface and is never a CEF fallback
-(`mediaEmbedUsesCef` is Windows-only; `linuxOfficialVideoUsesCef` is false,
-`assertLinuxVideoPreserved` fails closed on any CEF route). The native
-yt-dlp/mpv path stays first choice with a deliberate external browser as
-the second choice (`native-yt-dlp-mpv-or-deliberate-external`). There is no
-standalone official-video surface on any platform (N/A boundary).
+Linux official video plays through the bundled CEF host, as on Windows
+(`mediaEmbedUsesCef` covers Windows and Linux; `linuxOfficialVideoUsesCef` is
+true). A build without the host, or a system where CEF's sandbox cannot start
+(`linuxCefSandboxUsable`), keeps the older path: the native yt-dlp/mpv
+player, then a deliberate external browser
+(`native-yt-dlp-mpv-or-deliberate-external`). There is no standalone
+official-video surface on any platform (N/A boundary).
 
 ## Shared media paths
 

@@ -19,7 +19,16 @@ python tools/cef_runtime.py stage --platform windows-x64 <archive> <runtime-dir>
   --project-root <app-root>
 python tools/cef_runtime.py metadata --platform windows-x64 <runtime-dir> <metadata-dir> \
   --project-root <app-root>
+python tools/cef_runtime.py stage --platform linux-x64 --strip <archive> <runtime-dir>
+python tools/cef_runtime.py stage-sdk --platform linux-x64 <archive> <sdk-dir>
 ```
+
+The staged Linux runtime is flat: the archive's `Resources/` lands in
+`Release/`, next to `libcef.so`, because that is where CEF on Linux loads ICU
+data, `.pak` resources and locales from. `--strip` strips the Linux libraries
+(`libcef.so` goes from 1.4 GB to 268 MB). `stage-sdk` stages the lock's
+`build_sdk` record, the headers, CMake files and wrapper sources the hosts
+compile against.
 
 Fetching is content-addressed by the locked project SHA-256.  It fetches only
 the exact HTTPS URL and its matching `.sha1` sidecar, rejects redirects, and
@@ -53,7 +62,8 @@ complete Windows/Linux release.
 ## Linux host
 
 Linux and Flatpak use the bundled `cef_host` executable as the one CEF process
-owner. The parent starts it with an absolute, staged runtime and profile root:
+owner. `docs/cef-browser-runtime-hosts.md` describes how it drives CEF. The
+parent starts it with an absolute, staged runtime and profile root:
 
 ```text
 cef_host \
@@ -72,21 +82,24 @@ parent nonce and protocol version. The ordinary-user user-namespace sandbox
 route is accepted when the kernel permits it; no native Wayland child
 embedding is required.
 
-The Linux CMake build needs a full CEF SDK for the C API bridge and a staged
-runtime for packaging; the staged runtime intentionally contains no headers.
-Like the Windows host it is opt-in, and because the Flutter tool passes no
-`-D` options, all three settings are read from the environment too:
+The Linux CMake build needs the staged build SDK (`stage-sdk`) to compile
+the CEF engine library, `libroscord_cef_engine.so` from
+`commet/linux/cef_engine/`, and a staged runtime for packaging. The staged
+runtime intentionally contains no headers. Like the Windows host it is
+opt-in, and because the Flutter tool passes no `-D` options, all three
+settings are read from the environment too:
 
 ```text
 ROSCORD_BUILD_CEF_HOST=ON \
-ROSCORD_CEF_SDK_ROOT=/path/to/cef-sdk \
+ROSCORD_CEF_SDK_ROOT=/path/to/staged/cef-sdk \
 ROSCORD_CEF_RUNTIME_DIR=/path/to/staged/cef \
   flutter build linux --release
 ```
 
 `cef_host` opens `Release/libcef.so` from the explicit `--cef-root` at
-runtime. It has no link-time or system CEF dependency, and a build without the
-SDK bridge fails closed when launched.
+runtime, then the engine from the bundle's `lib/`. Neither has a link-time or
+system CEF dependency. Chromium re-executes `cef_host` for its child
+processes, which find the runtime through `ROSCORD_CEF_ROOT`.
 
 CEF's shared executable entry point is run before the host opens its socket,
 so renderer/GPU/utility child invocations cannot accidentally become another

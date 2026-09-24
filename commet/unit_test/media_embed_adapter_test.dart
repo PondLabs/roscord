@@ -258,10 +258,14 @@ void main() {
     });
   });
 
-  group('platform routing (linux preserved, no linux cef)', () {
-    test('only windows routes official video through cef', () {
+  group('platform routing (desktop cef, web and mobile unchanged)', () {
+    test('windows and linux route official video through cef', () {
       expect(
         mediaEmbedUsesCef(isWeb: false, isWindows: true),
+        isTrue,
+      );
+      expect(
+        mediaEmbedUsesCef(isWeb: false, isWindows: false, isLinux: true),
         isTrue,
       );
       expect(
@@ -273,8 +277,38 @@ void main() {
         isFalse,
       );
       expect(
-        mediaEmbedUsesCef(isWeb: true, isWindows: false),
+        mediaEmbedUsesCef(isWeb: true, isWindows: false, isLinux: true),
         isFalse,
+      );
+    });
+
+    test('linux keeps its non-cef path when the cef sandbox cannot start', () {
+      // Ubuntu 24.04 restricts unprivileged user namespaces by default; only
+      // an installed setuid helper (mode 4755) gets CEF's sandbox past it.
+      expect(
+        linuxCefSandboxUsable(
+          userNamespaceRestriction: '1\n',
+          helperMode: 0x1ed,
+        ),
+        isFalse,
+      );
+      expect(
+        linuxCefSandboxUsable(
+          userNamespaceRestriction: '1\n',
+          helperMode: 0x9ed,
+        ),
+        isTrue,
+      );
+      expect(
+        linuxCefSandboxUsable(
+          userNamespaceRestriction: '0\n',
+          helperMode: 0x1ed,
+        ),
+        isTrue,
+      );
+      expect(
+        linuxCefSandboxUsable(userNamespaceRestriction: null, helperMode: 0),
+        isTrue,
       );
     });
 
@@ -369,6 +403,48 @@ void main() {
       expect(externals, isEmpty);
 
       await subscription.cancel();
+      await session.dispose();
+    });
+
+    test('popups open in the browser only when the user clicked', () async {
+      final runtime = _TestRuntime();
+      final session = MediaEmbedSession(
+        runtime: runtime,
+        launch: _launch(loopbackUri: _loopback),
+      );
+      await session.open();
+
+      // "Watch on YouTube" is a click; a pop-under opens on its own.
+      runtime.emit(
+        PopupRequestEvent(
+          session.surfaceId!,
+          2,
+          requestId: 'popup-1-1',
+          url: 'https://www.youtube.com/watch?v=abc123',
+          userGesture: true,
+        ),
+      );
+      runtime.emit(
+        PopupRequestEvent(
+          session.surfaceId!,
+          3,
+          requestId: 'popup-1-2',
+          url: 'https://ads.example/landing',
+          userGesture: false,
+        ),
+      );
+      await _flush();
+
+      expect(
+        runtime.commands
+            .whereType<PopupCommand>()
+            .map((command) => (command.requestId, command.action)),
+        [
+          ('popup-1-1', PopupAction.openExternal),
+          ('popup-1-2', PopupAction.deny),
+        ],
+      );
+
       await session.dispose();
     });
 

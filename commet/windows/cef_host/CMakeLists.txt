@@ -72,6 +72,9 @@ target_compile_options(cef_host_client PRIVATE /W4 /WX /EHsc /wd4100
 target_include_directories(cef_host_client PRIVATE
   "${CEF_ROOT}"
   "${CEF_ROOT}/include"
+  # Frame ring, input and cursor helpers shared with the Linux engine and the
+  # app's browser_surface plugin.
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../../browser_surface/native"
 )
 # libcef.lib is the import library for libcef.dll, which implements the C API
 # the wrapper calls.

@@ -1,6 +1,9 @@
 import 'dart:async';
 
+import 'package:browser_surface/browser_surface.dart';
 import 'package:commet/browser_runtime.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -50,6 +53,83 @@ class _RecordingRuntime implements BrowserRuntime {
   void publishFrame(SurfaceId id, FrameReference frame) =>
       _inner.publishFrame(id, frame);
 }
+
+/// A runtime whose events the test writes: a surface is ready right after it
+/// opens (unless [autoReady] is off), and commands are only recorded.
+class _ScriptedRuntime implements BrowserRuntime {
+  final StreamController<SurfaceEvent> _events =
+      StreamController<SurfaceEvent>.broadcast();
+  final List<SurfaceCommand> commands = [];
+  bool autoReady = true;
+  int _nextSurfaceId = 1;
+
+  @override
+  Stream<SurfaceEvent> events() => _events.stream;
+
+  @override
+  Future<SurfaceId> open(SurfaceSpec spec) async {
+    final id = SurfaceId(_nextSurfaceId++);
+    if (autoReady) {
+      scheduleMicrotask(
+        () => _events.add(ReadyEvent(id, 1, spec.initialNavigation)),
+      );
+    }
+    return id;
+  }
+
+  @override
+  Future<void> command(SurfaceId surfaceId, SurfaceCommand command) async {
+    commands.add(command);
+  }
+
+  @override
+  Future<void> close(SurfaceId surfaceId) async {
+    _events.add(ClosedEvent(surfaceId, 99, CloseReason.user));
+  }
+
+  void emit(SurfaceEvent event) => _events.add(event);
+
+  List<T> inputs<T extends InputEvent>() => commands
+      .whereType<InputCommand>()
+      .map((command) => command.input)
+      .whereType<T>()
+      .toList();
+}
+
+/// Lays [surface]'s view out at 400x300 logical pixels, top-left at
+/// [_viewOrigin], with a device pixel ratio of 2. [wrap] puts app widgets
+/// around the view.
+Widget _hosted(
+  EmbeddedBrowserSurface surface, {
+  Widget Function(Widget view)? wrap,
+}) {
+  final view = EmbeddedBrowserView(surface: surface, autofocus: true);
+  return MediaQuery(
+    data: const MediaQueryData(size: Size(800, 600), devicePixelRatio: 2),
+    child: Directionality(
+      textDirection: TextDirection.ltr,
+      child: Center(
+        child: SizedBox(
+          width: 400,
+          height: 300,
+          child: wrap == null ? view : wrap(view),
+        ),
+      ),
+    ),
+  );
+}
+
+const _viewOrigin = Offset(200, 150);
+
+FrameReference _ringFrame(int sequence) => FrameReference(
+      slot: sequence % 3,
+      width: 640,
+      height: 360,
+      stride: 640 * 4,
+      format: PixelFormat.rgbaPremultiplied,
+      sequence: sequence,
+      buffer: 'roscord-cef-1-00-1-1',
+    );
 
 void main() {
   test(
@@ -430,6 +510,228 @@ void main() {
       await surface.dispose();
     });
   });
+
+  testWidgets(
+      'EmbeddedBrowserView reports its size and pixel ratio once the host is ready',
+      (tester) async {
+    final runtime = _ScriptedRuntime()..autoReady = false;
+    final surface = EmbeddedBrowserSurface(
+      runtime: runtime,
+      spec: _embeddedSpec(),
+      textureId: 1,
+    );
+    addTearDown(surface.dispose);
+    final id = await surface.open();
+    await tester.pumpWidget(_hosted(surface));
+    // The host drops anything sent before it is ready.
+    expect(runtime.commands, isEmpty);
+
+    runtime.emit(ReadyEvent(id, 1, surface.spec.initialNavigation));
+    await tester.pump();
+
+    final resize = runtime.commands.whereType<ResizeCommand>().single;
+    expect(
+      (resize.width, resize.height, resize.deviceScaleFactor),
+      (400, 300, 2.0),
+    );
+  });
+
+  testWidgets(
+      'EmbeddedBrowserView forwards hover, clicks, wheel and leave in view coordinates',
+      (tester) async {
+    final runtime = _ScriptedRuntime();
+    final surface = EmbeddedBrowserSurface(
+      runtime: runtime,
+      spec: _embeddedSpec(),
+      textureId: 1,
+    );
+    addTearDown(surface.dispose);
+    await surface.open();
+    await tester.pumpWidget(_hosted(surface));
+
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: _viewOrigin + const Offset(10, 20));
+    await mouse.moveTo(_viewOrigin + const Offset(30, 40));
+    await mouse.down(_viewOrigin + const Offset(30, 40));
+    await mouse.up();
+    final right = await tester.createGesture(
+      kind: PointerDeviceKind.mouse,
+      buttons: kSecondaryMouseButton,
+    );
+    await right.down(_viewOrigin + const Offset(50, 60));
+    await right.up();
+    await right.removePointer();
+    final wheel = TestPointer(9, PointerDeviceKind.mouse);
+    await tester.sendEventToBinding(
+      wheel.addPointer(location: _viewOrigin + const Offset(70, 80)),
+    );
+    await tester.sendEventToBinding(wheel.scroll(const Offset(0, 40)));
+    await tester.sendEventToBinding(wheel.removePointer());
+    await mouse.moveTo(const Offset(5, 5));
+    await tester.pump();
+
+    final pointers = runtime.inputs<PointerInput>();
+    // Down names the button pressed, up the button released.
+    expect(
+      pointers
+          .where((p) => p.kind != PointerKind.leave)
+          .map((p) => (p.kind, p.x, p.y, p.buttons, p.deltaY)),
+      [
+        (PointerKind.move, 30.0, 40.0, 0, 0.0),
+        (PointerKind.down, 30.0, 40.0, kPrimaryButton, 0.0),
+        (PointerKind.up, 30.0, 40.0, kPrimaryButton, 0.0),
+        (PointerKind.down, 50.0, 60.0, kSecondaryMouseButton, 0.0),
+        (PointerKind.up, 50.0, 60.0, kSecondaryMouseButton, 0.0),
+        (PointerKind.wheel, 70.0, 80.0, 0, 40.0),
+      ],
+    );
+    // The mouse that moved away last leaves the page.
+    expect(pointers.last.kind, PointerKind.leave);
+    // A click also focuses the page.
+    expect(
+      runtime.commands.whereType<FocusCommand>().map((c) => c.focused),
+      contains(true),
+    );
+    await mouse.removePointer();
+  });
+
+  testWidgets('EmbeddedBrowserView sends keys to the page and Escape to both',
+      (tester) async {
+    final runtime = _ScriptedRuntime();
+    final surface = EmbeddedBrowserSurface(
+      runtime: runtime,
+      spec: _embeddedSpec(),
+      textureId: 1,
+    );
+    addTearDown(surface.dispose);
+    await surface.open();
+    var escapes = 0;
+    await tester.pumpWidget(
+      _hosted(
+        surface,
+        wrap: (view) => CallbackShortcuts(
+          bindings: {
+            const SingleActivator(LogicalKeyboardKey.escape): () => escapes++,
+          },
+          child: view,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyA);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+
+    final keys = runtime.inputs<KeyboardInput>();
+    expect(
+      keys.map((k) => (k.code, k.pressed)),
+      [
+        ('KeyA', true),
+        ('KeyA', false),
+        ('Escape', true),
+        ('Escape', false),
+      ],
+    );
+    expect(keys.first.key.toLowerCase(), 'a');
+    expect(keys[2].key, 'Escape');
+    // The dialog around the page still hears Escape.
+    expect(escapes, 1);
+  });
+
+  testWidgets('EmbeddedBrowserView shows the cursor the page asks for',
+      (tester) async {
+    final runtime = _ScriptedRuntime();
+    final surface = EmbeddedBrowserSurface(
+      runtime: runtime,
+      spec: _embeddedSpec(),
+      textureId: 1,
+    );
+    addTearDown(surface.dispose);
+    final id = await surface.open();
+    await tester.pumpWidget(_hosted(surface));
+
+    MouseCursor cursor() => tester
+        .widget<MouseRegion>(
+          find.descendant(
+            of: find.byType(EmbeddedBrowserView),
+            matching: find.byType(MouseRegion),
+          ),
+        )
+        .cursor;
+    expect(cursor(), SystemMouseCursors.basic);
+
+    runtime.emit(CursorChangedEvent(id, 2, 'pointer'));
+    await tester.pump();
+    expect(surface.cursor, 'pointer');
+    expect(cursor(), SystemMouseCursors.click);
+  });
+
+  testWidgets(
+    'the native texture draws ring frames, including one that came first',
+    (tester) async {
+      const channel = MethodChannel('browser_surface');
+      final calls = <MethodCall>[];
+      final created = Completer<int>();
+      final messenger = tester.binding.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call);
+        return call.method == 'create' ? created.future : null;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+      final runtime = _ScriptedRuntime();
+      final surface = EmbeddedBrowserSurface(
+        runtime: runtime,
+        spec: _embeddedSpec(),
+      );
+      final id = await surface.open();
+      await tester.pumpWidget(_hosted(surface));
+
+      // The first frame arrives before the native texture exists.
+      runtime.emit(FrameReadyEvent(id, 2, _ringFrame(4)));
+      await tester.pump();
+      expect(find.byType(Texture), findsNothing);
+
+      created.complete(9);
+      await tester.pump();
+      await tester.pump();
+      expect(surface.textureId, 9);
+      expect(tester.widget<Texture>(find.byType(Texture)).textureId, 9);
+
+      runtime.emit(FrameReadyEvent(id, 3, _ringFrame(5)));
+      await tester.pump();
+
+      expect(
+        calls.where((call) => call.method == 'present').map((c) => c.arguments),
+        [
+          {
+            'textureId': 9,
+            'buffer': 'roscord-cef-1-00-1-1',
+            'slot': 1,
+            'sequence': 4,
+            'width': 640,
+            'height': 360,
+          },
+          {
+            'textureId': 9,
+            'buffer': 'roscord-cef-1-00-1-1',
+            'slot': 2,
+            'sequence': 5,
+            'width': 640,
+            'height': 360,
+          },
+        ],
+      );
+
+      // Disposal awaits a subscription cancel, which completes outside the
+      // test's fake async zone.
+      await tester.runAsync(surface.dispose);
+      expect(calls.last.method, 'dispose');
+      expect(calls.last.arguments, {'textureId': 9});
+    },
+    skip: !BrowserSurfaceTexture.isSupported,
+  );
 }
 
 extension on EmbeddedBrowserSurface {

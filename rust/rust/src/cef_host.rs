@@ -10,58 +10,63 @@
 //! behind the same transport without changing the BrowserRuntime seam.
 
 use std::collections::BTreeMap;
-use std::ffi::{c_char, c_int, c_void, CString, OsString};
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, symlink_metadata};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{
-    DirBuilderExt, FileTypeExt, MetadataExt as UnixMetadataExt, PermissionsExt,
-};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt as UnixMetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
+use std::thread;
 
 use crate::browser_media::{
     CapturePortalOutcome, HostPermissionRegistry, MediaCapability, MediaPolicyView,
 };
 use crate::browser_profile::{ProfileContext, ProfileError, ProfileStore};
 use crate::browser_runtime::{
-    CloseReason, FramedCodec, NavigationEvent, NavigationOutcome, NavigationPolicyDecision,
-    PermissionDecision, PrivacyMode, ProfileKey, RuntimeError, ScriptEnvelope, ScriptSource,
-    SurfaceCommand, SurfaceEvent, SurfaceFailure, SurfaceId, SurfaceSpec, WireMessage,
+    CloseReason, FailureKind, FrameReference, FramedCodec, NavigationDisposition,
+    NavigationEvent, NavigationOutcome, NavigationPolicyDecision, NavigationRequest,
+    PermissionDecision, PixelFormat, PopupAction, PrivacyMode, ProfileKey, RuntimeError,
+    ScriptEnvelope, ScriptSource, SurfaceCommand, SurfaceEvent, SurfaceFailure, SurfaceId,
+    SurfacePolicy, SurfaceSpec, WireMessage,
 };
-use serde_json::json;
+use crate::cef_engine::{
+    bundled_engine_path, validate_engine_path, BrowserOptions, EngineEvents, EngineLibrary,
+    EngineSettings, LOG_ERROR, LOG_WARNING,
+};
+use serde_json::{json, Value};
 
 const SOCKET_PATH_MAX_BYTES: usize = 107;
 const CEF_RELEASE: &str = "Release";
+/// CEF child processes are started by Chromium, which does not pass the
+/// host's own arguments on; they find the validated runtime through this.
+const CEF_ROOT_ENV: &str = "ROSCORD_CEF_ROOT";
+const FRAME_RATE_ENV: &str = "ROSCORD_CEF_FRAME_RATE";
+const DEFAULT_FRAME_RATE: i32 = 30;
+/// Shared-memory frame rings are named `/roscord-cef-<host pid>-<random>-...`.
+const FRAME_RING_PREFIX: &str = "roscord-cef-";
+/// The staged Linux runtime keeps every file CEF loads in `Release/`, next to
+/// libcef.so: on Linux CEF resolves ICU data, the .pak resources and
+/// `locales/` from the directory holding libcef.so (DIR_ASSETS), whatever
+/// CefSettings says, so the archive's separate `Resources/` cannot be used.
 const REQUIRED_CEF_FILES: &[&str] = &[
     "Release/libcef.so",
     "Release/chrome-sandbox",
+    "Release/icudtl.dat",
     "Release/libEGL.so",
     "Release/libGLESv2.so",
     "Release/libvk_swiftshader.so",
     "Release/libvulkan.so.1",
     "Release/v8_context_snapshot.bin",
     "Release/vk_swiftshader_icd.json",
-    "Resources/chrome_100_percent.pak",
-    "Resources/chrome_200_percent.pak",
-    "Resources/icudtl.dat",
-    "Resources/resources.pak",
-    "Resources/locales",
+    "Release/chrome_100_percent.pak",
+    "Release/chrome_200_percent.pak",
+    "Release/resources.pak",
+    "Release/locales",
 ];
-
-type CefExecuteProcess = unsafe extern "C" fn(
-    main_args: *const CefMainArgs,
-    application: *mut c_void,
-    sandbox_info: *mut c_void,
-) -> c_int;
-
-#[repr(C)]
-struct CefMainArgs {
-    argc: c_int,
-    argv: *mut *mut c_char,
-}
 
 /// Errors are intentionally coarse at the process boundary.  Detailed CEF
 /// and filesystem paths must not cross the authenticated application protocol.
@@ -115,6 +120,9 @@ pub struct HostConfig {
     pub cef_root: PathBuf,
     pub profile_root: PathBuf,
     pub max_frame_bytes: usize,
+    /// `--cef-software-rendering`: keep rendering on the CPU when GPU
+    /// compositing is unavailable.  The frame contract is unchanged.
+    pub software_rendering: bool,
 }
 
 impl HostConfig {
@@ -122,7 +130,7 @@ impl HostConfig {
     where
         I: IntoIterator<Item = OsString>,
     {
-        let mut args = args.into_iter();
+        let mut args = expand_value_arguments(args).into_iter();
         let _program = args.next();
         let mut socket_path = None;
         let mut parent_pid = None;
@@ -130,6 +138,7 @@ impl HostConfig {
         let mut cef_root = None;
         let mut profile_root = None;
         let mut max_frame_bytes = crate::browser_runtime::DEFAULT_MAX_FRAME_BYTES;
+        let mut software_rendering = false;
 
         while let Some(argument) = args.next() {
             let argument = argument
@@ -156,6 +165,7 @@ impl HostConfig {
                         HostError::Usage("--max-frame-bytes must be a positive integer".to_owned())
                     })?;
                 }
+                "--cef-software-rendering" => software_rendering = true,
                 "--cef-validation" | "--cef-validation=true" | "--cef-validation=false" => {
                     return Err(HostError::Usage(
                         "--cef-validation was removed by the cutover; production routing is unconditional"
@@ -175,7 +185,7 @@ impl HostConfig {
                 "--help" => {
                     return Err(HostError::Usage(
                         "--socket PATH --parent-pid PID --parent-nonce NONCE --cef-root DIR \
-                         --profile-root DIR [--max-frame-bytes N]"
+                         --profile-root DIR [--max-frame-bytes N] [--cef-software-rendering]"
                             .to_owned(),
                     ));
                 }
@@ -221,6 +231,7 @@ impl HostConfig {
             cef_root,
             profile_root,
             max_frame_bytes,
+            software_rendering,
         })
     }
 
@@ -239,6 +250,35 @@ impl HostConfig {
             cef_root,
         })
     }
+}
+
+/// Flags that take a value, accepted as `--flag value` or `--flag=value`
+/// (the app uses the second form).
+const VALUE_FLAGS: &[&str] = &[
+    "--socket",
+    "--parent-pid",
+    "--parent-nonce",
+    "--cef-root",
+    "--profile-root",
+    "--max-frame-bytes",
+];
+
+fn expand_value_arguments<I>(args: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut expanded = Vec::new();
+    for argument in args {
+        if let Some((flag, value)) = argument.to_str().and_then(|text| text.split_once('=')) {
+            if VALUE_FLAGS.contains(&flag) {
+                expanded.push(OsString::from(flag));
+                expanded.push(OsString::from(value));
+                continue;
+            }
+        }
+        expanded.push(argument);
+    }
+    expanded
 }
 
 fn next_value(
@@ -330,13 +370,27 @@ fn validate_profile_root(path: &Path) -> Result<(), HostError> {
             ));
         }
     } else {
-        let parent = path
+        // On first use the app's data directory may not exist yet.  Create
+        // the missing directories below the nearest existing ancestor, which
+        // must be owner-controlled; each new directory is private.
+        let mut missing = vec![path.to_path_buf()];
+        let mut ancestor = path
             .parent()
-            .ok_or_else(|| HostError::Permission("profile root has no parent".to_owned()))?;
-        validate_owner_directory(parent, "profile root parent")?;
-        create_private_directory(path).map_err(|error| {
-            HostError::Permission(format!("cannot create profile root: {error}"))
-        })?;
+            .ok_or_else(|| HostError::Permission("profile root has no parent".to_owned()))?
+            .to_path_buf();
+        while symlink_metadata(&ancestor).is_err() {
+            missing.push(ancestor.clone());
+            ancestor = ancestor
+                .parent()
+                .ok_or_else(|| HostError::Permission("profile root has no parent".to_owned()))?
+                .to_path_buf();
+        }
+        validate_owner_directory(&ancestor, "profile root parent")?;
+        for directory in missing.iter().rev() {
+            create_private_directory(directory).map_err(|error| {
+                HostError::Permission(format!("cannot create profile root: {error}"))
+            })?;
+        }
     }
     validate_owner_directory(path, "profile root")
 }
@@ -361,7 +415,7 @@ fn validate_cef_root(path: &Path) -> Result<PathBuf, HostError> {
     }
     let root = fs::canonicalize(path)
         .map_err(|_| HostError::Cef("cannot canonicalize explicit CEF root".to_owned()))?;
-    for relative in ["Release", "Resources", "Resources/locales"] {
+    for relative in ["Release", "Release/locales"] {
         let directory = root.join(relative);
         let metadata = symlink_metadata(&directory)
             .map_err(|_| HostError::Cef(format!("CEF runtime is missing {relative}")))?;
@@ -392,7 +446,7 @@ fn validate_cef_root(path: &Path) -> Result<PathBuf, HostError> {
                 "CEF runtime input is writable by group or other users: {relative}"
             )));
         }
-        let is_directory = *relative == "Resources/locales";
+        let is_directory = *relative == "Release/locales";
         if metadata.is_dir() != is_directory || (!is_directory && !metadata.is_file()) {
             return Err(HostError::Cef(format!(
                 "CEF runtime has invalid {relative}"
@@ -418,13 +472,22 @@ fn user_namespace_available() -> bool {
 
     // Sysctl values are only a hint in containers and hardened hosts.  Probe
     // the actual ordinary-user route in a short-lived child before accepting
-    // a CEF payload without a setuid sandbox helper.
+    // a CEF payload without a setuid sandbox helper.  Chromium also maps its
+    // user inside the new namespace, and hosts like Ubuntu 24.04 (AppArmor's
+    // unprivileged user namespace restriction) allow the unshare but refuse
+    // the mapping, so the probe maps too.  The child may only make
+    // async-signal-safe calls, so the map is formatted before forking.
+    let uid_map = format!("0 {} 1", unsafe { libc::getuid() });
     let child = unsafe { libc::fork() };
     if child < 0 {
         return false;
     }
     if child == 0 {
-        let succeeded = unsafe { libc::unshare(libc::CLONE_NEWUSER) == 0 };
+        let succeeded = unsafe {
+            libc::unshare(libc::CLONE_NEWUSER) == 0
+                && write_proc_file(c"/proc/self/setgroups", b"deny")
+                && write_proc_file(c"/proc/self/uid_map", uid_map.as_bytes())
+        };
         unsafe { libc::_exit(if succeeded { 0 } else { 1 }) };
     }
     let mut status = 0;
@@ -432,6 +495,18 @@ fn user_namespace_available() -> bool {
     waited == child
         && unsafe { libc::WIFEXITED(status) }
         && unsafe { libc::WEXITSTATUS(status) == 0 }
+}
+
+/// Writes `contents` to a /proc file with raw system calls only, so it is
+/// safe between fork and exit.
+unsafe fn write_proc_file(path: &std::ffi::CStr, contents: &[u8]) -> bool {
+    let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+    if fd < 0 {
+        return false;
+    }
+    let written = libc::write(fd, contents.as_ptr().cast(), contents.len());
+    libc::close(fd);
+    written == contents.len() as isize
 }
 
 fn validate_sandbox(cef_root: &Path) -> Result<(), HostError> {
@@ -453,137 +528,6 @@ fn create_private_directory(path: &Path) -> io::Result<()> {
     fs::DirBuilder::new().mode(0o700).create(path)
 }
 
-struct CEFLibrary {
-    handle: *mut c_void,
-    execute_process: CefExecuteProcess,
-    initialized: bool,
-}
-
-impl CEFLibrary {
-    fn load(root: &Path) -> Result<Self, HostError> {
-        let library_path = root.join(CEF_RELEASE).join("libcef.so");
-        let path = CString::new(library_path.as_os_str().as_bytes())
-            .map_err(|_| HostError::Cef("CEF library path contains NUL".to_owned()))?;
-        // RTLD_LOCAL prevents CEF symbols from becoming an implicit lookup
-        // source for another backend.  The absolute path is the only lookup.
-        let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
-        if handle.is_null() {
-            return Err(HostError::Cef(
-                "cannot load the locked libcef.so".to_owned(),
-            ));
-        }
-        let Some(execute_process) = (unsafe { symbol(handle, b"cef_execute_process\0") }) else {
-            unsafe { libc::dlclose(handle) };
-            return Err(HostError::Cef(
-                "libcef.so lacks cef_execute_process".to_owned(),
-            ));
-        };
-        Ok(Self {
-            handle,
-            execute_process: unsafe { std::mem::transmute(execute_process) },
-            initialized: false,
-        })
-    }
-
-    fn initialize(&mut self, args: &[OsString]) -> Result<(), HostError> {
-        #[cfg(roscord_cef_bridge)]
-        {
-            let mut c_arguments = Vec::with_capacity(args.len());
-            for argument in args {
-                c_arguments.push(
-                    CString::new(argument.as_os_str().as_bytes())
-                        .map_err(|_| HostError::Cef("CEF argument contains NUL".to_owned()))?,
-                );
-            }
-            let mut pointers = c_arguments
-                .iter_mut()
-                .map(|argument| argument.as_ptr() as *mut c_char)
-                .collect::<Vec<_>>();
-            let argc = pointers
-                .len()
-                .try_into()
-                .map_err(|_| HostError::Cef("too many CEF arguments".to_owned()))?;
-            let result =
-                unsafe { roscord_cef_initialize(self.handle, argc, pointers.as_mut_ptr()) };
-            if result == 0 {
-                return Err(HostError::Cef("CEF initialization was rejected".to_owned()));
-            }
-            self.initialized = true;
-            Ok(())
-        }
-        #[cfg(not(roscord_cef_bridge))]
-        {
-            let _ = args;
-            Err(HostError::Cef(
-                "cef_host was built without the locked CEF SDK bridge".to_owned(),
-            ))
-        }
-    }
-
-    fn execute_child_process(&self, args: &[OsString]) -> Result<Option<i32>, HostError> {
-        let mut c_arguments = Vec::with_capacity(args.len());
-        for argument in args {
-            let bytes = argument.as_os_str().as_bytes();
-            c_arguments.push(
-                CString::new(bytes)
-                    .map_err(|_| HostError::Cef("CEF child argument contains NUL".to_owned()))?,
-            );
-        }
-        let mut pointers = c_arguments
-            .iter_mut()
-            .map(|argument| argument.as_ptr() as *mut c_char)
-            .collect::<Vec<_>>();
-        pointers.push(std::ptr::null_mut());
-        let main_args = CefMainArgs {
-            argc: c_arguments
-                .len()
-                .try_into()
-                .map_err(|_| HostError::Cef("too many CEF child arguments".to_owned()))?,
-            argv: pointers.as_mut_ptr(),
-        };
-        let exit_code = unsafe {
-            (self.execute_process)(&main_args, std::ptr::null_mut(), std::ptr::null_mut())
-        };
-        if exit_code >= 0 {
-            Ok(Some(exit_code))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn shutdown(&mut self) {
-        #[cfg(roscord_cef_bridge)]
-        if self.initialized {
-            unsafe { roscord_cef_shutdown(self.handle) };
-            self.initialized = false;
-        }
-    }
-}
-
-#[cfg(roscord_cef_bridge)]
-extern "C" {
-    fn roscord_cef_initialize(
-        cef_handle: *mut c_void,
-        argc: c_int,
-        argv: *mut *mut c_char,
-    ) -> c_int;
-    fn roscord_cef_shutdown(cef_handle: *mut c_void);
-}
-
-impl Drop for CEFLibrary {
-    fn drop(&mut self) {
-        self.shutdown();
-        unsafe {
-            libc::dlclose(self.handle);
-        }
-    }
-}
-
-unsafe fn symbol(handle: *mut c_void, name: &[u8]) -> Option<*mut c_void> {
-    let symbol = libc::dlsym(handle, name.as_ptr() as *const c_char);
-    (!symbol.is_null()).then_some(symbol)
-}
-
 /// Run the Linux host.  CEF child processes return before opening the socket;
 /// only the browser process owns the endpoint and transport lifecycle.
 pub fn run<I>(args: I) -> Result<(), HostError>
@@ -593,12 +537,17 @@ where
     let args = args.into_iter().collect::<Vec<_>>();
     reject_insecure_arguments(&args)?;
     if has_cef_child_type(&args) {
-        let cef_root = explicit_cef_root(&args)?;
+        trace(&format!("child start: {args:?}"));
+        let cef_root = child_cef_root(&args)?;
         let cef_root = validate_cef_root(&cef_root)?;
         reject_elevated_launch()?;
         validate_sandbox(&cef_root)?;
-        let cef = CEFLibrary::load(&cef_root)?;
-        if let Some(exit_code) = cef.execute_child_process(&args)? {
+        trace("child validated");
+        let engine = load_engine(&cef_root)?;
+        trace("child engine loaded");
+        let exit_code = engine.execute_process(&args)?;
+        trace(&format!("child finished: {exit_code:?}"));
+        if let Some(exit_code) = exit_code {
             std::process::exit(exit_code);
         }
         return Err(HostError::Cef(
@@ -610,19 +559,116 @@ where
     // CEF.  Invalid transport inputs must not start an engine process.
     let config = HostConfig::parse(args.clone())?;
     let validated = config.validate()?;
-    let mut cef = CEFLibrary::load(&validated.cef_root)?;
-    cef.initialize(&args)?;
+    remove_stale_frame_rings();
+    let engine = Arc::new(load_engine(&validated.cef_root)?);
+    // Chromium re-executes this binary for its child processes without our
+    // arguments; they find the runtime (already validated here) through the
+    // environment and validate it again themselves.  No other thread exists
+    // yet, so changing the environment is safe.
+    std::env::set_var(CEF_ROOT_ENV, &validated.cef_root);
+    // CEF expects its process entry point to run in every process, including
+    // the browser process, where it only prepares state and returns.
+    if engine.execute_process(std::slice::from_ref(&args[0]))?.is_some() {
+        return Err(HostError::Cef(
+            "CEF treated the browser process as a child".to_owned(),
+        ));
+    }
+    trace("browser process: CEF entry point returned");
+    let shared = Arc::new(HostShared::default());
+    let frame_namespace = new_frame_namespace();
+    let frame_rate = std::env::var(FRAME_RATE_ENV)
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|rate| (1..=60).contains(rate))
+        .unwrap_or(DEFAULT_FRAME_RATE);
+    engine.initialize(
+        &args[0],
+        &EngineSettings {
+            cef_root: &validated.cef_root,
+            profile_root: &validated.config.profile_root,
+            frame_namespace: &frame_namespace,
+            software_rendering: validated.config.software_rendering,
+            filter_requests: false,
+            frame_rate,
+        },
+        shared.clone(),
+    )?;
+    trace("browser process: CEF initialized");
 
     let codec = FramedCodec::with_limit(
         validated.config.parent_nonce.clone(),
         validated.config.max_frame_bytes,
     )
     .map_err(|error| HostError::Protocol(error.to_string()))?;
-    let endpoint = UnixEndpoint::bind(&validated.config.socket_path)?;
-    let mut core = HostCore::new(validated.config.profile_root.clone());
-    let result = endpoint.serve(validated.config.parent_pid, &codec, &mut core);
-    cef.shutdown();
+    let result = UnixEndpoint::bind(&validated.config.socket_path).and_then(|endpoint| {
+        let mut core = HostCore::with_engine(
+            validated.config.profile_root.clone(),
+            engine.clone(),
+            shared.clone(),
+        );
+        endpoint.serve(validated.config.parent_pid, &codec, &mut core)
+    });
+    trace(&format!("browser process: transport finished: {result:?}"));
+    engine.shutdown();
+    trace("browser process: CEF shut down");
     result
+}
+
+/// Appends a diagnostic line to `$ROSCORD_CEF_HOST_LOG` when it is set.
+fn trace(message: &str) {
+    let Some(path) = std::env::var_os("ROSCORD_CEF_HOST_LOG") else {
+        return;
+    };
+    if let Ok(mut log) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(log, "[{}] {message}", std::process::id());
+    }
+}
+
+fn load_engine(cef_root: &Path) -> Result<EngineLibrary, HostError> {
+    let engine_path = bundled_engine_path()?;
+    validate_engine_path(&engine_path)?;
+    EngineLibrary::load(cef_root, &engine_path)
+}
+
+/// A random, per-host token for shared-memory names.  It carries the host
+/// pid so a later host can remove rings left behind by a crashed one, and it
+/// is unrelated to the transport nonce.
+fn new_frame_namespace() -> String {
+    let random = uuid::Uuid::new_v4().simple().to_string();
+    format!("{}-{}", std::process::id(), &random[..16])
+}
+
+/// Removes `/dev/shm/roscord-cef-<pid>-*` rings whose host is gone.  Rings
+/// are unlinked when their surface closes, so only a crashed host leaves any.
+fn remove_stale_frame_rings() {
+    let Ok(entries) = fs::read_dir("/dev/shm") else {
+        return;
+    };
+    let uid = unsafe { libc::geteuid() };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(rest) = name.to_str().and_then(|name| name.strip_prefix(FRAME_RING_PREFIX))
+        else {
+            continue;
+        };
+        let Some(pid) = rest
+            .split('-')
+            .next()
+            .and_then(|pid| pid.parse::<libc::pid_t>().ok())
+        else {
+            continue;
+        };
+        let alive = pid > 0
+            && (unsafe { libc::kill(pid, 0) } == 0
+                || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH));
+        let owned = entry
+            .metadata()
+            .map(|metadata| metadata.is_file() && metadata.uid() == uid)
+            .unwrap_or(false);
+        if !alive && owned {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn reject_insecure_arguments(args: &[OsString]) -> Result<(), HostError> {
@@ -654,8 +700,11 @@ fn reject_insecure_arguments(args: &[OsString]) -> Result<(), HostError> {
     Ok(())
 }
 
-fn explicit_cef_root(args: &[OsString]) -> Result<PathBuf, HostError> {
+/// The runtime root for a CEF child: an explicit `--cef-root`, or the root
+/// the browser process validated and exported before starting CEF.
+fn child_cef_root(args: &[OsString]) -> Result<PathBuf, HostError> {
     let mut root = None;
+    let args = expand_value_arguments(args.iter().cloned());
     let mut arguments = args.iter();
     let _program = arguments.next();
     while let Some(argument) = arguments.next() {
@@ -664,6 +713,7 @@ fn explicit_cef_root(args: &[OsString]) -> Result<PathBuf, HostError> {
             root = Some(PathBuf::from(value));
         }
     }
+    let root = root.or_else(|| std::env::var_os(CEF_ROOT_ENV).map(PathBuf::from));
     let root = root.ok_or_else(|| {
         HostError::Cef(
             "CEF root must be supplied explicitly; system and host lookup is disabled".to_owned(),
@@ -825,15 +875,50 @@ fn serve_connection(
     codec: &FramedCodec,
     core: &mut HostCore,
 ) -> Result<(), HostError> {
+    // Responses and CEF events share one writer, so frames never interleave
+    // and no event can overtake the `opened` that introduces its surface.
+    let mut writer_stream = stream.try_clone()?;
+    let writer_codec = codec.clone();
+    let (sender, receiver) = mpsc::channel::<WireMessage>();
+    let writer = thread::spawn(move || {
+        for message in receiver {
+            if write_message(&mut writer_stream, &writer_codec, &message).is_err() {
+                break;
+            }
+        }
+    });
+    core.attach_sink(sender.clone());
+    let result = read_requests(stream, codec, core, &sender);
+    trace(&format!("transport: requests ended: {result:?}"));
+    core.shutdown();
+    drop(sender);
+    if result.is_err() {
+        // A protocol failure ends the session; do not wait on a peer that may
+        // no longer read.
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+    }
+    let _ = writer.join();
+    trace("transport: writer stopped");
+    result
+}
+
+fn read_requests(
+    stream: &mut UnixStream,
+    codec: &FramedCodec,
+    core: &mut HostCore,
+    sender: &mpsc::Sender<WireMessage>,
+) -> Result<(), HostError> {
     loop {
         let Some(message) = read_message(stream, codec)? else {
-            core.shutdown();
             return Ok(());
         };
-        let responses = core.dispatch(message)?;
-        for response in responses {
-            write_message(stream, codec, &response)?;
+        for response in core.dispatch(message)? {
+            sender
+                .send(response)
+                .map_err(|_| HostError::Endpoint("the transport writer stopped".to_owned()))?;
         }
+        // Browser creation starts only after `opened` is queued.
+        core.run_deferred();
     }
 }
 
@@ -842,7 +927,17 @@ fn read_message(
     codec: &FramedCodec,
 ) -> Result<Option<WireMessage>, HostError> {
     let mut header = [0_u8; 4];
-    let first = stream.read(&mut header[..1])?;
+    // CEF's child processes make SIGCHLD common here; an interrupted read is
+    // retried like read_exact does.
+    let first = loop {
+        match stream.read(&mut header[..1]) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            // A parent that exits with events still unread resets the
+            // connection; between frames that is an ordinary disconnect.
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => break 0,
+            result => break result?,
+        }
+    };
     if first == 0 {
         return Ok(None);
     }
@@ -879,8 +974,18 @@ struct SurfaceState {
     spec: SurfaceSpec,
     context: ProfileContext,
     last_command_sequence: u64,
-    next_event_sequence: u64,
 }
+
+/// A browser to create once `opened` has been queued.
+struct PendingBrowser {
+    surface_id: SurfaceId,
+    url: String,
+    cache_path: Option<PathBuf>,
+}
+
+/// View size used until the app sends its first resize.
+const INITIAL_VIEW_WIDTH: u32 = 1024;
+const INITIAL_VIEW_HEIGHT: u32 = 768;
 
 /// The transport-facing host state.  It enforces the same surface ownership
 /// rules as the fake host while CEF/browser callbacks are attached behind the
@@ -895,16 +1000,72 @@ pub struct HostCore {
     /// scoped to account, requesting origin, top-level origin, and
     /// capability, and are re-checked against current policy on every use.
     permissions: HostPermissionRegistry,
+    /// The CEF engine, or `None` for the transport-only host the contract
+    /// tests drive.  Without an engine, surfaces are ready at once and
+    /// commands only produce their terminal events.
+    engine: Option<Arc<EngineLibrary>>,
+    /// Per-surface policy and event sequencing shared with CEF callbacks.
+    shared: Arc<HostShared>,
+    pending_browsers: Vec<PendingBrowser>,
 }
 
 impl HostCore {
     pub fn new(profile_root: PathBuf) -> Self {
+        Self::build(profile_root, None, Arc::new(HostShared::default()))
+    }
+
+    /// A host whose surfaces are real CEF browsers.  `shared` must be the
+    /// same object the engine reports its callbacks to.
+    pub fn with_engine(
+        profile_root: PathBuf,
+        engine: Arc<EngineLibrary>,
+        shared: Arc<HostShared>,
+    ) -> Self {
+        Self::build(profile_root, Some(engine), shared)
+    }
+
+    fn build(
+        profile_root: PathBuf,
+        engine: Option<Arc<EngineLibrary>>,
+        shared: Arc<HostShared>,
+    ) -> Self {
         Self {
             profile_store: ProfileStore::new(profile_root),
             next_surface_id: 1,
             surfaces: BTreeMap::new(),
             stopped: false,
             permissions: HostPermissionRegistry::new(true),
+            engine,
+            shared,
+            pending_browsers: Vec::new(),
+        }
+    }
+
+    /// Routes CEF events for this connection to its writer.
+    pub fn attach_sink(&self, sink: mpsc::Sender<WireMessage>) {
+        self.shared.attach_sink(sink);
+    }
+
+    /// Starts the browsers opened by the last request.  Called after the
+    /// request's responses (including `opened`) are queued.
+    pub fn run_deferred(&mut self) {
+        let Some(engine) = self.engine.clone() else {
+            self.pending_browsers.clear();
+            return;
+        };
+        for pending in std::mem::take(&mut self.pending_browsers) {
+            let options = BrowserOptions {
+                url: &pending.url,
+                cache_path: pending.cache_path.as_deref(),
+                width: INITIAL_VIEW_WIDTH,
+                height: INITIAL_VIEW_HEIGHT,
+                device_scale_factor: 1.0,
+                document_start_script: None,
+            };
+            if engine.create_browser(pending.surface_id, &options).is_err() {
+                // The engine reports nothing for a browser it never scheduled.
+                self.shared.browser_closed(pending.surface_id);
+            }
         }
     }
 
@@ -953,20 +1114,32 @@ impl HostCore {
             .next_surface_id
             .checked_add(1)
             .ok_or_else(|| HostError::Runtime("surface id exhausted".to_owned()))?;
+        let cache_path = context.path().map(Path::to_path_buf);
         self.surfaces.insert(
             surface_id,
             SurfaceState {
                 spec: spec.clone(),
                 context,
                 last_command_sequence: 0,
-                next_event_sequence: 2,
             },
         );
-        Ok(vec![
-            WireMessage::Opened {
-                request_id,
+        let opened = WireMessage::Opened {
+            request_id,
+            surface_id,
+        };
+        if self.engine.is_some() {
+            // `ready` follows from the engine once the browser exists.
+            self.shared.register(surface_id, &spec, false);
+            self.pending_browsers.push(PendingBrowser {
                 surface_id,
-            },
+                url: spec.initial_navigation().url().to_owned(),
+                cache_path,
+            });
+            return Ok(vec![opened]);
+        }
+        self.shared.register(surface_id, &spec, true);
+        Ok(vec![
+            opened,
             WireMessage::Event {
                 event: SurfaceEvent::Ready {
                     surface_id,
@@ -1006,59 +1179,101 @@ impl HostCore {
             )));
         }
         surface.last_command_sequence = sequence;
+        let engine = self.engine.as_deref();
+        let shared = &self.shared;
         let event = match command {
             SurfaceCommand::Navigate { navigation, .. } => {
-                let outcome = match surface.spec.policy().navigation_decision(&navigation) {
+                let decision = surface.spec.policy().navigation_decision(&navigation);
+                let outcome = match decision {
                     NavigationPolicyDecision::InProcess => NavigationOutcome::Allowed,
                     NavigationPolicyDecision::External => NavigationOutcome::External,
                     NavigationPolicyDecision::Blocked => {
-                        if navigation.disposition()
-                            == crate::browser_runtime::NavigationDisposition::External
-                        {
+                        if navigation.disposition() == NavigationDisposition::External {
                             NavigationOutcome::Cancelled
                         } else {
                             NavigationOutcome::Blocked
                         }
                     }
                 };
-                Some(SurfaceEvent::Navigation {
-                    surface_id,
-                    sequence: next_event_sequence(surface),
-                    navigation: NavigationEvent::new(
-                        navigation.url().to_owned(),
-                        navigation.disposition(),
-                        outcome,
-                    )
-                    .map_err(runtime_error)?,
-                })
+                let event = NavigationEvent::new(
+                    navigation.url().to_owned(),
+                    navigation.disposition(),
+                    outcome,
+                )
+                .map_err(runtime_error)?;
+                if decision == NavigationPolicyDecision::InProcess {
+                    if let Some(engine) = engine {
+                        engine.navigate(surface_id, navigation.url());
+                    }
+                }
+                shared
+                    .next_sequence(surface_id)
+                    .map(|sequence| SurfaceEvent::Navigation {
+                        surface_id,
+                        sequence,
+                        navigation: event,
+                    })
             }
             SurfaceCommand::Resize {
                 width,
                 height,
                 device_scale_factor,
                 ..
-            } => Some(SurfaceEvent::WindowChanged {
-                surface_id,
-                sequence: next_event_sequence(surface),
-                change: crate::browser_runtime::WindowChange::Resized {
-                    width,
-                    height,
-                    device_scale_factor,
-                },
-            }),
-            SurfaceCommand::Focus { focused, .. } => Some(SurfaceEvent::WindowChanged {
-                surface_id,
-                sequence: next_event_sequence(surface),
-                change: crate::browser_runtime::WindowChange::Focused { focused },
-            }),
-            SurfaceCommand::Script { envelope, .. } => Some(SurfaceEvent::ScriptMessage {
-                surface_id,
-                sequence: next_event_sequence(surface),
-                envelope: script_completion_envelope(&envelope).map_err(runtime_error)?,
-            }),
-            SurfaceCommand::Input { .. }
-            | SurfaceCommand::Permission { .. }
-            | SurfaceCommand::Popup { .. }
+            } => {
+                if let Some(engine) = engine {
+                    engine.resize(surface_id, width, height, device_scale_factor);
+                }
+                shared
+                    .next_sequence(surface_id)
+                    .map(|sequence| SurfaceEvent::WindowChanged {
+                        surface_id,
+                        sequence,
+                        change: crate::browser_runtime::WindowChange::Resized {
+                            width,
+                            height,
+                            device_scale_factor,
+                        },
+                    })
+            }
+            SurfaceCommand::Focus { focused, .. } => {
+                if let Some(engine) = engine {
+                    engine.focus(surface_id, focused);
+                }
+                shared
+                    .next_sequence(surface_id)
+                    .map(|sequence| SurfaceEvent::WindowChanged {
+                        surface_id,
+                        sequence,
+                        change: crate::browser_runtime::WindowChange::Focused { focused },
+                    })
+            }
+            SurfaceCommand::Script { envelope, .. } => {
+                let completion = script_completion_envelope(&envelope).map_err(runtime_error)?;
+                if let Some(engine) = engine {
+                    if let Some(script) = page_script(&envelope) {
+                        engine.execute_script(surface_id, &script);
+                    }
+                }
+                shared
+                    .next_sequence(surface_id)
+                    .map(|sequence| SurfaceEvent::ScriptMessage {
+                        surface_id,
+                        sequence,
+                        envelope: completion,
+                    })
+            }
+            SurfaceCommand::Input { input, .. } => {
+                if let Some(engine) = engine {
+                    engine.input(surface_id, &input);
+                }
+                None
+            }
+            SurfaceCommand::Popup {
+                request_id: popup_id,
+                action,
+                ..
+            } => shared.resolve_popup(surface_id, &popup_id, action),
+            SurfaceCommand::Permission { .. }
             | SurfaceCommand::Download { .. }
             | SurfaceCommand::Clipboard { .. }
             | SurfaceCommand::Upload { .. }
@@ -1083,10 +1298,18 @@ impl HostCore {
             .map_err(profile_error)?;
         // A late app decision must never grant a closed surface.
         self.permissions.remove_surface(surface_id);
+        if let Some(engine) = &self.engine {
+            // `closed` follows from the engine once CEF has let the browser go.
+            self.shared.mark_closing(surface_id);
+            engine.close_browser(surface_id);
+            return Ok(Vec::new());
+        }
+        let sequence = self.shared.next_sequence(surface_id).unwrap_or(1);
+        self.shared.remove(surface_id);
         Ok(vec![WireMessage::Event {
             event: SurfaceEvent::Closed {
                 surface_id,
-                sequence: surface.next_event_sequence,
+                sequence,
                 reason: CloseReason::User,
             },
         }])
@@ -1097,6 +1320,7 @@ impl HostCore {
         self.permissions.clear_session();
         self.profile_store.shutdown();
         self.stopped = true;
+        self.shared.detach_sink();
     }
 
     /// Clear one account's browser state.  The operation is intentionally
@@ -1327,7 +1551,8 @@ impl HostCore {
         failure: Option<SurfaceFailure>,
     ) -> Option<Vec<WireMessage>> {
         let failure = failure?;
-        let sequence = next_event_sequence(self.surfaces.get_mut(&surface_id)?);
+        self.surfaces.get(&surface_id)?;
+        let sequence = self.shared.next_sequence(surface_id)?;
         Some(vec![WireMessage::Event {
             event: SurfaceEvent::Failed {
                 surface_id,
@@ -1385,12 +1610,6 @@ fn wire_error_for(request_id: u64, error: HostError) -> Result<Vec<WireMessage>,
     }])
 }
 
-fn next_event_sequence(surface: &mut SurfaceState) -> u64 {
-    let sequence = surface.next_event_sequence;
-    surface.next_event_sequence = sequence.saturating_add(1);
-    sequence
-}
-
 fn runtime_error(error: RuntimeError) -> HostError {
     HostError::Runtime(error.to_string())
 }
@@ -1406,9 +1625,444 @@ fn profile_error(error: ProfileError) -> HostError {
     }
 }
 
+/// The JavaScript a script command runs in the page, if any.
+fn page_script(envelope: &ScriptEnvelope) -> Option<String> {
+    let value = envelope.value();
+    match value.get("operation")?.as_str()? {
+        "evaluate_javascript" => value.get("script")?.as_str().map(str::to_owned),
+        "dispatch_script_message" => Some(format!(
+            "window.__roscordBrowserRuntimeReceive && window.__roscordBrowserRuntimeReceive({value});"
+        )),
+        _ => None,
+    }
+}
+
+/// State shared between the transport thread and CEF callbacks: each
+/// surface's policy and event sequence, pending popups, and the writer the
+/// events go to.
+#[derive(Default)]
+pub struct HostShared {
+    state: Mutex<SharedState>,
+}
+
+#[derive(Default)]
+struct SharedState {
+    surfaces: BTreeMap<SurfaceId, SharedSurface>,
+    sink: Option<mpsc::Sender<WireMessage>>,
+    next_popup_request: u64,
+}
+
+struct SharedSurface {
+    policy: SurfacePolicy,
+    initial_navigation: NavigationRequest,
+    next_event_sequence: u64,
+    ready: bool,
+    closing: bool,
+    pending_popups: BTreeMap<String, PendingPopup>,
+}
+
+struct PendingPopup {
+    url: String,
+    user_gesture: bool,
+}
+
+impl SharedSurface {
+    fn next_sequence(&mut self) -> u64 {
+        let sequence = self.next_event_sequence;
+        self.next_event_sequence = sequence.saturating_add(1);
+        sequence
+    }
+}
+
+impl SharedState {
+    fn send(&self, event: SurfaceEvent) {
+        if let Some(sink) = &self.sink {
+            let _ = sink.send(WireMessage::Event { event });
+        }
+    }
+
+    /// Sends the event `build` makes with the surface's next sequence.
+    /// Nothing is sent for unknown surfaces or once a close was requested.
+    fn emit(&mut self, surface_id: SurfaceId, build: impl FnOnce(u64) -> Option<SurfaceEvent>) {
+        let Some(surface) = self.surfaces.get_mut(&surface_id) else {
+            return;
+        };
+        if surface.closing {
+            return;
+        }
+        let sequence = surface.next_sequence();
+        if let Some(event) = build(sequence) {
+            self.send(event);
+        }
+    }
+}
+
+impl HostShared {
+    fn lock(&self) -> MutexGuard<'_, SharedState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn attach_sink(&self, sink: mpsc::Sender<WireMessage>) {
+        self.lock().sink = Some(sink);
+    }
+
+    fn detach_sink(&self) {
+        self.lock().sink = None;
+    }
+
+    /// Registers a surface.  `ready` says whether `ready` (sequence 1) was
+    /// already sent by the caller.
+    fn register(&self, surface_id: SurfaceId, spec: &SurfaceSpec, ready: bool) {
+        self.lock().surfaces.insert(
+            surface_id,
+            SharedSurface {
+                policy: spec.policy().clone(),
+                initial_navigation: spec.initial_navigation().clone(),
+                next_event_sequence: if ready { 2 } else { 1 },
+                ready,
+                closing: false,
+                pending_popups: BTreeMap::new(),
+            },
+        );
+    }
+
+    fn remove(&self, surface_id: SurfaceId) {
+        self.lock().surfaces.remove(&surface_id);
+    }
+
+    fn mark_closing(&self, surface_id: SurfaceId) {
+        if let Some(surface) = self.lock().surfaces.get_mut(&surface_id) {
+            surface.closing = true;
+            surface.pending_popups.clear();
+        }
+    }
+
+    fn next_sequence(&self, surface_id: SurfaceId) -> Option<u64> {
+        self.lock()
+            .surfaces
+            .get_mut(&surface_id)
+            .map(SharedSurface::next_sequence)
+    }
+
+    fn policy(&self, surface_id: SurfaceId) -> Option<SurfacePolicy> {
+        self.lock()
+            .surfaces
+            .get(&surface_id)
+            .filter(|surface| !surface.closing)
+            .map(|surface| surface.policy.clone())
+    }
+
+    /// Applies the app's decision for a popup the page asked for.  The only
+    /// way out is an explicit external action the surface policy permits.
+    fn resolve_popup(
+        &self,
+        surface_id: SurfaceId,
+        popup_id: &str,
+        action: PopupAction,
+    ) -> Option<SurfaceEvent> {
+        let mut state = self.lock();
+        let surface = state.surfaces.get_mut(&surface_id)?;
+        let popup = surface.pending_popups.remove(popup_id)?;
+        let external = action == PopupAction::OpenExternal
+            && NavigationRequest::new(&popup.url, NavigationDisposition::External, popup.user_gesture)
+                .map(|request| {
+                    surface.policy.navigation_decision(&request) == NavigationPolicyDecision::External
+                })
+                .unwrap_or(false);
+        let (disposition, outcome) = if external {
+            (NavigationDisposition::External, NavigationOutcome::External)
+        } else {
+            (NavigationDisposition::NewSurface, NavigationOutcome::Cancelled)
+        };
+        let navigation = NavigationEvent::new(popup.url, disposition, outcome).ok()?;
+        let sequence = surface.next_sequence();
+        Some(SurfaceEvent::Navigation {
+            surface_id,
+            sequence,
+            navigation,
+        })
+    }
+
+    fn fail(&self, surface_id: SurfaceId, kind: FailureKind, message: &str) {
+        let Ok(failure) = SurfaceFailure::new(kind, message) else {
+            return;
+        };
+        self.lock().emit(surface_id, |sequence| {
+            Some(SurfaceEvent::Failed {
+                surface_id,
+                sequence,
+                failure,
+            })
+        });
+    }
+}
+
+impl EngineEvents for HostShared {
+    fn before_browse(
+        &self,
+        surface_id: SurfaceId,
+        url: &str,
+        main_frame: bool,
+        user_gesture: bool,
+        _is_redirect: bool,
+    ) -> bool {
+        if !main_frame {
+            // The surface policy governs the top-level document.  Frames a
+            // declared page embeds (the provider player inside the video
+            // wrapper, for one) load normally, but only over web schemes.
+            return subframe_url_allowed(url);
+        }
+        if url == "about:blank" {
+            return true;
+        }
+        let Some(policy) = self.policy(surface_id) else {
+            return false;
+        };
+        let Ok(request) = NavigationRequest::new(url, NavigationDisposition::Current, user_gesture)
+        else {
+            return false;
+        };
+        let (allowed, disposition, outcome) = match policy.navigation_decision(&request) {
+            NavigationPolicyDecision::InProcess => {
+                (true, NavigationDisposition::Current, NavigationOutcome::Allowed)
+            }
+            NavigationPolicyDecision::External => (
+                false,
+                NavigationDisposition::External,
+                NavigationOutcome::External,
+            ),
+            NavigationPolicyDecision::Blocked => {
+                (false, NavigationDisposition::Current, NavigationOutcome::Blocked)
+            }
+        };
+        if let Ok(navigation) = NavigationEvent::new(url, disposition, outcome) {
+            self.lock().emit(surface_id, |sequence| {
+                Some(SurfaceEvent::Navigation {
+                    surface_id,
+                    sequence,
+                    navigation,
+                })
+            });
+        }
+        allowed
+    }
+
+    fn open_url(&self, surface_id: SurfaceId, url: &str, user_gesture: bool) {
+        let mut state = self.lock();
+        state.next_popup_request = state.next_popup_request.saturating_add(1);
+        let request_id = format!("popup-{}", state.next_popup_request);
+        let Some(surface) = state.surfaces.get_mut(&surface_id) else {
+            return;
+        };
+        if surface.closing {
+            return;
+        }
+        surface.pending_popups.insert(
+            request_id.clone(),
+            PendingPopup {
+                url: url.to_owned(),
+                user_gesture,
+            },
+        );
+        let sequence = surface.next_sequence();
+        state.send(SurfaceEvent::PopupRequest {
+            surface_id,
+            sequence,
+            request_id,
+            url: url.to_owned(),
+            user_gesture,
+        });
+    }
+
+    fn frame_ready(
+        &self,
+        surface_id: SurfaceId,
+        buffer: &str,
+        slot: u32,
+        width: u32,
+        height: u32,
+        frame_sequence: u64,
+    ) {
+        let Some(stride) = width.checked_mul(4) else {
+            return;
+        };
+        let Ok(frame) = FrameReference::new(
+            slot,
+            width,
+            height,
+            stride,
+            PixelFormat::RgbaPremultiplied,
+            frame_sequence,
+        )
+        .and_then(|frame| frame.with_buffer(buffer)) else {
+            return;
+        };
+        self.lock().emit(surface_id, |sequence| {
+            Some(SurfaceEvent::FrameReady {
+                surface_id,
+                sequence,
+                frame,
+            })
+        });
+    }
+
+    fn browser_created(&self, surface_id: SurfaceId) {
+        let mut state = self.lock();
+        let Some(surface) = state.surfaces.get_mut(&surface_id) else {
+            return;
+        };
+        if surface.ready || surface.closing {
+            return;
+        }
+        surface.ready = true;
+        let initial_navigation = surface.initial_navigation.clone();
+        let sequence = surface.next_sequence();
+        state.send(SurfaceEvent::Ready {
+            surface_id,
+            sequence,
+            initial_navigation,
+        });
+    }
+
+    fn browser_closed(&self, surface_id: SurfaceId) {
+        let mut state = self.lock();
+        let Some(mut surface) = state.surfaces.remove(&surface_id) else {
+            return;
+        };
+        if !surface.ready && !surface.closing {
+            if let Ok(failure) = SurfaceFailure::new(
+                FailureKind::RuntimeLost,
+                "the browser could not be created",
+            ) {
+                let sequence = surface.next_sequence();
+                state.send(SurfaceEvent::Failed {
+                    surface_id,
+                    sequence,
+                    failure,
+                });
+            }
+        }
+        let reason = if surface.closing {
+            CloseReason::User
+        } else {
+            CloseReason::Host
+        };
+        let sequence = surface.next_sequence();
+        state.send(SurfaceEvent::Closed {
+            surface_id,
+            sequence,
+            reason,
+        });
+    }
+
+    fn load_failed(&self, surface_id: SurfaceId, error_code: i32, _url: &str) {
+        self.log(
+            LOG_WARNING,
+            &format!("surface {surface_id} failed to load (net error {error_code})"),
+        );
+        self.fail(
+            surface_id,
+            FailureKind::NavigationBlocked,
+            "the page could not be loaded",
+        );
+    }
+
+    fn certificate_error(&self, surface_id: SurfaceId, _url: &str) {
+        self.fail(
+            surface_id,
+            FailureKind::CertificateDenied,
+            "certificate validation failed; navigation was denied",
+        );
+    }
+
+    fn renderer_gone(&self, surface_id: SurfaceId, status: i32) {
+        self.log(
+            LOG_ERROR,
+            &format!("surface {surface_id} renderer terminated (status {status})"),
+        );
+        self.fail(surface_id, FailureKind::RuntimeLost, "the page renderer stopped");
+    }
+
+    fn cursor_changed(&self, surface_id: SurfaceId, cursor: &str) {
+        let cursor = cursor.to_owned();
+        self.lock().emit(surface_id, |sequence| {
+            Some(SurfaceEvent::CursorChanged {
+                surface_id,
+                sequence,
+                cursor,
+            })
+        });
+    }
+
+    fn script_message(&self, surface_id: SurfaceId, frame_url: &str, json: &str) {
+        // The frame's real origin is authoritative; the page cannot claim
+        // another one.
+        let Some(origin) = crate::browser_runtime::url_origin(frame_url) else {
+            return;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(json) else {
+            return;
+        };
+        let Some(channel) = value.get("channel").and_then(Value::as_str).map(str::to_owned) else {
+            return;
+        };
+        let request_id = value
+            .get("request_id")
+            .and_then(Value::as_str)
+            .unwrap_or("browser-runtime-page-message")
+            .to_owned();
+        let Ok(envelope) =
+            ScriptEnvelope::new(ScriptSource::Page, origin, channel, request_id, value)
+        else {
+            return;
+        };
+        self.lock().emit(surface_id, |sequence| {
+            Some(SurfaceEvent::ScriptMessage {
+                surface_id,
+                sequence,
+                envelope,
+            })
+        });
+    }
+
+    fn filter_request(
+        &self,
+        _surface_id: SurfaceId,
+        _url: &str,
+        _initiator: &str,
+        _resource_type: i32,
+    ) -> bool {
+        // Content filtering (adblock-rust) plugs in here; the engine only
+        // asks when it was initialized with filtering enabled.
+        false
+    }
+
+    fn log(&self, level: i32, message: &str) {
+        let level = match level {
+            LOG_ERROR => "error",
+            LOG_WARNING => "warning",
+            _ => "info",
+        };
+        eprintln!("cef_host {level}: {message}");
+    }
+}
+
+/// Frames inside a surface may load web content and in-page documents, never
+/// local files or browser-internal pages.
+fn subframe_url_allowed(url: &str) -> bool {
+    let scheme = url
+        .split_once(':')
+        .map(|(scheme, _)| scheme.to_ascii_lowercase())
+        .unwrap_or_default();
+    matches!(scheme.as_str(), "https" | "http" | "about" | "data" | "blob")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use crate::browser_runtime::{
         NavigationDisposition, NavigationRequest, PresentationMode, PrivacyMode, SurfacePolicy,
     };
@@ -1470,6 +2124,66 @@ mod tests {
     }
 
     #[test]
+    fn launch_arguments_accept_the_app_equals_form() {
+        let config = HostConfig::parse(
+            [
+                "cef_host",
+                "--socket=/tmp/roscord-cef.sock",
+                "--parent-pid=42",
+                "--parent-nonce=0123456789abcdef0123456789abcdef",
+                "--cef-root=/opt/roscord/cef",
+                "--profile-root=/tmp/roscord-profile",
+                "--max-frame-bytes=4096",
+                "--cef-software-rendering",
+            ]
+            .map(OsString::from),
+        )
+        .unwrap();
+        assert_eq!(config.socket_path, PathBuf::from("/tmp/roscord-cef.sock"));
+        assert_eq!(config.parent_pid, 42);
+        assert_eq!(config.cef_root, PathBuf::from("/opt/roscord/cef"));
+        assert_eq!(config.max_frame_bytes, 4096);
+        assert!(config.software_rendering);
+        assert_eq!(
+            HostConfig::parse(host_args(&[])).unwrap().socket_path,
+            PathBuf::from("/tmp/roscord-cef.sock")
+        );
+    }
+
+    #[test]
+    fn a_missing_profile_root_is_created_privately_with_its_parents() {
+        let root = temp_root("profile-parents");
+        let profile_root = root.join("share").join("roscord").join("cef").join("profiles");
+        validate_profile_root(&profile_root).unwrap();
+        for directory in [
+            root.join("share"),
+            root.join("share/roscord"),
+            root.join("share/roscord/cef"),
+            profile_root.clone(),
+        ] {
+            let mode = fs::metadata(&directory).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{}", directory.display());
+        }
+        // An existing ancestor others can write to is refused.
+        let shared = root.join("shared");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(validate_profile_root(&shared.join("a").join("profiles")).is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn children_find_the_runtime_from_the_argument_or_the_environment() {
+        let root = child_cef_root(&[
+            OsString::from("cef_host"),
+            OsString::from("--type=renderer"),
+            OsString::from("--cef-root=/opt/roscord/cef"),
+        ])
+        .unwrap();
+        assert_eq!(root, PathBuf::from("/opt/roscord/cef"));
+    }
+
+    #[test]
     fn validation_and_fault_injection_flags_are_removed() {
         // The cutover removed `--cef-validation` and `--cef-fault`: every
         // spelling is rejected in all builds, and production routing is
@@ -1497,7 +2211,7 @@ mod tests {
     fn fake_cef_root(root: &Path) {
         for relative in REQUIRED_CEF_FILES {
             let path = root.join(relative);
-            if *relative == "Resources/locales" {
+            if *relative == "Release/locales" {
                 fs::create_dir_all(path).unwrap();
             } else {
                 fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1506,7 +2220,7 @@ mod tests {
                     .unwrap();
             }
         }
-        for directory in ["Release", "Resources", "Resources/locales"] {
+        for directory in ["Release", "Release/locales"] {
             fs::set_permissions(root.join(directory), fs::Permissions::from_mode(0o700)).unwrap();
         }
     }
@@ -1611,6 +2325,16 @@ mod tests {
         drop(client);
         assert!(server_thread.join().unwrap().is_ok());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_parent_that_exits_with_unread_events_is_a_disconnect() {
+        let codec = FramedCodec::new("nonce-transport-1234").unwrap();
+        let (client, mut server) = UnixStream::pair().unwrap();
+        // Closing a socket with unread data resets the connection.
+        server.write_all(&[0_u8; 16]).unwrap();
+        drop(client);
+        assert!(matches!(read_message(&mut server, &codec), Ok(None)));
     }
 
     #[test]

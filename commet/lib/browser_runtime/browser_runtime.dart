@@ -326,11 +326,23 @@ class ScriptEnvelope {
 
 enum PointerKind { down, up, move, enter, leave, wheel }
 
+/// Modifier bits for pointer and keyboard input.
+abstract final class InputModifiers {
+  static const int shift = 1 << 0;
+  static const int control = 1 << 1;
+  static const int alt = 1 << 2;
+  static const int meta = 1 << 3;
+}
+
 enum ImePhase { start, update, commit, cancel }
 
 sealed class InputEvent {
   const InputEvent();
 
+  /// A pointer event in logical pixels. [buttons] is Flutter's button
+  /// bitmask; for [PointerKind.down] and [PointerKind.up] it names the button
+  /// that changed, for moves the buttons held. [modifiers] uses the
+  /// [InputModifiers] bits.
   factory InputEvent.pointer({
     required PointerKind kind,
     required double x,
@@ -338,6 +350,7 @@ sealed class InputEvent {
     int buttons = 0,
     double deltaX = 0,
     double deltaY = 0,
+    int modifiers = 0,
   }) =>
       PointerInput(
         kind: kind,
@@ -346,8 +359,11 @@ sealed class InputEvent {
         buttons: buttons,
         deltaX: deltaX,
         deltaY: deltaY,
+        modifiers: modifiers,
       );
 
+  /// A key press or release: W3C KeyboardEvent [key] and [code] values and
+  /// [InputModifiers] bits.
   factory InputEvent.keyboard({
     required String key,
     required String code,
@@ -388,6 +404,7 @@ sealed class InputEvent {
           buttons: _optionalInt(payload, 'buttons') ?? 0,
           deltaX: _optionalDouble(payload, 'delta_x') ?? 0,
           deltaY: _optionalDouble(payload, 'delta_y') ?? 0,
+          modifiers: _optionalInt(payload, 'modifiers') ?? 0,
         ),
       'keyboard' => KeyboardInput(
           key: _requiredString(payload, 'key'),
@@ -416,6 +433,7 @@ class PointerInput extends InputEvent {
   final int buttons;
   final double deltaX;
   final double deltaY;
+  final int modifiers;
 
   PointerInput({
     required this.kind,
@@ -424,6 +442,7 @@ class PointerInput extends InputEvent {
     this.buttons = 0,
     this.deltaX = 0,
     this.deltaY = 0,
+    this.modifiers = 0,
   }) {
     if (![x, y, deltaX, deltaY].every((value) => value.isFinite)) {
       throw const BrowserRuntimeException(
@@ -443,6 +462,7 @@ class PointerInput extends InputEvent {
           'buttons': buttons,
           'delta_x': deltaX,
           'delta_y': deltaY,
+          'modifiers': modifiers,
         },
       };
 }
@@ -1052,6 +1072,11 @@ class FrameReference {
   final PixelFormat format;
   final int sequence;
 
+  /// Name of the host's shared-memory frame ring that holds [slot]: a POSIX
+  /// shared-memory name on Linux, a file-mapping name on Windows. Null for
+  /// fixture frames with no pixels behind them.
+  final String? buffer;
+
   FrameReference({
     required this.slot,
     required this.width,
@@ -1059,6 +1084,7 @@ class FrameReference {
     required this.stride,
     required this.format,
     required this.sequence,
+    this.buffer,
   }) {
     if (width <= 0 || height <= 0 || sequence <= 0 || stride < width * 4) {
       throw const BrowserRuntimeException(
@@ -1075,6 +1101,7 @@ class FrameReference {
         'stride': stride,
         'format': _pixelFormatToWire(format),
         'sequence': sequence,
+        if (buffer != null) 'buffer': buffer,
       };
 
   factory FrameReference.fromJson(Map<String, dynamic> json) => FrameReference(
@@ -1084,6 +1111,7 @@ class FrameReference {
         stride: _requiredInt(json, 'stride'),
         format: _pixelFormatFromWire(_requiredString(json, 'format')),
         sequence: _requiredInt(json, 'sequence'),
+        buffer: _optionalString(json, 'buffer'),
       );
 }
 
@@ -1239,6 +1267,11 @@ sealed class SurfaceEvent {
           id,
           sequence,
           FrameReference.fromJson(_requiredMap(payload, 'frame')),
+        ),
+      'cursor_changed' => CursorChangedEvent(
+          id,
+          sequence,
+          _requiredString(payload, 'cursor'),
         ),
       'navigation' => NavigationEvent(
           id,
@@ -1526,6 +1559,20 @@ class WindowChangedEvent extends SurfaceEvent {
         'type': 'window_changed',
         'payload':
             _eventPayload(surfaceId, sequence, {'change': change.toJson()}),
+      };
+}
+
+/// The page's mouse cursor changed. [cursor] is a CSS cursor keyword
+/// ("default", "pointer", "text", ...).
+class CursorChangedEvent extends SurfaceEvent {
+  final String cursor;
+
+  const CursorChangedEvent(super.surfaceId, super.sequence, this.cursor);
+
+  @override
+  Map<String, Object?> toJson() => {
+        'type': 'cursor_changed',
+        'payload': _eventPayload(surfaceId, sequence, {'cursor': cursor}),
       };
 }
 
@@ -2312,6 +2359,12 @@ String _requiredString(Map<String, dynamic> json, String key) {
     throw ProtocolException('invalid_message', 'field $key must be a string');
   }
   return value;
+}
+
+String? _optionalString(Map<String, dynamic> json, String key) {
+  final value = json[key];
+  if (value == null) return null;
+  return _requiredString(json, key);
 }
 
 int _requiredInt(Map<String, dynamic> json, String key) {

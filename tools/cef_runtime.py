@@ -20,6 +20,7 @@ import posixpath
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -88,6 +89,22 @@ BOOTSTRAP_PATTERNS = {
     "windows-x64": {"archive": ["Release/bootstrap.exe"], "project": ["client.dll"]},
     "linux-x64": {"archive": [], "project": []},
 }
+# Where archive paths land in a staged runtime.  On Linux CEF loads ICU data,
+# the .pak resources and locales/ from the directory that holds libcef.so,
+# whatever CefSettings says, so the staged Linux runtime moves the archive's
+# Resources/ into Release/.  Windows keeps the archive layout.
+STAGED_PREFIXES: dict[str, tuple[tuple[str, str], ...]] = {
+    "linux-x64": (("Resources/", "Release/"),),
+}
+
+
+def staged_path(platform: str, relative: str) -> str:
+    """The staged-runtime path (or pattern) for an archive path (or pattern)."""
+
+    for source, target in STAGED_PREFIXES.get(platform, ()):
+        if relative.startswith(source):
+            return target + relative[len(source) :]
+    return relative
 
 
 class LockError(ValueError):
@@ -300,30 +317,29 @@ def validate_lock(lock: Mapping[str, Any]) -> dict[str, Any]:
                     f"{platform}.runtime.required pattern is not allow-listed: {required_pattern}"
                 )
         _validate_optional_patterns(runtime.get("forbidden"), f"{platform}.runtime.forbidden")
+        # Both hosts compile against the locked SDK: the Windows client DLL and
+        # the Linux CEF engine.
         build_sdk = record.get("build_sdk")
-        if platform == "windows-x64":
-            if not isinstance(build_sdk, dict):
-                raise LockError(f"{platform}.build_sdk must be an object")
-            build_required = _validate_patterns(
-                build_sdk.get("required"), f"{platform}.build_sdk.required"
+        if not isinstance(build_sdk, dict):
+            raise LockError(f"{platform}.build_sdk must be an object")
+        build_required = _validate_patterns(
+            build_sdk.get("required"), f"{platform}.build_sdk.required"
+        )
+        build_allowlist = _validate_patterns(
+            build_sdk.get("allowlist"), f"{platform}.build_sdk.allowlist"
+        )
+        missing_build = [
+            pattern
+            for pattern in build_required
+            if not any(_pattern_covers(allowed, pattern) for allowed in build_allowlist)
+        ]
+        if missing_build:
+            raise LockError(
+                f"{platform}.build_sdk.required is not allow-listed: {missing_build}"
             )
-            build_allowlist = _validate_patterns(
-                build_sdk.get("allowlist"), f"{platform}.build_sdk.allowlist"
-            )
-            missing_build = [
-                pattern
-                for pattern in build_required
-                if not any(_pattern_covers(allowed, pattern) for allowed in build_allowlist)
-            ]
-            if missing_build:
-                raise LockError(
-                    f"{platform}.build_sdk.required is not allow-listed: {missing_build}"
-                )
-            _validate_optional_patterns(
-                build_sdk.get("forbidden"), f"{platform}.build_sdk.forbidden"
-            )
-        elif build_sdk is not None:
-            raise LockError(f"{platform}.build_sdk is only supported for Windows")
+        _validate_optional_patterns(
+            build_sdk.get("forbidden"), f"{platform}.build_sdk.forbidden"
+        )
         bootstrap = record.get("bootstrap", {})
         if not isinstance(bootstrap, dict):
             raise LockError(f"{platform}.bootstrap must be an object")
@@ -414,15 +430,16 @@ def archive_manifest(archive: Path | str) -> tuple[dict[str, Any], str]:
     archive = Path(archive)
     entries: list[dict[str, Any]] = []
     try:
-        tar = tarfile.open(archive, mode="r:bz2")
+        # Stream mode reads the bz2 archive once.  Random access would
+        # decompress it again to reach each member.
+        tar = tarfile.open(archive, mode="r|bz2")
     except (OSError, tarfile.TarError) as exc:
         raise LockError(f"cannot open CEF archive {archive}: {exc}") from exc
     with tar:
-        members = tar.getmembers()
-        if len(members) > MAX_MEMBER_COUNT:
-            raise LockError("archive has too many members")
         seen: set[str] = set()
-        for member in members:
+        for member in tar:
+            if len(seen) >= MAX_MEMBER_COUNT:
+                raise LockError("archive has too many members")
             normal = _normalise_member_name(member.name)
             folded = normal.casefold()
             if folded in seen:
@@ -480,15 +497,15 @@ def safe_extract(archive: Path | str, destination: Path | str) -> Path:
     destination.mkdir(parents=True, exist_ok=True)
     extracted_bytes = 0
     try:
-        tar = tarfile.open(archive, mode="r:bz2")
+        # Stream mode reads the bz2 archive once (see archive_manifest).
+        tar = tarfile.open(archive, mode="r|bz2")
     except (OSError, tarfile.TarError) as exc:
         raise LockError(f"cannot open CEF archive {archive}: {exc}") from exc
     with tar:
-        members = tar.getmembers()
-        if len(members) > MAX_MEMBER_COUNT:
-            raise LockError("archive has too many members")
         seen: set[str] = set()
-        for member in members:
+        for member in tar:
+            if len(seen) >= MAX_MEMBER_COUNT:
+                raise LockError("archive has too many members")
             member.name = _normalise_member_name(member.name)
             folded = member.name.casefold()
             if folded in seen:
@@ -805,12 +822,45 @@ def _stage_files(
     if destination.exists() and any(destination.iterdir()):
         raise LockError(f"staging destination must be empty: {destination}")
     destination.mkdir(parents=True, exist_ok=True)
+    staged_names: set[str] = set()
     for source, relative in selected:
-        target = destination.joinpath(*PurePosixPath(relative).parts)
+        staged_name = staged_path(platform, relative)
+        if staged_name in staged_names:
+            raise LockError(f"two archive files stage to {staged_name}")
+        staged_names.add(staged_name)
+        target = destination.joinpath(*PurePosixPath(staged_name).parts)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
         os.chmod(target, stat.S_IMODE(source.stat().st_mode))
     return sorted(selected_names)
+
+
+def _strip_libraries(platform: str, destination: Path) -> list[str]:
+    """Strips debug and local symbols from the staged Linux libraries.
+
+    The standard Linux distribution ships libcef.so unstripped (about 1.4 GB,
+    268 MB stripped).  `--strip-unneeded` keeps the dynamic symbol table, so
+    the libraries still load and link exactly as before.
+    """
+
+    if platform != "linux-x64":
+        raise LockError("only the Linux runtime is stripped")
+    release = destination / "Release"
+    stripped: list[str] = []
+    for library in sorted(release.iterdir()):
+        name = library.name
+        if not library.is_file() or not (name.endswith(".so") or ".so." in name):
+            continue
+        try:
+            subprocess.run(
+                ["strip", "--strip-unneeded", str(library)],
+                check=True,
+                capture_output=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise LockError(f"cannot strip {name}: {exc}") from exc
+        stripped.append(f"Release/{name}")
+    return stripped
 
 
 def stage_runtime(
@@ -820,6 +870,7 @@ def stage_runtime(
     lock: Mapping[str, Any] | None = None,
     *,
     project_root: Path | str | None = None,
+    strip: bool = False,
 ) -> dict[str, Any]:
     """Verify, safely extract, and stage the allow-listed runtime files."""
 
@@ -832,11 +883,13 @@ def stage_runtime(
         extracted = safe_extract(archive, Path(temporary) / "archive")
         root = _find_archive_root(extracted)
         selected = _stage_files(platform, root, destination, record)
+    stripped = _strip_libraries(platform, destination) if strip else []
     manifest, digest = filesystem_manifest(destination)
     return {
         "platform": platform,
         "cef_version": lock["cef_version"],
         "files": selected,
+        "stripped": stripped,
         "manifest": manifest,
         "manifest_sha256": digest,
         "bootstrap_project": project_bootstrap,
@@ -856,8 +909,6 @@ def stage_sdk(
     the exact pinned SDK available without ever shipping it in the app.
     """
 
-    if platform != "windows-x64":
-        raise LockError("the CEF build SDK is currently supported only on Windows")
     lock = validate_lock(lock or load_lock())
     record = _platform_record(lock, platform)
     build_sdk = record["build_sdk"]
@@ -988,13 +1039,13 @@ def generate_metadata(
     # Verify that the staged directory contains exactly the policy-selected
     # files before emitting any release metadata.
     files = _relative_files(staged)
-    allowlist = record["runtime"]["allowlist"]
+    allowlist = [staged_path(platform, pattern) for pattern in record["runtime"]["allowlist"]]
     for file in files:
         relative = file.relative_to(staged).as_posix()
         if not any(_path_matches(relative, pattern) for pattern in allowlist):
             raise LockError(f"unexpected staged runtime file: {relative}")
     for required in record["runtime"]["required"]:
-        _required_file(staged, required)
+        _required_file(staged, staged_path(platform, required))
     project_bootstrap = _verify_project_bootstrap(platform, project_root, record)
     manifest, manifest_sha256 = filesystem_manifest(staged)
     _ensure_no_symlink_ancestors(output)
@@ -1162,11 +1213,16 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="optional app root containing lock-listed project bootstrap inputs",
     )
+    stage.add_argument(
+        "--strip",
+        action="store_true",
+        help="strip debug and local symbols from the staged libraries (Linux only)",
+    )
     stage.add_argument("archive", type=Path)
     stage.add_argument("destination", type=Path)
 
     sdk = subparsers.add_parser(
-        "stage-sdk", help="verify and stage the locked Windows CEF build SDK"
+        "stage-sdk", help="verify and stage the locked CEF build SDK"
     )
     sdk.add_argument("--platform", type=_platform_argument, default="windows-x64")
     sdk.add_argument("archive", type=Path)
@@ -1210,6 +1266,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         args.destination,
                         lock,
                         project_root=args.project_root,
+                        strip=args.strip,
                     ),
                     indent=2,
                 )

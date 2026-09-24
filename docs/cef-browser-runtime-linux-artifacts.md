@@ -6,31 +6,36 @@ CEF on X11 and Wayland.
 The released native set is Debian 12 baseline, every released Ubuntu `.deb`
 (Ubuntu 22.04 and Ubuntu 24.04), and the portable x64 archive. Every package
 carries the same staged payload and serves both Matrix presentations through
-one release-authoritative engine: CEF windowless/off-screen rendering with CPU
-`OnPaint` copied into client-owned memory. Embedded presents as a Flutter
-texture (`osr-cpu-flutter-texture`); standalone presents the same OSR/CPU
-frames inside a roscord-owned window (`osr-cpu-owned-window`).
+one release-authoritative engine: CEF windowless/off-screen rendering, with
+CPU `OnPaint` frames published through a shared-memory frame ring (see
+`docs/cef-browser-runtime-hosts.md`). Embedded presents as a Flutter texture
+(`osr-cpu-flutter-texture`); standalone presents the same OSR/CPU frames
+inside a roscord-owned window (`osr-cpu-owned-window`).
 
 ## Staged resources, locales, helpers, graphics, and sandbox route
 
 The release tooling fetches only the locked `linux-x64` archive, verifies
 its size, sidecar SHA-1, project SHA-256, and raw manifest, then stages the
-allow-listed runtime (`tools/cef_runtime.py stage`) and records notices, a
-CycloneDX SBOM, provenance, and the staged manifest (`metadata`). The staged
-directory is installed into the bundle as `cef/` by `commet/linux/CMakeLists.txt`
-(`ROSCORD_CEF_RUNTIME_DIR`) and the full extracted archive root is the SDK
-used to compile `cef_host` (`ROSCORD_CEF_SDK_ROOT`); both flow through the
-environment so release and CI builds stage the same locked inputs. Wiring
-both variables into the Linux Debian/portable release jobs is part of the
-final atomic publication gate; until then this document pins the required
-tooling contract, not a claim that every CI job already stages it.
+allow-listed runtime (`tools/cef_runtime.py stage --strip`, which also
+strips the libraries) and records notices, a CycloneDX SBOM, provenance, and
+the staged manifest (`metadata`). The staged directory is installed into the
+bundle as `cef/` by `commet/linux/CMakeLists.txt` (`ROSCORD_CEF_RUNTIME_DIR`).
+The build SDK staged by `tools/cef_runtime.py stage-sdk`
+(`ROSCORD_CEF_SDK_ROOT`) compiles the CEF engine library that `cef_host`
+loads (`lib/libroscord_cef_engine.so`). Both flow through the environment,
+so release and CI builds stage the same locked inputs. `desktop-build.yml`
+(the build behind `ci`'s releases) stages both for its Linux leg. The Debian
+job in `release.yml` does not yet.
 
-Every native artifact carries, at minimum:
+The staged runtime is flat. CEF on Linux loads ICU data, the `.pak`
+resources and `locales/` from the directory that holds `libcef.so`, whatever
+`CefSettings` says, so staging moves the archive's `Resources/` into
+`Release/`. Every native artifact carries, at minimum:
 
 - `Release/libcef.so`, `Release/v8_context_snapshot.bin`,
-  `Resources/chrome_100_percent.pak`, `Resources/chrome_200_percent.pak`,
-  `Resources/icudtl.dat`, `Resources/resources.pak`;
-- locales under `Resources/locales`, always including `en-US.pak`;
+  `Release/chrome_100_percent.pak`, `Release/chrome_200_percent.pak`,
+  `Release/icudtl.dat`, `Release/resources.pak`;
+- locales under `Release/locales`, always including `en-US.pak`;
 - the `Release/chrome-sandbox` helper;
 - graphics dependencies `Release/libEGL.so`, `Release/libGLESv2.so`,
   `Release/libvk_swiftshader.so`, `Release/libvulkan.so.1`, and
@@ -107,13 +112,15 @@ no WebKitGTK, and no GPU availability, with forced CPU rendering as the
 release-authoritative path. Static contract checks assert the Linux sources
 contain the OSR/CPU/bundled vocabulary and none of the host-engine tokens.
 
-## Linux official video remains the preserved native/external path
+## Linux official video plays through the bundled CEF host
 
-Linux official video is not a CEF surface and is never treated as a CEF
-fallback. The native yt-dlp/mpv path stays first choice with a deliberate
-external browser as the second choice
-(`native-yt-dlp-mpv-or-deliberate-external`); `MediaEmbedAdapter` routes only
-Windows through CEF (`mediaEmbedUsesCef` is false on Linux) and there is no
-Linux CEF branch and no standalone official-video presentation.
-`assertLinuxVideoPreserved`/`assert_linux_video_preserved` fail closed if a
-caller ever marks the Linux video path as CEF-backed.
+Linux official video is an embedded CEF surface, as on Windows
+(`cef-official-embed`; `mediaEmbedUsesCef` is true on Linux). It is used when
+the build bundles the host and runtime and CEF's sandbox can start
+(`isBundledBrowserRuntimeAvailable`, `linuxCefSandboxUsable`). Otherwise the
+old path remains: the native yt-dlp/mpv player when yt-dlp is installed, and
+a deliberate external browser after that
+(`native-yt-dlp-mpv-or-deliberate-external`). There is no standalone
+official-video presentation. `assertLinuxVideoUsesCef`/
+`assert_linux_video_uses_cef` fail closed if a caller marks the Linux video
+path as not CEF-backed.

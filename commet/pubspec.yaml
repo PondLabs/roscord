@@ -128,6 +128,8 @@ dependencies:
   hotkey_manager: ^0.2.3
   rust_lib_commet:
     path: ../rust/rust_builder
+  browser_surface:
+    path: ../browser_surface
   flutter_rust_bridge: 2.11.1
   flutter_inappwebview: ^6.1.5
   network_info_plus: ^7.0.0

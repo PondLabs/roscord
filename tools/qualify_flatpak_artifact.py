@@ -13,9 +13,10 @@ Bundle layout
 
 The CEF payload lives under ``<bundle>/cef/`` where ``<bundle>`` is the
 Flatpak files root (``build-dir/files`` at build time, ``/app`` at runtime).
-The payload is the flattened ``linux-x64`` runtime: the archive's
-``Release/`` contents are installed into the payload root and ``Resources/``
-is kept as a subdirectory::
+The payload is the staged ``linux-x64`` runtime's ``Release/`` directory.
+CEF on Linux loads ICU data, the ``.pak`` resources and ``locales/`` from the
+directory that holds ``libcef.so``, so staging already moved the archive's
+``Resources/`` in there (``cef_runtime.staged_path``)::
 
     <bundle>/cef/libcef.so
     <bundle>/cef/chrome-sandbox
@@ -25,11 +26,11 @@ is kept as a subdirectory::
     <bundle>/cef/libvulkan.so.1
     <bundle>/cef/v8_context_snapshot.bin
     <bundle>/cef/vk_swiftshader_icd.json
-    <bundle>/cef/Resources/chrome_100_percent.pak
-    <bundle>/cef/Resources/chrome_200_percent.pak
-    <bundle>/cef/Resources/icudtl.dat
-    <bundle>/cef/Resources/resources.pak
-    <bundle>/cef/Resources/locales/en-US.pak
+    <bundle>/cef/chrome_100_percent.pak
+    <bundle>/cef/chrome_200_percent.pak
+    <bundle>/cef/icudtl.dat
+    <bundle>/cef/resources.pak
+    <bundle>/cef/locales/en-US.pak
 
 ``LICENSE.txt`` and ``CREDITS.html`` are archive-root files and are not
 installed into the payload; they are covered through the generated
@@ -216,14 +217,16 @@ def _payload_relative(payload: Path, path: Path) -> str:
 
 
 def _lock_to_payload_name(archive_name: str) -> str:
-    """Map a lock ``Release/...``/``Resources/...`` name to payload layout."""
-    if archive_name.startswith("Release/"):
-        return archive_name[len("Release/") :]
-    return archive_name
+    """Map a lock or staged ``Release/...``/``Resources/...`` name to payload
+    layout."""
+    staged = cef_runtime.staged_path(PLATFORM, archive_name)
+    if staged.startswith("Release/"):
+        return staged[len("Release/") :]
+    return staged
 
 
-def _payload_to_archive_name(payload_name: str) -> str:
-    if "/" not in payload_name and payload_name not in NOTICE_INPUTS:
+def _payload_to_staged_name(payload_name: str) -> str:
+    if payload_name not in NOTICE_INPUTS:
         return f"Release/{payload_name}"
     return payload_name
 
@@ -290,8 +293,8 @@ def check_staged(lock: Mapping[str, Any], payload: Path) -> dict[str, Any]:
         payload_pattern = _lock_to_payload_name(pattern)
         if not any(_match_lock_pattern(name, payload_pattern) for name in files):
             missing.append(pattern)
-    if "Resources/locales/en-US.pak" not in files:
-        missing.append("Resources/locales/en-US.pak(en-US locale)")
+    if "locales/en-US.pak" not in files:
+        missing.append("locales/en-US.pak(en-US locale)")
     if missing:
         raise QualificationError(
             f"required CEF payload inputs are missing: {sorted(missing)}"
@@ -358,14 +361,17 @@ def check_hashes(
         actual = _sha256_file(candidate)
         if actual != digest:
             raise QualificationError(f"payload hash mismatch: {name}")
-    allowlist: list[str] = lock["platforms"][PLATFORM]["runtime"]["allowlist"]
+    allowlist = [
+        cef_runtime.staged_path(PLATFORM, pattern)
+        for pattern in lock["platforms"][PLATFORM]["runtime"]["allowlist"]
+    ]
     unexpected = sorted(
         name
         for name in files
         if name not in expected
         and name not in FIXTURE_ALLOWLIST
         and not any(
-            _match_lock_pattern(_payload_to_archive_name(name), pattern)
+            _match_lock_pattern(_payload_to_staged_name(name), pattern)
             for pattern in allowlist
         )
     )

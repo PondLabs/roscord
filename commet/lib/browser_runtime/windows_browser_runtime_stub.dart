@@ -1,6 +1,9 @@
 import 'browser_runtime.dart';
 import 'runtime_lifecycle.dart';
 
+/// Browser builds never bundle a CEF host.
+bool isBundledBrowserRuntimeAvailable() => false;
+
 /// Which desktop host topology a runtime drives.
 ///
 /// The web stub mirrors the native enum so browser builds keep the public

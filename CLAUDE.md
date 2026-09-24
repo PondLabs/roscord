@@ -6,6 +6,7 @@ Hard fork of Commet (a Flutter Matrix client) by PondLabs. Layout:
 - `rust/rust` the Rust library shipped as `librust_lib_commet` (flutter_rust_bridge, built by cargokit for Linux and Windows only; Android and web do not build it).
 - `rust/audio_decode` soundboard clip decoder (symphonia, C ABI linked into `librust_lib_commet`); loudness is measured in Dart (`soundboard_normalizer.dart`).
 - `rust/audio_dsp` voice DSP crate (noise suppression, input gate, ducking). See `docs/voice-audio-processing.md`.
+- `browser_surface/` Flutter plugin (Linux, Windows) that draws the CEF hosts' shared-memory frames into a texture. The hosts are `commet/windows/cef_host` (C++) and `cef_host` in `rust/rust` plus `commet/linux/cef_engine` (C++) on Linux. See `docs/cef-browser-runtime-hosts.md`.
 - `rust/dj_audio` DJ booth music player (symphonia decode, 48 kHz stereo, C ABI linked into `librust_lib_commet`). See `docs/dj-booth.md`.
 - Away status: the amber dot, and where idle time comes from on each platform. See `docs/away-status.md`.
 - Updating: check GitHub Releases, and on desktop install one over the running build. See `docs/updating.md`.

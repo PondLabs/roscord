@@ -6,6 +6,7 @@
 
 #include "generated_plugin_registrant.h"
 
+#include <browser_surface/browser_surface_plugin_c_api.h>
 #include <connectivity_plus/connectivity_plus_windows_plugin.h>
 #include <dart_ipc/dart_ipc_plugin_c_api.h>
 #include <desktop_drop/desktop_drop_plugin.h>
@@ -29,6 +30,8 @@
 #include <window_to_front/window_to_front_plugin.h>
 
 void RegisterPlugins(flutter::PluginRegistry* registry) {
+  BrowserSurfacePluginCApiRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("BrowserSurfacePluginCApi"));
   ConnectivityPlusWindowsPluginRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("ConnectivityPlusWindowsPlugin"));
   DartIpcPluginCApiRegisterWithRegistrar(

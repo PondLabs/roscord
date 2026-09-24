@@ -40,7 +40,17 @@ creates an embedded windowless or standalone owned CEF browser at the
 caller-declared URL and emits `opened` followed by `event/ready`; `close`
 emits `event/closed` after CEF closes the browser.  Navigation, redirects,
 TLS errors, and popups are mediated by the surface policy; CEF-owned pointers
-and buffers never cross this transport.
+and buffers never cross this transport.  The pipe uses overlapped I/O, so
+events go out while a read is pending.
+
+Embedded surfaces paint into a shared-memory frame ring (a named file
+mapping, `Local\roscord-cef-...`) that the app's `browser_surface` plugin
+draws into a Flutter texture; `frame_ready` names the ring and slot.  Input
+arrives as W3C key codes and Flutter pointer buttons and is translated with
+`browser_surface/native/browser_input.h`.  See
+[`docs/cef-browser-runtime-hosts.md`](../../../docs/cef-browser-runtime-hosts.md),
+which also covers `tools/cef_host_smoke.py`, the smoke test CI runs against
+the built bundle.
 
 The fixture is a development/smoke-test surface.  It does not provide a
 production fallback or a second browser engine; CEF initialization and the

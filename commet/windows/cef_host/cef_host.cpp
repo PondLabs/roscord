@@ -19,6 +19,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -26,7 +27,9 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <random>
 #include <optional>
 #include <set>
 #include <string>
@@ -44,6 +47,7 @@
 #include "include/cef_cookie.h"
 #include "include/cef_callback.h"
 #include "include/cef_dialog_handler.h"
+#include "include/cef_display_handler.h"
 #include "include/cef_download_handler.h"
 #include "include/cef_life_span_handler.h"
 #include "include/cef_permission_handler.h"
@@ -63,6 +67,11 @@
 #include "include/cef_v8.h"
 #include "include/cef_version_info.h"
 #include "include/wrapper/cef_helpers.h"
+
+// Shared with the Linux engine and the app's browser_surface plugin.
+#include "browser_frame_ring.h"
+#include "browser_input.h"
+#include "cef_cursor_names.h"
 
 // Windows widget surfaces: embedded windowless OSR with CPU OnPaint
 // copied into client-owned memory and presented as a Flutter texture, and
@@ -699,40 +708,54 @@ class PipeChannel {
     attributes.nLength = sizeof(attributes);
     attributes.lpSecurityDescriptor = security.get();
 
+    // Overlapped I/O: the transport thread waits in a read while CEF threads
+    // write events.  On a synchronous handle Windows serializes the two, so
+    // every event would wait for the parent's next message.
     pipe_ = CreateNamedPipeW(
-        args_.pipe_name.c_str(), PIPE_ACCESS_DUPLEX,
-        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT, 1,
-        kMaxFrameBytes + 4, kMaxFrameBytes + 4, kConnectTimeoutMs, &attributes);
+        args_.pipe_name.c_str(),
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED |
+            FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT |
+            PIPE_REJECT_REMOTE_CLIENTS,
+        1, kMaxFrameBytes + 4, kMaxFrameBytes + 4, kConnectTimeoutMs,
+        &attributes);
     if (pipe_ == INVALID_HANDLE_VALUE) {
       error = L"cannot create the private named pipe";
       pipe_ = nullptr;
       return false;
     }
-
-    const ULONGLONG deadline = GetTickCount64() + kConnectTimeoutMs;
-    bool connected = false;
-    while (GetTickCount64() < deadline) {
-      const BOOL result = ConnectNamedPipe(pipe_, nullptr);
-      const DWORD connect_error = result ? ERROR_SUCCESS : GetLastError();
-      if (result || connect_error == ERROR_PIPE_CONNECTED) {
-        connected = true;
-        break;
-      }
-      if (connect_error != ERROR_PIPE_LISTENING &&
-          connect_error != ERROR_NO_DATA) {
-        break;
-      }
-      Sleep(20);
-    }
-    if (!connected) {
-      error = L"parent did not connect to the private named pipe";
+    read_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    write_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (read_event_ == nullptr || write_event_ == nullptr) {
+      error = L"cannot create named-pipe events";
       Close();
       return false;
     }
 
-    DWORD pipe_mode = PIPE_READMODE_BYTE | PIPE_WAIT;
-    if (!SetNamedPipeHandleState(pipe_, &pipe_mode, nullptr, nullptr)) {
-      error = L"cannot switch the private named pipe to blocking mode";
+    bool connected = false;
+    OVERLAPPED connect_overlapped{};
+    connect_overlapped.hEvent = read_event_;
+    ResetEvent(read_event_);
+    if (ConnectNamedPipe(pipe_, &connect_overlapped)) {
+      connected = true;
+    } else {
+      const DWORD connect_error = GetLastError();
+      if (connect_error == ERROR_PIPE_CONNECTED) {
+        connected = true;
+      } else if (connect_error == ERROR_IO_PENDING) {
+        DWORD ignored = 0;
+        if (WaitForSingleObject(read_event_, kConnectTimeoutMs) ==
+            WAIT_OBJECT_0) {
+          connected = GetOverlappedResult(pipe_, &connect_overlapped, &ignored,
+                                          FALSE) != FALSE;
+        } else {
+          CancelIoEx(pipe_, &connect_overlapped);
+          GetOverlappedResult(pipe_, &connect_overlapped, &ignored, TRUE);
+        }
+      }
+    }
+    if (!connected) {
+      error = L"parent did not connect to the private named pipe";
       Close();
       return false;
     }
@@ -782,6 +805,8 @@ class PipeChannel {
   void Close() {
     std::lock_guard lock(write_mutex_);
     if (pipe_ != nullptr && pipe_ != INVALID_HANDLE_VALUE) {
+      // Wakes a transport thread still waiting in a read.
+      CancelIoEx(pipe_, nullptr);
       FlushFileBuffers(pipe_);
       DisconnectNamedPipe(pipe_);
       CloseHandle(pipe_);
@@ -789,17 +814,36 @@ class PipeChannel {
     }
   }
 
-  ~PipeChannel() { Close(); }
+  ~PipeChannel() {
+    Close();
+    if (read_event_ != nullptr) CloseHandle(read_event_);
+    if (write_event_ != nullptr) CloseHandle(write_event_);
+  }
 
  private:
+  // One overlapped read or write, waited for on this thread.  Reads and
+  // writes use separate events, so they never wait for each other.
+  bool Transfer(bool reading, void* buffer, DWORD size, DWORD& transferred) {
+    HANDLE pipe = pipe_;
+    if (pipe == nullptr) return false;
+    OVERLAPPED overlapped{};
+    overlapped.hEvent = reading ? read_event_ : write_event_;
+    ResetEvent(overlapped.hEvent);
+    const BOOL started =
+        reading ? ReadFile(pipe, buffer, size, nullptr, &overlapped)
+                : WriteFile(pipe, buffer, size, nullptr, &overlapped);
+    if (!started && GetLastError() != ERROR_IO_PENDING) return false;
+    transferred = 0;
+    return GetOverlappedResult(pipe, &overlapped, &transferred, TRUE) !=
+               FALSE &&
+           transferred > 0;
+  }
+
   bool ReadExact(void* destination, size_t size) {
     auto* bytes = static_cast<std::uint8_t*>(destination);
     while (size > 0) {
       DWORD read = 0;
-      if (pipe_ == nullptr || !ReadFile(pipe_, bytes,
-                                        static_cast<DWORD>(size), &read,
-                                        nullptr) ||
-          read == 0) {
+      if (!Transfer(true, bytes, static_cast<DWORD>(size), read)) {
         return false;
       }
       bytes += read;
@@ -809,13 +853,11 @@ class PipeChannel {
   }
 
   bool WriteExact(const void* source, size_t size) {
-    const auto* bytes = static_cast<const std::uint8_t*>(source);
+    auto* bytes = const_cast<std::uint8_t*>(
+        static_cast<const std::uint8_t*>(source));
     while (size > 0) {
       DWORD written = 0;
-      if (pipe_ == nullptr ||
-          !WriteFile(pipe_, bytes, static_cast<DWORD>(size), &written,
-                     nullptr) ||
-          written == 0) {
+      if (!Transfer(false, bytes, static_cast<DWORD>(size), written)) {
         return false;
       }
       bytes += written;
@@ -868,6 +910,8 @@ class PipeChannel {
 
   HostArgs args_;
   HANDLE pipe_ = nullptr;
+  HANDLE read_event_ = nullptr;
+  HANDLE write_event_ = nullptr;
   std::mutex write_mutex_;
 };
 
@@ -988,6 +1032,19 @@ class HostApp final : public CefApp,
 
   CefRefPtr<CefRenderProcessHandler> GetRenderProcessHandler() override {
     return this;
+  }
+
+  void OnBeforeCommandLineProcessing(
+      const CefString& process_type,
+      CefRefPtr<CefCommandLine> command_line) override {
+    if (!process_type.empty()) return;
+    // Playback starts from an explicit click in the app, which never
+    // reaches the page as a user gesture.
+    command_line->AppendSwitchWithValue("autoplay-policy",
+                                        "no-user-gesture-required");
+    // Chrome's first-run flow has no place in an embedded host.
+    command_line->AppendSwitch("no-first-run");
+    command_line->AppendSwitch("no-default-browser-check");
   }
 
   void OnRegisterCustomSchemes(CefRawPtr<CefSchemeRegistrar> registrar) override {
@@ -1815,6 +1872,96 @@ void DestroyStandaloneWindow(HWND hwnd) {
   ::DestroyWindow(hwnd);
 }
 
+// One embedded surface's shared-memory frame ring: a named file mapping the
+// app's browser_surface plugin maps read-only (browser_frame_ring.h).  Every
+// OnPaint is copied in synchronously, converted to RGBA, and published by
+// slot; each slot's seqlock lets the reader drop a frame this host has
+// overwritten meanwhile, so CEF's buffer never has to be retained.  Only the
+// CEF UI thread publishes.
+class SharedFrameRing {
+ public:
+  SharedFrameRing() = default;
+  SharedFrameRing(const SharedFrameRing&) = delete;
+  SharedFrameRing& operator=(const SharedFrameRing&) = delete;
+  ~SharedFrameRing() { Release(); }
+
+  bool Publish(const std::string& frame_namespace, uint64_t surface_id,
+               const void* bgra, int width, int height, uint32_t& slot,
+               uint64_t& sequence) {
+    if (width <= 0 || height <= 0 ||
+        static_cast<uint32_t>(width) > browser_surface::kFrameRingMaxDimension ||
+        static_cast<uint32_t>(height) > browser_surface::kFrameRingMaxDimension) {
+      return false;
+    }
+    const uint64_t needed = browser_surface::FrameRingSlotBytesFor(
+        static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+    if (view_ == nullptr || needed > slot_bytes_) {
+      if (!Allocate(frame_namespace, surface_id, needed)) return false;
+    }
+    slot = next_slot_;
+    next_slot_ = (next_slot_ + 1) % browser_surface::kFrameRingSlots;
+    sequence = next_sequence_++;
+    return browser_surface::FrameRingWriteBgra(
+        view_, slot, sequence, bgra, static_cast<uint32_t>(width),
+        static_cast<uint32_t>(height));
+  }
+
+  const std::string& name() const { return name_; }
+
+  void Release() {
+    if (view_ != nullptr) ::UnmapViewOfFile(view_);
+    if (mapping_ != nullptr) ::CloseHandle(mapping_);
+    view_ = nullptr;
+    mapping_ = nullptr;
+    slot_bytes_ = 0;
+    name_.clear();
+  }
+
+ private:
+  // A larger frame gets a new, larger mapping under a new name; the reader
+  // follows the name in each frame_ready.
+  bool Allocate(const std::string& frame_namespace, uint64_t surface_id,
+                uint64_t slot_bytes) {
+    Release();
+    ++generation_;
+    const std::string name = "Local\\roscord-cef-" + frame_namespace + "-" +
+                             std::to_string(surface_id) + "-" +
+                             std::to_string(generation_);
+    const std::wstring wide_name(name.begin(), name.end());  // ASCII only
+    const uint64_t bytes = browser_surface::FrameRingRegionBytes(slot_bytes);
+    HANDLE mapping = ::CreateFileMappingW(
+        INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
+        static_cast<DWORD>(bytes >> 32),
+        static_cast<DWORD>(bytes & 0xffffffffu), wide_name.c_str());
+    if (mapping == nullptr) return false;
+    if (::GetLastError() == ERROR_ALREADY_EXISTS) {
+      ::CloseHandle(mapping);
+      return false;
+    }
+    void* view = ::MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0,
+                                 static_cast<SIZE_T>(bytes));
+    if (view == nullptr) {
+      ::CloseHandle(mapping);
+      return false;
+    }
+    browser_surface::FrameRingInitialize(view, slot_bytes);
+    mapping_ = mapping;
+    view_ = view;
+    slot_bytes_ = slot_bytes;
+    name_ = name;
+    next_slot_ = 0;
+    return true;
+  }
+
+  HANDLE mapping_ = nullptr;
+  void* view_ = nullptr;
+  uint64_t slot_bytes_ = 0;
+  uint32_t generation_ = 0;
+  uint32_t next_slot_ = 0;
+  uint64_t next_sequence_ = 1;
+  std::string name_;
+};
+
 struct SurfaceState {
   uint64_t id = 0;
   std::string profile_key;
@@ -1844,18 +1991,20 @@ struct SurfaceState {
   int view_width = 1024;
   int view_height = 768;
   double device_scale_factor = 1.0;
-  // Client-owned frame ring.  OnPaint copies CEF's buffer into frame_pixels
-  // (never retaining the CEF pointer) and publishes a frame_ready event that
-  // references only slot/size/stride/format/sequence.  The newest frame
-  // coalesces older pending frames on the Dart side; release_frame only
-  // advances slot reuse accounting and never exposes a CEF handle.
-  static constexpr int kFrameRingSlots = 3;
-  int frame_slot = 0;
-  uint64_t next_frame_sequence = 1;
-  int frame_width = 0;
-  int frame_height = 0;
-  int frame_stride = 0;
-  std::vector<uint8_t> frame_pixels;
+  // Shared-memory frame ring.  OnPaint copies CEF's buffer into the next
+  // slot (the CEF pointer must never be retained) and publishes a
+  // frame_ready event that references only ring/slot/size/stride/format/
+  // sequence.  The newest frame coalesces older pending frames on the Dart
+  // side; release_frame is accounting only and never exposes a CEF handle.
+  std::shared_ptr<SharedFrameRing> frame_ring;
+  // Pointer state: buttons held, and the last click for click counting.
+  uint32_t pressed_buttons = 0;
+  int last_click_button = -1;
+  int last_click_count = 0;
+  std::chrono::steady_clock::time_point last_click_time{};
+  int last_click_x = 0;
+  int last_click_y = 0;
+  std::string last_cursor;
   struct PendingPopup {
     int popup_id = 0;
     std::string url;
@@ -1891,6 +2040,7 @@ class BrowserClient final : public CefClient,
                             public CefRequestHandler,
                             public CefDownloadHandler,
                             public CefDialogHandler,
+                            public CefDisplayHandler,
                             public CefPermissionHandler {
  public:
   BrowserClient(HostController* controller, uint64_t surface_id)
@@ -1901,9 +2051,17 @@ class BrowserClient final : public CefClient,
   CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
   CefRefPtr<CefDialogHandler> GetDialogHandler() override { return this; }
+  CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
   CefRefPtr<CefPermissionHandler> GetPermissionHandler() override {
     return this;
   }
+
+  // Embedded surfaces have no window: the page cursor goes to the app and
+  // native tooltips are suppressed.  Standalone windows keep CEF's own.
+  bool OnCursorChange(CefRefPtr<CefBrowser> browser, CefCursorHandle cursor,
+                      cef_cursor_type_t type,
+                      const CefCursorInfo& custom_cursor_info) override;
+  bool OnTooltip(CefRefPtr<CefBrowser> browser, CefString& text) override;
 
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override;
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override;
@@ -2011,7 +2169,10 @@ class BrowserClient final : public CefClient,
 class HostController {
  public:
   HostController(const HostArgs& args, PipeChannel& pipe)
-      : args_(args), pipe_(pipe), profiles_(args.profile_root) {}
+      : args_(args),
+        pipe_(pipe),
+        profiles_(args.profile_root),
+        frame_namespace_(NewFrameNamespace()) {}
   HostController(const HostController&) = delete;
   HostController& operator=(const HostController&) = delete;
 
@@ -2079,6 +2240,10 @@ class HostController {
   void ApplyFocusOnUi(uint64_t surface_id, bool focused);
   void ApplyInputOnUi(uint64_t surface_id,
                       CefRefPtr<CefDictionaryValue> input);
+  // Embedded surfaces report the page cursor to the app; standalone windows
+  // keep CEF's native cursor.  Returns true when the change was handled.
+  bool OnCursorChanged(uint64_t surface_id, std::string_view cursor);
+  bool IsEmbedded(uint64_t surface_id);
   bool ClearData(std::string_view profile_key, std::string& error) {
     std::lock_guard lock(state_mutex_);
     if (std::any_of(surfaces_.begin(), surfaces_.end(),
@@ -2138,8 +2303,9 @@ class HostController {
                           std::string_view operation);
   void SendScriptMessage(uint64_t surface_id,
                          CefRefPtr<CefDictionaryValue> envelope);
-  void SendFrameReady(uint64_t surface_id, int slot, int width, int height,
-                      int stride, uint64_t frame_sequence);
+  void SendFrameReady(uint64_t surface_id, const std::string& buffer,
+                      int slot, int width, int height, int stride,
+                      uint64_t frame_sequence);
   void SendWindowChanged(uint64_t surface_id, bool resized, int width,
                          int height, double device_scale_factor, bool focused);
   void DestroyStandaloneWindowOnUi(uint64_t surface_id);
@@ -2161,6 +2327,18 @@ class HostController {
   std::atomic<bool> stopping_ = false;
   std::condition_variable closed_condition_;
   bool shutdown_timed_out_ = false;
+  // Shared-memory ring names are Local\\roscord-cef-<namespace>-...; the
+  // namespace is random so names reveal nothing about the pipe nonce.
+  const std::string frame_namespace_;
+
+  static std::string NewFrameNamespace() {
+    std::random_device random;
+    char hex[17] = {};
+    for (int index = 0; index < 16; index += 8) {
+      std::snprintf(hex + index, 9, "%08x", random());
+    }
+    return std::to_string(::GetCurrentProcessId()) + "-" + hex;
+  }
 };
 
 class CreateBrowserTask final : public CefTask {
@@ -2448,8 +2626,9 @@ void HostController::SendClosed(uint64_t surface_id, uint64_t sequence) {
   SendMessage(wire);
 }
 
-void HostController::SendFrameReady(uint64_t surface_id, int slot, int width,
-                                    int height, int stride,
+void HostController::SendFrameReady(uint64_t surface_id,
+                                    const std::string& buffer, int slot,
+                                    int width, int height, int stride,
                                     uint64_t frame_sequence) {
   uint64_t sequence = 0;
   {
@@ -2466,8 +2645,10 @@ void HostController::SendFrameReady(uint64_t surface_id, int slot, int width,
   frame->SetInt("width", width);
   frame->SetInt("height", height);
   frame->SetInt("stride", stride);
-  frame->SetString("format", "bgra_premultiplied");
+  // The ring converts CEF's BGRA into the RGBA Flutter textures upload.
+  frame->SetString("format", "rgba_premultiplied");
   frame->SetInt("sequence", static_cast<int>(frame_sequence));
+  frame->SetString("buffer", buffer);
 
   auto event_payload = NewDictionary();
   event_payload->SetInt("surface_id", static_cast<int>(surface_id));
@@ -2543,36 +2724,30 @@ void HostController::OnPaintFrame(uint64_t surface_id, const void* buffer,
                                   int width, int height) {
   CEF_REQUIRE_UI_THREAD();
   if (buffer == nullptr || width <= 0 || height <= 0) return;
-  // Clamp absurd dimensions before allocating client-owned memory.
+  // Clamp absurd dimensions before touching shared memory.
   if (width > 7680 || height > 4320) return;
-  const int stride = width * 4;
-  const size_t byte_count = static_cast<size_t>(stride) *
-                            static_cast<size_t>(height);
-  // 1280x720 BGRA is ~3.7 MiB; refuse frames that cannot be framed safely.
-  if (byte_count == 0 || byte_count > 128u * 1024u * 1024u) return;
-  int slot = 0;
-  uint64_t frame_sequence = 0;
+  std::shared_ptr<SharedFrameRing> ring;
   {
     std::lock_guard lock(state_mutex_);
     const auto iterator = surfaces_.find(surface_id);
     if (iterator == surfaces_.end()) return;
     if (iterator->second.presentation != "embedded") return;
-    SurfaceState& surface = iterator->second;
-    // Copy into client-owned memory synchronously; the CEF buffer is only
-    // valid for this callback.  The copy is the only pixel data the Dart
-    // texture presenter may reference via the shared frame ring.
-    surface.frame_pixels.assign(static_cast<const uint8_t*>(buffer),
-                                static_cast<const uint8_t*>(buffer) +
-                                    byte_count);
-    surface.frame_width = width;
-    surface.frame_height = height;
-    surface.frame_stride = stride;
-    surface.frame_slot =
-        (surface.frame_slot + 1) % SurfaceState::kFrameRingSlots;
-    slot = surface.frame_slot;
-    frame_sequence = surface.next_frame_sequence++;
+    if (!iterator->second.frame_ring) {
+      iterator->second.frame_ring = std::make_shared<SharedFrameRing>();
+    }
+    ring = iterator->second.frame_ring;
   }
-  SendFrameReady(surface_id, slot, width, height, stride, frame_sequence);
+  // The copy is synchronous: CEF's buffer is only valid for this callback
+  // and must never be retained.  The shared ring is the only pixel data the
+  // Flutter texture presenter reads.
+  uint32_t slot = 0;
+  uint64_t frame_sequence = 0;
+  if (!ring->Publish(frame_namespace_, surface_id, buffer, width, height,
+                     slot, frame_sequence)) {
+    return;
+  }
+  SendFrameReady(surface_id, ring->name(), static_cast<int>(slot), width,
+                 height, width * 4, frame_sequence);
 }
 
 bool HostController::GetViewSize(uint64_t surface_id, int& width, int& height,
@@ -2690,51 +2865,134 @@ void HostController::ApplyInputOnUi(
     const std::string kind = payload->GetType("kind") == VTYPE_STRING
                                  ? payload->GetString("kind").ToString()
                                  : "move";
-    const int x = payload->GetType("x") == VTYPE_DOUBLE
-                      ? static_cast<int>(payload->GetDouble("x"))
-                      : payload->GetInt("x");
-    const int y = payload->GetType("y") == VTYPE_DOUBLE
-                      ? static_cast<int>(payload->GetDouble("y"))
-                      : payload->GetInt("y");
+    const auto number = [&payload](const char* name) {
+      switch (payload->GetType(name)) {
+        case VTYPE_DOUBLE:
+          return payload->GetDouble(name);
+        case VTYPE_INT:
+          return static_cast<double>(payload->GetInt(name));
+        default:
+          return 0.0;
+      }
+    };
+    const auto flags = [&payload](const char* name) {
+      return payload->GetType(name) == VTYPE_INT
+                 ? static_cast<uint32_t>(payload->GetInt(name))
+                 : 0u;
+    };
+    const uint32_t buttons = flags("buttons");
+    const uint32_t modifiers = flags("modifiers");
     CefMouseEvent event;
-    event.x = x;
-    event.y = y;
-    event.modifiers = 0;
+    event.x = static_cast<int>(std::lround(number("x")));
+    event.y = static_cast<int>(std::lround(number("y")));
+    // Resolve button state and click count under the lock, then call CEF
+    // without it.
+    int button = MBT_LEFT;
+    int clicks = 1;
+    {
+      std::lock_guard lock(state_mutex_);
+      const auto iterator = surfaces_.find(surface_id);
+      if (iterator == surfaces_.end()) return;
+      SurfaceState& surface = iterator->second;
+      if (kind == "down") {
+        uint32_t changed = buttons & ~surface.pressed_buttons;
+        if (changed == 0) {
+          changed =
+              buttons != 0 ? buttons : browser_surface::kWireButtonPrimary;
+        }
+        changed &= ~(changed - 1);  // the lowest button that went down
+        surface.pressed_buttons |= changed;
+        button = browser_surface::CefMouseButtonFor(changed);
+        const auto now = std::chrono::steady_clock::now();
+        if (button == surface.last_click_button &&
+            now - surface.last_click_time < std::chrono::milliseconds(500) &&
+            std::abs(event.x - surface.last_click_x) <= 4 &&
+            std::abs(event.y - surface.last_click_y) <= 4) {
+          surface.last_click_count = std::min(surface.last_click_count + 1, 3);
+        } else {
+          surface.last_click_count = 1;
+        }
+        surface.last_click_button = button;
+        surface.last_click_time = now;
+        surface.last_click_x = event.x;
+        surface.last_click_y = event.y;
+        clicks = surface.last_click_count;
+      } else if (kind == "up") {
+        uint32_t released = buttons;
+        if (released == 0) {
+          released = surface.pressed_buttons != 0
+                         ? surface.pressed_buttons
+                         : browser_surface::kWireButtonPrimary;
+        }
+        released &= ~(released - 1);
+        surface.pressed_buttons &= ~released;
+        button = browser_surface::CefMouseButtonFor(released);
+        clicks = surface.last_click_count > 0 ? surface.last_click_count : 1;
+      } else if (kind == "move" || kind == "enter") {
+        // A move carries the buttons held right now.
+        surface.pressed_buttons = buttons;
+      }
+      event.modifiers =
+          browser_surface::CefFlagsFor(modifiers, surface.pressed_buttons);
+    }
     if (kind == "down" || kind == "up") {
-      const cef_mouse_button_type_t button = MBT_LEFT;
-      host->SendMouseClickEvent(event, button, kind == "up", 1);
+      host->SendMouseClickEvent(event,
+                                static_cast<cef_mouse_button_type_t>(button),
+                                kind == "up", clicks);
     } else if (kind == "wheel") {
-      const int delta_x = payload->GetType("delta_x") == VTYPE_DOUBLE
-                              ? static_cast<int>(payload->GetDouble("delta_x"))
-                              : 0;
-      const int delta_y = payload->GetType("delta_y") == VTYPE_DOUBLE
-                              ? static_cast<int>(payload->GetDouble("delta_y"))
-                              : 0;
-      host->SendMouseWheelEvent(event, delta_x, delta_y);
+      // Flutter scroll deltas grow downwards; CEF wheel deltas grow upwards.
+      host->SendMouseWheelEvent(
+          event, static_cast<int>(std::lround(-number("delta_x"))),
+          static_cast<int>(std::lround(-number("delta_y"))));
     } else {
-      // move, enter, and leave all route through mouse-move; CEF tracks
-      // enter/leave from the coordinates and focus state.
+      // move and enter are mouse moves; leave tells CEF the pointer left.
       host->SendMouseMoveEvent(event, kind == "leave");
     }
   } else if (input_type == "keyboard") {
-    const std::string key =
-        payload->GetType("key") == VTYPE_STRING
-            ? payload->GetString("key").ToString()
-            : std::string();
-    const bool pressed =
-        payload->GetType("pressed") == VTYPE_BOOL
-            ? payload->GetBool("pressed")
-            : true;
+    const auto text = [&payload](const char* name) {
+      return payload->GetType(name) == VTYPE_STRING
+                 ? payload->GetString(name).ToString()
+                 : std::string();
+    };
+    const std::string key = text("key");
+    const std::string code = text("code");
+    const bool pressed = payload->GetType("pressed") == VTYPE_BOOL
+                             ? payload->GetBool("pressed")
+                             : true;
+    const uint32_t modifiers =
+        payload->GetType("modifiers") == VTYPE_INT
+            ? static_cast<uint32_t>(payload->GetInt("modifiers"))
+            : 0u;
+    browser_surface::KeyCodes codes{};
+    const bool known = browser_surface::KeyCodesForCode(code, &codes);
     CefKeyEvent event;
-    event.modifiers = 0;
-    event.is_system_key = false;
+    event.windows_key_code =
+        known ? codes.windows_key_code
+              : browser_surface::WindowsKeyCodeForKey(key);
+    // native_key_code is the WM_KEYDOWN/WM_KEYUP lParam: repeat count, scan
+    // code, extended-key flag and, for a release, the previous-state and
+    // transition bits.
+    const int scan = known ? codes.windows_scan : 0;
+    uint32_t lparam = 1u | (static_cast<uint32_t>(scan & 0xff) << 16);
+    if ((scan & 0xff00) == 0xe000) lparam |= 1u << 24;
+    if (!pressed) lparam |= (1u << 30) | (1u << 31);
+    event.native_key_code = static_cast<int>(lparam);
+    event.modifiers = browser_surface::CefFlagsFor(modifiers, 0) |
+                      (known ? codes.location_flags : 0u);
+    event.is_system_key =
+        (modifiers & browser_surface::kWireModifierAlt) != 0 &&
+        (modifiers & browser_surface::kWireModifierControl) == 0;
+    const char16_t typed =
+        browser_surface::TypedCharacterForKey(key, modifiers);
+    event.character = typed;
+    event.unmodified_character = typed;
     if (pressed) {
       event.type = KEYEVENT_RAWKEYDOWN;
       host->SendKeyEvent(event);
-      if (!key.empty() && key.size() == 1) {
+      if (typed != 0) {
+        // WM_CHAR carries the character itself as the key code.
         event.type = KEYEVENT_CHAR;
-        event.character = static_cast<char16_t>(key[0]);
-        event.unmodified_character = static_cast<char16_t>(key[0]);
+        event.windows_key_code = typed;
         host->SendKeyEvent(event);
       }
     } else {
@@ -2765,6 +3023,41 @@ void HostController::ApplyInputOnUi(
       host->ImeFinishComposingText(false);
     }
   }
+}
+
+bool HostController::IsEmbedded(uint64_t surface_id) {
+  std::lock_guard lock(state_mutex_);
+  const auto iterator = surfaces_.find(surface_id);
+  return iterator != surfaces_.end() &&
+         iterator->second.presentation == "embedded";
+}
+
+bool HostController::OnCursorChanged(uint64_t surface_id,
+                                     std::string_view cursor) {
+  uint64_t sequence = 0;
+  {
+    std::lock_guard lock(state_mutex_);
+    const auto iterator = surfaces_.find(surface_id);
+    if (iterator == surfaces_.end()) return false;
+    if (iterator->second.presentation != "embedded") return false;
+    if (iterator->second.last_cursor == cursor) return true;
+    iterator->second.last_cursor = std::string(cursor);
+    sequence = iterator->second.next_event_sequence++;
+  }
+  auto event_payload = NewDictionary();
+  event_payload->SetInt("surface_id", static_cast<int>(surface_id));
+  event_payload->SetInt("sequence", static_cast<int>(sequence));
+  event_payload->SetString("cursor", std::string(cursor));
+  auto event = NewDictionary();
+  event->SetString("type", "cursor_changed");
+  event->SetDictionary("payload", event_payload);
+  auto payload = NewDictionary();
+  payload->SetDictionary("event", event);
+  auto wire = NewDictionary();
+  wire->SetString("type", "event");
+  wire->SetDictionary("payload", payload);
+  SendMessage(wire);
+  return true;
 }
 
 void HostController::SendNavigation(uint64_t surface_id, std::string_view url,
@@ -4626,6 +4919,25 @@ bool BrowserClient::GetScreenInfo(CefRefPtr<CefBrowser> browser,
   return true;
 }
 
+bool BrowserClient::OnCursorChange(CefRefPtr<CefBrowser> browser,
+                                   CefCursorHandle cursor,
+                                   cef_cursor_type_t type,
+                                   const CefCursorInfo& custom_cursor_info) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)browser;
+  (void)cursor;
+  (void)custom_cursor_info;
+  return controller_->OnCursorChanged(surface_id_,
+                                      browser_surface::CssCursorName(type));
+}
+
+bool BrowserClient::OnTooltip(CefRefPtr<CefBrowser> browser, CefString& text) {
+  CEF_REQUIRE_UI_THREAD();
+  (void)browser;
+  (void)text;
+  return controller_->IsEmbedded(surface_id_);
+}
+
 void BrowserClient::OnPaint(CefRefPtr<CefBrowser> browser,
                             PaintElementType type,
                             const RectList& dirty_rects,
@@ -4672,6 +4984,9 @@ int RunHost(HINSTANCE instance, void* sandbox_info) {
   settings.multi_threaded_message_loop = true;
   settings.windowless_rendering_enabled = true;
   settings.log_severity = LOGSEVERITY_DISABLE;
+  // CEF requires every request context's cache_path to sit below this root,
+  // and each persistent account profile is a directory of the profile root.
+  CefString(&settings.root_cache_path) = args->profile_root.wstring();
 
   if (args->software_rendering) {
     // Forced software rendering keeps CPU rendering authoritative when GPU

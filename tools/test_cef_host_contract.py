@@ -306,8 +306,12 @@ class CefHostContractTests(unittest.TestCase):
         self.assertIn("EqualSid", SOURCE)
         self.assertIn("kPipePrefix", SOURCE)
         self.assertIn("kConnectTimeoutMs", SOURCE)
-        self.assertIn("PIPE_NOWAIT", SOURCE)
-        self.assertIn("SetNamedPipeHandleState", SOURCE)
+        # Overlapped I/O, so CEF threads writing events never wait on the
+        # transport thread's pending read.
+        self.assertIn("FILE_FLAG_OVERLAPPED", SOURCE)
+        self.assertIn("FILE_FLAG_FIRST_PIPE_INSTANCE", SOURCE)
+        self.assertIn("PIPE_REJECT_REMOTE_CLIENTS", SOURCE)
+        self.assertIn("GetOverlappedResult", SOURCE)
         self.assertIn("kMaxFrameBytes = 1024u * 1024u", SOURCE)
         self.assertIn("nonce_mismatch", SOURCE)
         self.assertIn("unsupported_version", SOURCE)
@@ -952,11 +956,12 @@ class CefHostContractTests(unittest.TestCase):
         for token in (
             "OnPaintFrame",
             "SendFrameReady",
-            "frame_pixels.assign",
+            "SharedFrameRing",
+            "FrameRingWriteBgra",
+            "CreateFileMappingW",
             "frame_ready",
             "kFrameRingSlots",
-            "next_frame_sequence",
-            "bgra_premultiplied",
+            "rgba_premultiplied",
             "PET_VIEW",
             "ClientFrameRing",
             "EmbeddedBrowserSurface",
@@ -964,6 +969,7 @@ class CefHostContractTests(unittest.TestCase):
             "Texture(textureId",
             "presentLatestAsTexture",
             "release_frame",
+            "BrowserSurfaceTexture",
         ):
             self.assertIn(
                 token, SOURCE + EMBEDDED_DART + BROWSER_RUNTIME_DART,
@@ -1893,24 +1899,26 @@ class CefHostContractTests(unittest.TestCase):
             self.assertIn("cef-osr-cpu", lowered)
             self.assertIn("bundled", lowered)
 
-    def test_linux_official_video_stays_native_external(self) -> None:
+    def test_linux_official_video_uses_the_bundled_cef_host(self) -> None:
         for token in (
             "linuxOfficialVideoPath",
             "linuxOfficialVideoUsesCef",
-            "assertLinuxVideoPreserved",
+            "assertLinuxVideoUsesCef",
+            "cef-official-embed",
             "native-yt-dlp-mpv-or-deliberate-external",
         ):
             self.assertIn(token, LINUX_ARTIFACT_DART)
         for token in (
             "LINUX_OFFICIAL_VIDEO_PATH",
             "linux_official_video_uses_cef",
-            "assert_linux_video_preserved",
+            "assert_linux_video_uses_cef",
+            "cef-official-embed",
             "native-yt-dlp-mpv-or-deliberate-external",
         ):
             self.assertIn(token, LINUX_ARTIFACT_RUST)
         self.assertIn("mediaEmbedUsesCef", LINUX_ARTIFACT_TEST)
-        self.assertIn("isWindows", MEDIA_ADAPTER)
-        self.assertNotIn("isLinux", MEDIA_ADAPTER + LINUX_ARTIFACT_DART)
+        # Both desktop hosts play official embeds through CEF.
+        self.assertIn("isWindows || isLinux", MEDIA_ADAPTER)
 
     def test_flatpak_artifact_staging_covers_the_locked_payload(self) -> None:
         # The Flatpak files root carries the flattened linux-x64 runtime

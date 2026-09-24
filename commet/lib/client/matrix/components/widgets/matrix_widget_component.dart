@@ -24,7 +24,6 @@ import 'package:commet/utils/error_utils.dart';
 import 'package:commet/utils/image_or_icon.dart';
 import 'package:commet/utils/links/link_utils.dart';
 import 'package:dart_ipc/dart_ipc.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:matrix/matrix.dart' show StrippedStateEvent;
@@ -584,7 +583,6 @@ class _CefMatrixWidgetState extends State<_CefMatrixWidget> {
   StreamSubscription<void>? _closedSubscription;
   Object? _error;
   int _revision = 0;
-  Size? _lastSize;
   final FocusNode _focusNode = FocusNode(debugLabel: 'CefMatrixWidget');
 
   BrowserRuntime? get _runtime => browserRuntime;
@@ -650,7 +648,6 @@ class _CefMatrixWidgetState extends State<_CefMatrixWidget> {
     setState(() {
       _error = null;
       _revision += 1;
-      _lastSize = null;
     });
     await _eventSubscription?.cancel();
     _eventSubscription = null;
@@ -697,48 +694,6 @@ class _CefMatrixWidgetState extends State<_CefMatrixWidget> {
     unawaited(_adapter.dispose());
     _focusNode.dispose();
     super.dispose();
-  }
-
-  void _forwardResize(Size size) {
-    final surface = _embeddedSurface;
-    if (surface == null || !surface.isReady || _error != null) return;
-    if (_lastSize == size) return;
-    _lastSize = size;
-    final dpr = MediaQuery.devicePixelRatioOf(context);
-    unawaited(
-      surface
-          .resize(size.width.round(), size.height.round(), dpr)
-          .then<void>((_) {}, onError: (Object _, StackTrace __) {}),
-    );
-  }
-
-  Future<void> _forwardPointer(Future<void> Function() send) async {
-    try {
-      await send();
-    } catch (_) {
-      // Input after close is a cancellation, not an error.
-    }
-  }
-
-  KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
-    final surface = _embeddedSurface;
-    if (surface == null || _error != null) return KeyEventResult.ignored;
-    if (event is! KeyDownEvent && event is! KeyUpEvent) {
-      return KeyEventResult.ignored;
-    }
-    // Ordered keyboard input for the embedded page. IME composition stays a
-    // follow-up; the surface seam already carries it once a method channel
-    // exists.
-    unawaited(
-      _forwardPointer(
-        () => surface.key(
-          event.logicalKey.keyLabel,
-          event.logicalKey.debugName ?? '',
-          pressed: event is KeyDownEvent,
-        ),
-      ),
-    );
-    return KeyEventResult.handled;
   }
 
   @override
@@ -798,85 +753,14 @@ class _CefMatrixWidgetState extends State<_CefMatrixWidget> {
       return const Center(child: CircularProgressIndicator());
     }
 
-    return Focus(
+    // The view reports its size, forwards pointer, wheel and keyboard input
+    // in order (so the widget keeps its click and scroll contract), and
+    // shows the page's cursor.
+    return EmbeddedBrowserView(
+      key: ValueKey(_revision),
+      surface: surface,
       focusNode: _focusNode,
       autofocus: true,
-      onKeyEvent: _onKeyEvent,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          if (constraints.maxWidth > 0 && constraints.maxHeight > 0) {
-            _forwardResize(
-              Size(constraints.maxWidth, constraints.maxHeight),
-            );
-          }
-          // Pointer, wheel, and focus stay ordered through the surface so
-          // the widget keeps its click and scroll contract.
-          return Listener(
-            behavior: HitTestBehavior.opaque,
-            onPointerDown: (event) {
-              final current = _embeddedSurface;
-              if (current == null) return;
-              unawaited(_forwardPointer(() => current.setFocus(true)));
-              unawaited(
-                _forwardPointer(
-                  () => current.pointer(
-                    PointerKind.down,
-                    event.localPosition.dx,
-                    event.localPosition.dy,
-                    buttons: event.buttons,
-                  ),
-                ),
-              );
-            },
-            onPointerMove: (event) {
-              final current = _embeddedSurface;
-              if (current == null) return;
-              unawaited(
-                _forwardPointer(
-                  () => current.pointer(
-                    PointerKind.move,
-                    event.localPosition.dx,
-                    event.localPosition.dy,
-                    buttons: event.buttons,
-                  ),
-                ),
-              );
-            },
-            onPointerUp: (event) {
-              final current = _embeddedSurface;
-              if (current == null) return;
-              unawaited(
-                _forwardPointer(
-                  () => current.pointer(
-                    PointerKind.up,
-                    event.localPosition.dx,
-                    event.localPosition.dy,
-                  ),
-                ),
-              );
-            },
-            onPointerSignal: (signal) {
-              if (signal is! PointerScrollEvent) return;
-              final current = _embeddedSurface;
-              if (current == null) return;
-              unawaited(
-                _forwardPointer(
-                  () => current.wheel(
-                    signal.localPosition.dx,
-                    signal.localPosition.dy,
-                    signal.scrollDelta.dx,
-                    signal.scrollDelta.dy,
-                  ),
-                ),
-              );
-            },
-            child: EmbeddedBrowserView(
-              key: ValueKey(_revision),
-              surface: surface,
-            ),
-          );
-        },
-      ),
     );
   }
 }
