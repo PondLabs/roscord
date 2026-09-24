@@ -17,10 +17,12 @@ runtime files for compilation; the SDK directory is a build input and is not
 copied into the shipped Flutter bundle.  The ordinary `stage` command remains
 the release-payload staging path and intentionally omits the SDK.
 
-The target builds `client.dll` and copies the locked `Release/bootstrap.exe` to
-`cef_host.exe`.  The CEF bootstrap is the process entry point and loads the
-client DLL with `--module=client.dll`; it supplies the sandbox handle to both
-`CefExecuteProcess` and `CefInitialize`.  The host rejects startup when the
+The target builds `cef_host.dll` and copies the locked `Release/bootstrap.exe`
+to `cef_host.exe`.  The CEF bootstrap is the process entry point.  Renamed, it
+loads the DLL named after itself from its own directory (`--module` only
+applies while it is still called `bootstrap.exe`), and both must be signed
+with the same certificate or both be unsigned.  It supplies the sandbox handle
+to both `CefExecuteProcess` and `CefInitialize`.  The host rejects startup when the
 bootstrap/client inputs, bundled CEF modules/resources, parent process, or
 authenticated pipe cannot be verified.  It never downloads CEF and never
 uses a system CEF installation.

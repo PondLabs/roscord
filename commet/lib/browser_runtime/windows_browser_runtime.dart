@@ -92,7 +92,7 @@ String? _bundledCefRoot() {
 
 /// Which desktop host topology a runtime drives.
 ///
-/// Windows uses a named-pipe endpoint and `--module/--pipe/--nonce` launch
+/// Windows uses a named-pipe endpoint and `--pipe/--nonce` launch
 /// arguments; Linux uses an owner-only Unix-socket endpoint and the
 /// `--socket/--parent-nonce/--cef-root` arguments enforced by the Rust
 /// `cef_host`. Both flavors share the authenticated, versioned, length-framed
@@ -476,7 +476,6 @@ class WindowsBrowserRuntime implements BrowserRuntime {
         : r'\\.\pipe\roscord-browser-' + '$_parentProcessId-$nonce';
     final hostArguments = switch (hostFlavor) {
       CefHostFlavor.windows => <String>[
-          '--module=client.dll',
           '--pipe=$endpoint',
           '--nonce=$nonce',
           '--parent-pid=$_parentProcessId',

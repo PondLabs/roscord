@@ -174,7 +174,7 @@ class CEFRuntimeToolTests(unittest.TestCase):
             staged = directory / "staged"
             project_root = directory / "project"
             project_root.mkdir()
-            (project_root / "client.dll").write_bytes(b"client")
+            (project_root / "cef_host.dll").write_bytes(b"client")
             result = cef_runtime.stage_runtime(
                 "windows-x64",
                 archives["windows-x64"],
@@ -186,7 +186,7 @@ class CEFRuntimeToolTests(unittest.TestCase):
             self.assertFalse((staged / "Release/bootstrapc.exe").exists())
             self.assertFalse((staged / "include/not-staged.h").exists())
             self.assertTrue((staged / "Resources/locales/en-US.pak").exists())
-            self.assertEqual(result["bootstrap_project"][0]["path"], "client.dll")
+            self.assertEqual(result["bootstrap_project"][0]["path"], "cef_host.dll")
 
             metadata = directory / "metadata"
             unexpected = staged / "Release/unknown.dll"

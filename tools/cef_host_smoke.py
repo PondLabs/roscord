@@ -230,7 +230,6 @@ def _launch(bundle: Path, nonce: str, work: Path, software: bool):
         endpoint = rf"\\.\pipe\roscord-browser-{os.getpid()}-{nonce}"
         command = [
             str(host),
-            "--module=client.dll",
             f"--pipe={endpoint}",
             f"--nonce={nonce}",
             f"--parent-pid={os.getpid()}",

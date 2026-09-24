@@ -42,7 +42,7 @@ platform's allow-listed Release/Resources files, locales, sandbox/bootstrap,
 license, and credits inputs, and fails on an unallow-listed file in those
 runtime directories.  Headers, examples, tests, debug files, and
 `bootstrapc.exe` are never user payload.  When `--project-root` is supplied,
-the lock-listed app bootstrap files (such as `client.dll`) must each match
+the lock-listed app bootstrap files (such as `cef_host.dll`) must each match
 exactly one regular file and are recorded in the generated metadata.  The
 generated metadata directory
 contains:

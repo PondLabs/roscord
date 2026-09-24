@@ -83,7 +83,7 @@ LOCKED_SIDEEAR_SHA1 = {
 }
 
 #: Sandbox/bootstrap pairs that must be present per platform.
-WINDOWS_BOOTSTRAP_PAIR = ("cef_host.exe", "client.dll", "chrome_elf.dll")
+WINDOWS_BOOTSTRAP_PAIR = ("cef_host.exe", "cef_host.dll", "chrome_elf.dll")
 LINUX_SANDBOX_PAIR = ("libcef.so", "chrome-sandbox")
 
 #: Sandbox-bypass switches that must never appear in shipped configs.
@@ -499,7 +499,7 @@ def example_report(*, signed: bool = True) -> dict[str, Any]:
         },
         "sandbox_bootstrap": {
             "windows_cef_host.exe_present": True,
-            "windows_client.dll_present": True,
+            "windows_cef_host.dll_present": True,
             "windows_chrome_elf.dll_present": True,
             "linux_libcef.so_present": True,
             "linux_chrome-sandbox_present": True,

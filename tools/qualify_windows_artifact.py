@@ -20,7 +20,7 @@ artifacts always use the nested layout, which is also what the Dart
 contents into the payload root and keeps ``Resources/`` as a subdirectory::
 
     <payload>/cef_host.exe        # renamed copy of Release/bootstrap.exe
-    <payload>/client.dll          # project-built bootstrap client
+    <payload>/cef_host.dll        # project-built bootstrap client
     <payload>/libcef.dll
     <payload>/chrome_elf.dll
     <payload>/...
@@ -72,7 +72,7 @@ BOOTSTRAP_RENAME = {"Release/bootstrap.exe": "cef_host.exe"}
 
 #: Project-owned bootstrap binary recorded in the manifest's bootstrap_project
 #: section (``cef_runtime.stage_runtime(..., project_root=...)``).
-PROJECT_BOOTSTRAP = "client.dll"
+PROJECT_BOOTSTRAP = "cef_host.dll"
 
 #: Archive-root notice inputs are covered through generated notices, not by
 #: files installed into the payload.

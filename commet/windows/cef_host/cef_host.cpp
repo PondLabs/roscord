@@ -229,7 +229,6 @@ struct HostArgs {
   std::wstring pipe_name;
   std::filesystem::path profile_root;
   std::string nonce;
-  std::wstring module_name;
   // Forced software rendering.  Available in every build (not validation-only):
   // the CPU OnPaint path is release-authoritative and must satisfy the same
   // frame/input/resize/focus contract as the default path.
@@ -335,19 +334,16 @@ std::optional<HostArgs> ValidateHostArgs(const ParsedCommandLine& command_line,
     }
   }
 
-  const auto module = ValueForSwitch(command_line.values, L"--module");
   const auto pipe = ValueForSwitch(command_line.values, L"--pipe");
   const auto nonce = ValueForSwitch(command_line.values, L"--nonce");
   const auto parent = ValueForSwitch(command_line.values, L"--parent-pid");
   const auto profile_root = ValueForSwitch(command_line.values, L"--profile-root");
-  if (!module || Lowercase(*module) != L"client.dll" || !pipe || !nonce ||
-      !parent || !profile_root) {
-    error = L"cef_host requires --module=client.dll, --pipe, --nonce, --parent-pid, and --profile-root";
+  if (!pipe || !nonce || !parent || !profile_root) {
+    error = L"cef_host requires --pipe, --nonce, --parent-pid, and --profile-root";
     return std::nullopt;
   }
 
   HostArgs result;
-  result.module_name = *module;
   result.software_rendering = software_rendering;
   result.pipe_name = *pipe;
   result.profile_root = std::filesystem::path(*profile_root);
@@ -384,7 +380,7 @@ bool VerifyBundledRuntime(std::wstring& error) {
   // en-US locale is required for startup; further locales are verified by the
   // qualification gate against the staged manifest.
   const std::array<std::filesystem::path, 18> required = {
-      root / L"cef_host.exe",       root / L"client.dll",
+      root / L"cef_host.exe",       root / L"cef_host.dll",
       root / L"libcef.dll",         root / L"chrome_elf.dll",
       root / L"d3dcompiler_47.dll", root / L"dxcompiler.dll",
       root / L"dxil.dll",           root / L"libEGL.dll",
@@ -5031,10 +5027,12 @@ int RunHost(HINSTANCE instance, void* sandbox_info) {
 
 }  // namespace
 
-// M138+ bootstrap.exe calls this exact export in the signed client.dll.  The
-// bootstrap supplies the sandbox information object; dropping it or replacing
-// the bootstrap with a hand-written subprocess would disable the supported
-// Windows sandbox arrangement.
+// The M138+ bootstrap, renamed cef_host.exe, loads cef_host.dll from its own
+// directory and calls this exact export.  It must be signed like the
+// executable, or both unsigned.  The bootstrap supplies the sandbox
+// information object; dropping it or replacing the bootstrap with a
+// hand-written subprocess would disable the supported Windows sandbox
+// arrangement.
 extern "C" CEF_BOOTSTRAP_EXPORT int RunWinMain(
     HINSTANCE instance,
     LPTSTR command_line,

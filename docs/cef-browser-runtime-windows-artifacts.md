@@ -13,12 +13,13 @@ in `cef_host/` (installed by `commet/windows/cef_host/CMakeLists.txt` when
 `WindowsBrowserRuntime._resolveHostExecutable` prefers.  The CMake install
 flattens the archive's `Release/` contents into the payload root, renames the
 locked `Release/bootstrap.exe` to `cef_host.exe`, keeps `Resources/` as a
-subdirectory, and adds the project-built `client.dll` plus the smoke-test
-fixtures:
+subdirectory, and adds the project-built `cef_host.dll` plus the smoke-test
+fixtures. A renamed bootstrap loads the DLL named after itself from its own
+directory; `--module` only applies while it keeps the name `bootstrap.exe`:
 
 ```text
 <Release>/cef_host/cef_host.exe        # renamed locked bootstrap.exe
-<Release>/cef_host/client.dll          # project-built bootstrap client
+<Release>/cef_host/cef_host.dll        # project-built bootstrap client
 <Release>/cef_host/libcef.dll
 <Release>/cef_host/chrome_elf.dll
 <Release>/cef_host/d3dcompiler_47.dll  # graphics / software fallback
@@ -69,7 +70,7 @@ files, and `THIRD_PARTY_NOTICES.txt`.
 
 ## Signatures
 
-Production signs the PE binaries (`cef_host.exe`, `client.dll`, `libcef.dll`,
+Production signs the PE binaries (`cef_host.exe`, `cef_host.dll`, `libcef.dll`,
 `chrome_elf.dll`, and the remaining shipped DLLs) with Authenticode, and the
 Windows ZIP, portable archive, manifests, SBOM, and notices with the project
 release key as detached sidecars.  The auditable record is
@@ -99,7 +100,7 @@ python tools/qualify_windows_artifact.py \
 It verifies, in order: required CEF resources, the bootstrap/client pair,
 helpers, locales (including `en-US.pak`), graphics dependencies, and sandbox
 inputs are staged; payload bytes match the manifest (with the
-`bootstrap.exe` -> `cef_host.exe` rename and the `client.dll` project entry);
+`bootstrap.exe` -> `cef_host.exe` rename and the `cef_host.dll` project entry);
 notices, CycloneDX SBOM, and provenance are complete and lock-consistent;
 native binaries pass hash checks (and detached `signatures.json` checks with
 `--require-signatures`); the sandbox/bootstrap pair is present with no
@@ -122,7 +123,7 @@ bytes are clean, and any other binary carrying those markers fails closed.
 
 ## Sandbox and bootstrap failures block opening
 
-`cef_host` (M138+ `bootstrap.exe` + `client.dll` exporting `RunWinMain`)
+`cef_host` (M138+ `bootstrap.exe` + `cef_host.dll` exporting `RunWinMain`)
 forwards the bootstrap sandbox information to both `CefExecuteProcess` and
 `CefInitialize`, runs with `settings.no_sandbox = false`, and refuses to
 serve surfaces when the check fails:

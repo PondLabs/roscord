@@ -266,7 +266,7 @@ class CefHostContractTests(unittest.TestCase):
         )
         self.assertIn("find_package(CEF REQUIRED)", CMAKE)
         self.assertIn("bootstrap.exe", CMAKE)
-        self.assertIn('OUTPUT_NAME "client"', CMAKE)
+        self.assertIn('OUTPUT_NAME "cef_host"', CMAKE)
         self.assertIn("ENV{ROSCORD_BUILD_CEF_HOST}", WINDOWS_CMAKE)
         self.assertIn("ENV{CEF_ROOT}", WINDOWS_CMAKE)
         self.assertIn("stage-sdk", RUNTIME_TOOL)
@@ -1643,7 +1643,7 @@ class CefHostContractTests(unittest.TestCase):
             "en-US.pak",
             "chrome_elf.dll",
             "libcef.dll",
-            "client.dll",
+            "cef_host.dll",
         ):
             self.assertIn(token, SOURCE, f"host startup gate is missing: {token}")
         for token in (

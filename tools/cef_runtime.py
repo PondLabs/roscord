@@ -86,7 +86,7 @@ REQUIRED_RUNTIME_PATTERNS = {
     ),
 }
 BOOTSTRAP_PATTERNS = {
-    "windows-x64": {"archive": ["Release/bootstrap.exe"], "project": ["client.dll"]},
+    "windows-x64": {"archive": ["Release/bootstrap.exe"], "project": ["cef_host.dll"]},
     "linux-x64": {"archive": [], "project": []},
 }
 # Where archive paths land in a staged runtime.  On Linux CEF loads ICU data,

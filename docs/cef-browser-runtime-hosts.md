@@ -11,9 +11,12 @@ The app starts one host per app process, lazily, on the first surface open.
 Every surface shares it. Browsers are Alloy-style and windowless (CEF
 off-screen rendering).
 
-- **Windows**: `cef_host/cef_host.exe` is the locked CEF `bootstrap.exe`. It
-  loads `client.dll` (`commet/windows/cef_host/cef_host.cpp`) with
-  `--module=client.dll`. The app talks to it over a named pipe. The host
+- **Windows**: `cef_host/cef_host.exe` is the locked CEF `bootstrap.exe`.
+  Renamed, the bootstrap loads the DLL named after itself from its own
+  directory, `cef_host.dll` (`commet/windows/cef_host/cef_host.cpp`).
+  `--module` only applies while it is still called `bootstrap.exe`. The DLL
+  must be signed with the bootstrap's certificate, or both must be unsigned,
+  as the locked build is. The app talks to the host over a named pipe. The host
   creates the pipe with overlapped I/O, `FILE_FLAG_FIRST_PIPE_INSTANCE` and
   `PIPE_REJECT_REMOTE_CLIENTS`. Synchronous pipe handles serialize reads and
   writes across threads, so an event could not be sent while a read was

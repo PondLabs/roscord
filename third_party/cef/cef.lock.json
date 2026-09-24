@@ -31,7 +31,7 @@
           "Release/bootstrap.exe"
         ],
         "project": [
-          "client.dll"
+          "cef_host.dll"
         ]
       },
       "runtime": {
