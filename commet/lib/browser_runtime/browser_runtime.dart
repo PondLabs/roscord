@@ -363,18 +363,22 @@ sealed class InputEvent {
       );
 
   /// A key press or release: W3C KeyboardEvent [key] and [code] values and
-  /// [InputModifiers] bits.
+  /// [InputModifiers] bits. [text] is what the press typed, as the
+  /// platform's keyboard layout produced it; null for releases, shortcuts
+  /// and keys that type nothing.
   factory InputEvent.keyboard({
     required String key,
     required String code,
     int modifiers = 0,
     required bool pressed,
+    String? text,
   }) =>
       KeyboardInput(
         key: key,
         code: code,
         modifiers: modifiers,
         pressed: pressed,
+        text: text,
       );
 
   factory InputEvent.ime({
@@ -411,6 +415,7 @@ sealed class InputEvent {
           code: _requiredString(payload, 'code'),
           modifiers: _optionalInt(payload, 'modifiers') ?? 0,
           pressed: _requiredBool(payload, 'pressed'),
+          text: _optionalString(payload, 'text'),
         ),
       'ime' => ImeInput(
           phase: _enumValue(ImePhase.values, _requiredString(payload, 'phase')),
@@ -472,12 +477,14 @@ class KeyboardInput extends InputEvent {
   final String code;
   final int modifiers;
   final bool pressed;
+  final String? text;
 
   KeyboardInput({
     required this.key,
     required this.code,
     this.modifiers = 0,
     required this.pressed,
+    this.text,
   }) {
     if (key.isEmpty || code.isEmpty) {
       throw const BrowserRuntimeException(
@@ -495,6 +502,7 @@ class KeyboardInput extends InputEvent {
           'code': code,
           'modifiers': modifiers,
           'pressed': pressed,
+          if (text != null) 'text': text,
         },
       };
 }

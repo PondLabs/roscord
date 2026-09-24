@@ -43,6 +43,8 @@ struct TextureState {
   void* mapped = nullptr;
   size_t mapped_bytes = 0;
   std::vector<uint8_t> pixels;
+  // Where a frame is read before the seqlock confirms it.
+  std::vector<uint8_t> scratch;
   uint32_t width = 0;
   uint32_t height = 0;
 
@@ -115,18 +117,20 @@ static gboolean browser_surface_texture_copy_pixels(
     if (state->mapped != nullptr) {
       const auto* header = browser_surface::FrameRingValidate(
           state->mapped, state->mapped_bytes);
-      if (header != nullptr && state->pixels.size() < header->slot_bytes) {
-        state->pixels.resize(header->slot_bytes);
+      if (header != nullptr && state->scratch.size() < header->slot_bytes) {
+        state->scratch.resize(header->slot_bytes);
       }
       uint32_t frame_width = 0;
       uint32_t frame_height = 0;
-      // A frame the host already replaced is skipped; the texture keeps the
-      // previous one until the next request.
+      // The frame is read aside and shown only once the seqlock confirms the
+      // host did not rewrite it meanwhile.  A frame it already replaced is
+      // skipped; the texture keeps the previous one until the next request.
       if (header != nullptr &&
           browser_surface::FrameRingRead(
               state->mapped, state->mapped_bytes, request.slot,
-              request.sequence, state->pixels.data(), state->pixels.size(),
+              request.sequence, state->scratch.data(), state->scratch.size(),
               &frame_width, &frame_height)) {
+        state->pixels.swap(state->scratch);
         state->width = frame_width;
         state->height = frame_height;
       }

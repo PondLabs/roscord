@@ -95,18 +95,21 @@ class SurfaceTexture {
       if (mapped_ != nullptr) {
         const auto* header =
             browser_surface::FrameRingValidate(mapped_, mapped_bytes_);
-        if (header != nullptr && pixels_.size() < header->slot_bytes) {
-          pixels_.resize(static_cast<size_t>(header->slot_bytes));
+        if (header != nullptr && scratch_.size() < header->slot_bytes) {
+          scratch_.resize(static_cast<size_t>(header->slot_bytes));
         }
         uint32_t width = 0;
         uint32_t height = 0;
-        // A frame the host already replaced is skipped; the texture keeps
-        // the previous one until the next request.
+        // The frame is read aside and shown only once the seqlock confirms
+        // the host did not rewrite it meanwhile.  A frame it already replaced
+        // is skipped; the texture keeps the previous one until the next
+        // request.
         if (header != nullptr &&
             browser_surface::FrameRingRead(mapped_, mapped_bytes_,
                                            request.slot, request.sequence,
-                                           pixels_.data(), pixels_.size(),
+                                           scratch_.data(), scratch_.size(),
                                            &width, &height)) {
+          pixels_.swap(scratch_);
           width_ = width;
           height_ = height;
         }
@@ -165,6 +168,8 @@ class SurfaceTexture {
   const void* mapped_ = nullptr;
   size_t mapped_bytes_ = 0;
   std::vector<uint8_t> pixels_;
+  // Where a frame is read before the seqlock confirms it.
+  std::vector<uint8_t> scratch_;
   uint32_t width_ = 0;
   uint32_t height_ = 0;
   FlutterDesktopPixelBuffer buffer_{};

@@ -244,7 +244,8 @@ void main() {
     expect(event.toJson()['payload'], containsPair('user_gesture', true));
   });
 
-  test('round-trips frame ring names, pointer modifiers, and cursors', () {
+  test('round-trips frame ring names, input modifiers and text, and cursors',
+      () {
     final event = SurfaceEvent.fromJson({
       'type': 'frame_ready',
       'payload': {
@@ -299,6 +300,24 @@ void main() {
       'payload': {'kind': 'move', 'x': 1, 'y': 2},
     }) as PointerInput;
     expect(plain.modifiers, 0);
+
+    final typed = InputEvent.fromJson(
+      InputEvent.keyboard(
+        key: '@',
+        code: 'KeyQ',
+        modifiers: InputModifiers.control | InputModifiers.alt,
+        pressed: true,
+        text: '@',
+      ).toJson(),
+    ) as KeyboardInput;
+    expect(typed.text, '@');
+    final released =
+        InputEvent.keyboard(key: 'q', code: 'KeyQ', pressed: false);
+    expect(released.toJson()['payload'], isNot(contains('text')));
+    expect(
+      (InputEvent.fromJson(released.toJson()) as KeyboardInput).text,
+      isNull,
+    );
 
     final cursor = SurfaceEvent.fromJson({
       'type': 'cursor_changed',

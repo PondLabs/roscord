@@ -54,7 +54,7 @@ using browser_surface::KeyCodesForCode;
 using browser_surface::kFrameRingMaxDimension;
 using browser_surface::kFrameRingSlots;
 using browser_surface::kWireButtonPrimary;
-using browser_surface::TypedCharacterForKey;
+using browser_surface::TypedUnits;
 using browser_surface::WindowsKeyCodeForKey;
 
 static_assert(browser_surface::kCefFlagShift == EVENTFLAG_SHIFT_DOWN);
@@ -189,7 +189,11 @@ class SharedFrameRing {
       return false;
     }
     const uint64_t bytes = browser_surface::FrameRingRegionBytes(slot_bytes);
-    if (ftruncate(fd, static_cast<off_t>(bytes)) != 0) {
+    // ftruncate alone reserves nothing on tmpfs: a full /dev/shm would only
+    // show up as SIGBUS when the ring is first written.  Allocating the pages
+    // now turns that into a dropped frame.
+    if (ftruncate(fd, static_cast<off_t>(bytes)) != 0 ||
+        posix_fallocate(fd, 0, static_cast<off_t>(bytes)) != 0) {
       close(fd);
       shm_unlink(name.c_str());
       Log(ROSCORD_LOG_ERROR, "cannot size the shared frame ring");
@@ -345,7 +349,7 @@ class SurfaceClient : public CefClient,
   }
 
   void Key(const std::string& key, const std::string& code,
-           uint32_t modifiers, bool pressed) {
+           const std::string& text, uint32_t modifiers, bool pressed) {
     if (browser_ == nullptr) return;
     KeyCodes codes{};
     const bool known = KeyCodesForCode(code, &codes);
@@ -356,15 +360,17 @@ class SurfaceClient : public CefClient,
     event.modifiers =
         CefFlagsFor(modifiers, 0) | (known ? codes.location_flags : 0);
     event.is_system_key = false;
-    const char16_t typed = TypedCharacterForKey(key, modifiers);
-    event.character = typed;
-    event.unmodified_character = typed;
+    const std::u16string typed = pressed ? TypedUnits(text) : u"";
+    event.character = typed.empty() ? 0 : typed.front();
+    event.unmodified_character = event.character;
     CefRefPtr<CefBrowserHost> host = browser_->GetHost();
     if (pressed) {
       event.type = KEYEVENT_RAWKEYDOWN;
       host->SendKeyEvent(event);
-      if (typed != 0) {
+      for (const char16_t unit : typed) {
         event.type = KEYEVENT_CHAR;
+        event.character = unit;
+        event.unmodified_character = unit;
         host->SendKeyEvent(event);
       }
     } else {
@@ -1160,13 +1166,16 @@ void roscord_cef_engine_pointer(uint64_t surface_id, int32_t kind, double x,
 }
 
 void roscord_cef_engine_key(uint64_t surface_id, const char* key,
-                            const char* code, uint32_t modifiers,
-                            int32_t pressed) {
-  if (g_state == nullptr || key == nullptr || code == nullptr) return;
+                            const char* code, const char* text,
+                            uint32_t modifiers, int32_t pressed) {
+  if (g_state == nullptr || key == nullptr || code == nullptr ||
+      text == nullptr) {
+    return;
+  }
   PostUi([surface_id, key = std::string(key), code = std::string(code),
-          modifiers, pressed] {
+          text = std::string(text), modifiers, pressed] {
     if (CefRefPtr<SurfaceClient> client = ClientFor(surface_id)) {
-      client->Key(key, code, modifiers, pressed != 0);
+      client->Key(key, code, text, modifiers, pressed != 0);
     }
   });
 }

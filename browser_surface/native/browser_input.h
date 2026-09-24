@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <string_view>
 
 namespace browser_surface {
@@ -137,7 +138,8 @@ inline constexpr KeyCodeEntry kKeyCodeTable[] = {
     {"PrintScreen", {0x2C, 99, 0xE037, 0}},
     {"ScrollLock", {0x91, 70, 0x46, 0}},
     {"Pause", {0x13, 119, 0x45, 0}},
-    {"NumLock", {0x90, 69, 0x45, kCefFlagIsKeyPad}},
+    // Windows reports NumLock as the extended 0x45 and Pause as the plain one.
+    {"NumLock", {0x90, 69, 0xE045, kCefFlagIsKeyPad}},
     {"NumpadEnter", {0x0D, 96, 0xE01C, kCefFlagIsKeyPad}},
     {"NumpadDivide", {0x6F, 98, 0xE035, kCefFlagIsKeyPad}},
     {"NumpadMultiply", {0x6A, 55, 0x37, kCefFlagIsKeyPad}},
@@ -205,38 +207,56 @@ inline int WindowsKeyCodeForKey(std::string_view key) {
   return 0;
 }
 
-// The UTF-16 unit a key press types, or 0 when it types nothing.  Only
-// single-unit characters are typed through CHAR events; anything longer (an
-// emoji, a composed sequence) goes through IME commit instead.
-inline char16_t TypedCharacterForKey(std::string_view key,
-                                     uint32_t wire_modifiers) {
-  if (wire_modifiers & (kWireModifierControl | kWireModifierMeta)) return 0;
-  if (key == "Enter") return u'\r';
-  if (key == "Tab") return u'\t';
-  // Decode one UTF-8 code point; accept it when it is a single BMP unit.
-  const auto* bytes = reinterpret_cast<const unsigned char*>(key.data());
-  const size_t size = key.size();
-  if (size == 0) return 0;
-  uint32_t code_point = 0;
-  size_t length = 0;
-  if (bytes[0] < 0x80) {
-    code_point = bytes[0];
-    length = 1;
-  } else if ((bytes[0] & 0xE0) == 0xC0 && size >= 2) {
-    code_point = ((bytes[0] & 0x1Fu) << 6) | (bytes[1] & 0x3Fu);
-    length = 2;
-  } else if ((bytes[0] & 0xF0) == 0xE0 && size >= 3) {
-    code_point = ((bytes[0] & 0x0Fu) << 12) | ((bytes[1] & 0x3Fu) << 6) |
-                 (bytes[2] & 0x3Fu);
-    length = 3;
-  } else {
-    return 0;
+// The UTF-16 units of the text a key press typed, each sent as a CHAR event.
+// The app sends what the platform's keyboard layout produced (so AltGr, which
+// Windows reports as Ctrl+Alt, still types, and Ctrl shortcuts do not).
+// Control characters other than Enter's \r and Tab's \t type nothing, and
+// malformed UTF-8 types nothing at all.
+inline std::u16string TypedUnits(std::string_view text) {
+  static constexpr uint32_t kShortest[] = {0, 0, 0x80, 0x800, 0x10000};
+  std::u16string units;
+  const auto* bytes = reinterpret_cast<const unsigned char*>(text.data());
+  size_t index = 0;
+  while (index < text.size()) {
+    const unsigned char lead = bytes[index];
+    uint32_t code_point = 0;
+    size_t length = 0;
+    if (lead < 0x80) {
+      code_point = lead;
+      length = 1;
+    } else if ((lead & 0xE0) == 0xC0) {
+      code_point = lead & 0x1Fu;
+      length = 2;
+    } else if ((lead & 0xF0) == 0xE0) {
+      code_point = lead & 0x0Fu;
+      length = 3;
+    } else if ((lead & 0xF8) == 0xF0) {
+      code_point = lead & 0x07u;
+      length = 4;
+    } else {
+      return {};
+    }
+    if (length > text.size() - index) return {};
+    for (size_t offset = 1; offset < length; ++offset) {
+      const unsigned char next = bytes[index + offset];
+      if ((next & 0xC0) != 0x80) return {};
+      code_point = (code_point << 6) | (next & 0x3Fu);
+    }
+    index += length;
+    if (code_point < kShortest[length] || code_point > 0x10FFFF ||
+        (code_point >= 0xD800 && code_point <= 0xDFFF) || code_point == 0x7F ||
+        (code_point < 0x20 && code_point != u'\r' && code_point != u'\t')) {
+      return {};
+    }
+    if (code_point >= 0x10000) {
+      code_point -= 0x10000;
+      units.push_back(static_cast<char16_t>(0xD800 + (code_point >> 10)));
+      units.push_back(static_cast<char16_t>(0xDC00 + (code_point & 0x3FF)));
+    } else {
+      units.push_back(static_cast<char16_t>(code_point));
+    }
   }
-  if (length != size || code_point < 0x20 || code_point == 0x7F ||
-      (code_point >= 0xD800 && code_point <= 0xDFFF)) {
-    return 0;
-  }
-  return static_cast<char16_t>(code_point);
+  return units;
 }
 
 }  // namespace browser_surface

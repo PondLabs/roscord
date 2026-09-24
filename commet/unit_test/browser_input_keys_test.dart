@@ -69,6 +69,63 @@ void main() {
     );
   });
 
+  testWidgets('key presses carry the text the keyboard layout typed',
+      (tester) async {
+    KeyDownEvent press(LogicalKeyboardKey logical, String? character) =>
+        KeyDownEvent(
+          physicalKey: PhysicalKeyboardKey.keyQ,
+          logicalKey: logical,
+          character: character,
+          timeStamp: Duration.zero,
+        );
+    const linux = TargetPlatform.linux;
+    const windows = TargetPlatform.windows;
+
+    expect(
+        typedText(press(LogicalKeyboardKey.keyQ, 'q'), platform: linux), 'q');
+    expect(typedText(press(LogicalKeyboardKey.enter, '\r'), platform: linux),
+        '\r');
+    expect(
+        typedText(press(LogicalKeyboardKey.tab, '\t'), platform: linux), '\t');
+    expect(
+      typedText(press(LogicalKeyboardKey.backspace, '\b'), platform: linux),
+      isNull,
+    );
+    expect(
+      typedText(
+        KeyUpEvent(
+          physicalKey: PhysicalKeyboardKey.keyQ,
+          logicalKey: LogicalKeyboardKey.keyQ,
+          timeStamp: Duration.zero,
+        ),
+        platform: linux,
+      ),
+      isNull,
+    );
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    // Ctrl+C: Windows types a control character, Linux reports the letter.
+    expect(
+      typedText(press(LogicalKeyboardKey.keyC, '\u0003'), platform: windows),
+      isNull,
+    );
+    expect(typedText(press(LogicalKeyboardKey.keyC, 'c'), platform: linux),
+        isNull);
+    expect(typedText(press(LogicalKeyboardKey.enter, '\r'), platform: linux),
+        isNull);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.altRight);
+    // AltGr+Q on a German layout: Windows reports Ctrl+Alt and the '@'.
+    expect(
+        typedText(press(LogicalKeyboardKey.keyQ, '@'), platform: windows), '@');
+    // An unmapped Ctrl+Alt combination types nothing on either platform.
+    expect(typedText(press(LogicalKeyboardKey.keyQ, null), platform: windows),
+        isNull);
+    expect(typedText(press(LogicalKeyboardKey.keyQ, 'q'), platform: linux),
+        isNull);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.altRight);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+  });
+
   testWidgets('held modifier keys become input modifier bits', (tester) async {
     expect(currentInputModifiers(), 0);
     await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);

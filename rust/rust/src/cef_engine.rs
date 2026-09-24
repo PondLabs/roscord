@@ -19,7 +19,7 @@ use std::sync::Arc;
 use crate::browser_runtime::{ImePhase, InputEvent, PointerKind, SurfaceId};
 use crate::cef_host::HostError;
 
-pub const ENGINE_ABI_VERSION: u32 = 1;
+pub const ENGINE_ABI_VERSION: u32 = 2;
 pub const ENGINE_LIBRARY: &str = "libroscord_cef_engine.so";
 
 const POINTER_DOWN: i32 = 0;
@@ -154,7 +154,7 @@ struct EngineFunctions {
     resize: unsafe extern "C" fn(u64, u32, u32, f64),
     focus: unsafe extern "C" fn(u64, i32),
     pointer: unsafe extern "C" fn(u64, i32, f64, f64, u32, u32, f64, f64),
-    key: unsafe extern "C" fn(u64, *const c_char, *const c_char, u32, i32),
+    key: unsafe extern "C" fn(u64, *const c_char, *const c_char, *const c_char, u32, i32),
     ime: unsafe extern "C" fn(u64, i32, *const c_char, u32, u32),
     execute_script: unsafe extern "C" fn(u64, *const c_char),
     shutdown: unsafe extern "C" fn(),
@@ -355,9 +355,13 @@ impl EngineLibrary {
                 code,
                 modifiers,
                 pressed,
+                text,
             } => {
-                let (Ok(key), Ok(code)) = (CString::new(key.as_str()), CString::new(code.as_str()))
-                else {
+                let (Ok(key), Ok(code), Ok(text)) = (
+                    CString::new(key.as_str()),
+                    CString::new(code.as_str()),
+                    CString::new(text.as_deref().unwrap_or_default()),
+                ) else {
                     return;
                 };
                 unsafe {
@@ -365,6 +369,7 @@ impl EngineLibrary {
                         surface_id.0,
                         key.as_ptr(),
                         code.as_ptr(),
+                        text.as_ptr(),
                         *modifiers,
                         *pressed as i32,
                     )

@@ -432,11 +432,16 @@ pub enum InputEvent {
     },
     /// A key press or release.  `key` and `code` are W3C KeyboardEvent
     /// values; `modifiers` bits are 1 shift, 2 control, 4 alt, 8 meta.
+    /// `text` is what the press typed, as the platform's keyboard layout
+    /// produced it; absent for releases, shortcuts and keys that type
+    /// nothing.
     Keyboard {
         key: String,
         code: String,
         modifiers: u32,
         pressed: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
     },
     Ime {
         phase: ImePhase,
@@ -1686,6 +1691,23 @@ mod tests {
             SurfacePolicy::new(["https://widget.test".to_owned()], std::iter::empty()).unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn key_presses_carry_typed_text_only_when_something_was_typed() {
+        let typed: InputEvent = serde_json::from_value(json!({
+            "type": "keyboard",
+            "payload": {"key": "@", "code": "KeyQ", "modifiers": 6, "pressed": true, "text": "@"},
+        }))
+        .unwrap();
+        assert!(matches!(&typed, InputEvent::Keyboard { text: Some(text), .. } if text == "@"));
+        let release: InputEvent = serde_json::from_value(json!({
+            "type": "keyboard",
+            "payload": {"key": "q", "code": "KeyQ", "modifiers": 0, "pressed": false},
+        }))
+        .unwrap();
+        assert!(matches!(release, InputEvent::Keyboard { text: None, .. }));
+        assert!(serde_json::to_value(&release).unwrap()["payload"].get("text").is_none());
     }
 
     #[test]

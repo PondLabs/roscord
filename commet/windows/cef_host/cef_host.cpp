@@ -393,9 +393,11 @@ bool VerifyBundledRuntime(std::wstring& error) {
       root / L"Resources" / L"resources.pak",
       root / L"Resources" / L"locales" / L"en-US.pak",
   };
-  if (!std::all_of(required.begin(), required.end(), IsRegularFile)) {
-    error = L"bundled CEF bootstrap, client, or resource is missing";
-    return false;
+  for (const auto& path : required) {
+    if (!IsRegularFile(path)) {
+      error = L"bundled CEF file is missing: " + path.wstring();
+      return false;
+    }
   }
 
   return true;
@@ -2978,17 +2980,21 @@ void HostController::ApplyInputOnUi(
     event.is_system_key =
         (modifiers & browser_surface::kWireModifierAlt) != 0 &&
         (modifiers & browser_surface::kWireModifierControl) == 0;
-    const char16_t typed =
-        browser_surface::TypedCharacterForKey(key, modifiers);
-    event.character = typed;
-    event.unmodified_character = typed;
+    // What the press typed, as the app's keyboard layout produced it: AltGr
+    // arrives as Ctrl+Alt and still types, Ctrl shortcuts type nothing.
+    const std::u16string typed =
+        pressed ? browser_surface::TypedUnits(text("text")) : u"";
+    event.character = typed.empty() ? 0 : typed.front();
+    event.unmodified_character = event.character;
     if (pressed) {
       event.type = KEYEVENT_RAWKEYDOWN;
       host->SendKeyEvent(event);
-      if (typed != 0) {
+      for (const char16_t unit : typed) {
         // WM_CHAR carries the character itself as the key code.
         event.type = KEYEVENT_CHAR;
-        event.windows_key_code = typed;
+        event.windows_key_code = unit;
+        event.character = unit;
+        event.unmodified_character = unit;
         host->SendKeyEvent(event);
       }
     } else {
@@ -4952,6 +4958,48 @@ void BrowserClient::OnPaint(CefRefPtr<CefBrowser> browser,
   controller_->OnPaintFrame(surface_id_, buffer, width, height);
 }
 
+// A host that stops before its pipe exists leaves the app nothing but an exit
+// code, so each startup failure says why on stderr (the app and the smoke test
+// capture it) and, when it is set, in $ROSCORD_CEF_HOST_LOG.
+int StartupFailure(std::wstring_view stage, const std::wstring& detail = {}) {
+  std::wstring line = L"cef_host: ";
+  line += stage;
+  if (!detail.empty()) {
+    line += L": ";
+    line += detail;
+  }
+  line += L"\n";
+  const int size =
+      WideCharToMultiByte(CP_UTF8, 0, line.data(), static_cast<int>(line.size()),
+                          nullptr, 0, nullptr, nullptr);
+  if (size <= 0) return EXIT_FAILURE;
+  std::string utf8(static_cast<size_t>(size), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, line.data(), static_cast<int>(line.size()),
+                      utf8.data(), size, nullptr, nullptr);
+  DWORD written = 0;
+  const HANDLE error_output = GetStdHandle(STD_ERROR_HANDLE);
+  if (error_output != nullptr && error_output != INVALID_HANDLE_VALUE) {
+    WriteFile(error_output, utf8.data(), static_cast<DWORD>(utf8.size()),
+              &written, nullptr);
+  }
+  std::array<wchar_t, MAX_PATH> log_path{};
+  const DWORD length = GetEnvironmentVariableW(
+      L"ROSCORD_CEF_HOST_LOG", log_path.data(),
+      static_cast<DWORD>(log_path.size()));
+  if (length > 0 && length < log_path.size()) {
+    const HANDLE log =
+        CreateFileW(log_path.data(), FILE_APPEND_DATA,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (log != INVALID_HANDLE_VALUE) {
+      WriteFile(log, utf8.data(), static_cast<DWORD>(utf8.size()), &written,
+                nullptr);
+      CloseHandle(log);
+    }
+  }
+  return EXIT_FAILURE;
+}
+
 int RunHost(HINSTANCE instance, void* sandbox_info) {
   const ParsedCommandLine command_line = ParseCommandLine();
   CefMainArgs main_args(instance);
@@ -4968,11 +5016,17 @@ int RunHost(HINSTANCE instance, void* sandbox_info) {
   std::wstring error;
   const auto args = ValidateHostArgs(command_line, error);
   if (!args) {
-    return EXIT_FAILURE;
+    return StartupFailure(L"invalid arguments", error);
   }
-  if (!ValidateProfileRoot(args->profile_root) || sandbox_info == nullptr ||
-      !VerifyBundledRuntime(error)) {
-    return EXIT_FAILURE;
+  if (!ValidateProfileRoot(args->profile_root)) {
+    return StartupFailure(L"the profile root is not a private directory",
+                          args->profile_root.wstring());
+  }
+  if (sandbox_info == nullptr) {
+    return StartupFailure(L"the bootstrap passed no sandbox information");
+  }
+  if (!VerifyBundledRuntime(error)) {
+    return StartupFailure(L"the bundled runtime is incomplete", error);
   }
 
   CefSettings settings;
@@ -4999,21 +5053,21 @@ int RunHost(HINSTANCE instance, void* sandbox_info) {
 
   const bool initialized = CefInitialize(main_args, settings, app, sandbox_info);
   if (!initialized) {
-    return EXIT_FAILURE;
+    return StartupFailure(L"CefInitialize failed");
   }
   if (!VerifyLoadedBundledRuntime(error)) {
     CefShutdown();
-    return EXIT_FAILURE;
+    return StartupFailure(L"CEF was loaded from elsewhere", error);
   }
   if (!app->WaitForContext(std::chrono::seconds(10))) {
     CefShutdown();
-    return EXIT_FAILURE;
+    return StartupFailure(L"CEF did not initialize its context in time");
   }
 
   PipeChannel pipe(*args);
   if (!pipe.ConnectAndAuthenticate(error)) {
     CefShutdown();
-    return EXIT_FAILURE;
+    return StartupFailure(L"the app did not connect", error);
   }
 
   {

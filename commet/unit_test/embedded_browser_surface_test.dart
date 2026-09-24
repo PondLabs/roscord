@@ -634,6 +634,8 @@ void main() {
       ],
     );
     expect(keys.first.key.toLowerCase(), 'a');
+    // Only the press types: the release and Escape carry no text.
+    expect(keys.map((k) => k.text), [keys.first.key, null, null, null]);
     expect(keys[2].key, 'Escape');
     // The dialog around the page still hears Escape.
     expect(escapes, 1);

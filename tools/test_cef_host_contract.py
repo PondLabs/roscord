@@ -1691,7 +1691,7 @@ class CefHostContractTests(unittest.TestCase):
             "sandbox_info == nullptr",
             "!VerifyBundledRuntime(error)",
             "ValidateProfileRoot",
-            "bundled CEF bootstrap, client, or resource is missing",
+            "bundled CEF file is missing: ",
             "VerifyLoadedBundledRuntime",
             "CEF is not loaded from the bundled host directory",
         ):

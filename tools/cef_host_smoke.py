@@ -42,10 +42,34 @@ RING_SLOT_OFFSET = 64
 RING_SLOT_BYTES = 64
 WINDOWS = sys.platform == "win32"
 
-FIXTURE_HTML = b"""<!DOCTYPE html>
+# The page turns purple once its field has focus (so `--type` can start) and
+# green once the field holds exactly the text `--type` sent.
+FIXTURE_HTML = """<!DOCTYPE html>
 <html><body style="margin:0;background:#1e6fd9;color:#fff;font:48px sans-serif">
 <div style="padding:40px">roscord cef_host smoke test</div>
+<input id="field" style="margin:0 40px;font:48px monospace;width:80%">
+<script>
+const field = document.getElementById("field");
+const paint = () => {{
+  document.body.style.background = field.value === {expected} ? "#1a7f37" : "#6f3fd9";
+}};
+field.addEventListener("focus", paint);
+field.addEventListener("input", paint);
+field.focus();
+</script>
 </body></html>"""
+FOCUSED_PURPLE = (0x6F, 0x3F, 0xD9)
+TYPED_GREEN = (0x1A, 0x7F, 0x37)
+
+
+def corner_is(frame: tuple[int, int, bytes] | None, colour: tuple[int, int, int]) -> bool:
+    """Whether the frame's top-left corner shows `colour`."""
+
+    if frame is None:
+        return False
+    width, _, pixels = frame
+    offset = (5 * width + 5) * 4
+    return all(abs(value - want) < 16 for value, want in zip(pixels[offset : offset + 3], colour))
 
 YOUTUBE_WRAPPER = """<!DOCTYPE html>
 <html>
@@ -298,6 +322,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--png", type=Path, help="write the newest frame here")
     parser.add_argument("--click", nargs=2, type=float, metavar=("X", "Y"), help="click here after the first frame")
     parser.add_argument("--hover", nargs=2, type=float, metavar=("X", "Y"), help="move the pointer here after the first frame")
+    parser.add_argument(
+        "--type",
+        dest="type_text",
+        help="type this into the page after the first frame; on Windows '@' is sent "
+        "the way Windows reports AltGr (Ctrl+Alt) to check that it still types",
+    )
     parser.add_argument("--software", action="store_true", help="pass --cef-software-rendering")
     parser.add_argument("--verbose", action="store_true", help="print every host message but frames")
     args = parser.parse_args(argv)
@@ -322,19 +352,25 @@ def main(argv: list[str] | None = None) -> int:
         url = args.url
         allowed_origins = ["/".join(url.split("/")[:3])]
     else:
-        _, port = serve(FIXTURE_HTML)
+        _, port = serve(FIXTURE_HTML.format(expected=json.dumps(args.type_text or "")).encode())
         url = f"http://127.0.0.1:{port}/"
         loopback_origins = [f"http://127.0.0.1:{port}"]
 
     process, endpoint = _launch(bundle, nonce, work, args.software)
     stderr_lines: list[str] = []
-    threading.Thread(
+    stderr_reader = threading.Thread(
         target=lambda: stderr_lines.extend(process.stderr), daemon=True  # type: ignore[arg-type]
-    ).start()
+    )
+    stderr_reader.start()
 
     def fail(message: str) -> int:
-        if process.poll() is None:
+        code = process.poll()
+        if code is None:
             process.kill()
+            message += " (the host was still running)"
+        else:
+            message += f" (host exit code {code}, {code & 0xFFFFFFFF:#010x})"
+        stderr_reader.join(timeout=5)
         print(message, file=sys.stderr)
         print("".join(stderr_lines), file=sys.stderr)
         return 1
@@ -419,6 +455,8 @@ def main(argv: list[str] | None = None) -> int:
 
     started = time.monotonic()
     clicked = False
+    typed = False
+    checked_sequence = 0
     while time.monotonic() - started < args.seconds and wire.open:
         pump()
         if (args.click or args.hover) and state["latest"] and not clicked:
@@ -432,6 +470,26 @@ def main(argv: list[str] | None = None) -> int:
                 pointer = {"kind": kind, "x": x, "y": y, "buttons": buttons, "delta_x": 0, "delta_y": 0}
                 command("input", {"input": {"type": "pointer", "payload": pointer}})
             clicked = True
+        if args.type_text and state["latest"] and not typed:
+            # Type once the page shows its field has focus.
+            latest = state["latest"]
+            if latest["sequence"] == checked_sequence:
+                continue
+            checked_sequence = latest["sequence"]
+            frame = read_frame(latest["buffer"], latest["slot"], latest["sequence"])
+            if not corner_is(frame, FOCUSED_PURPLE):
+                continue
+            for character in args.type_text:
+                code = f"Key{character.upper()}" if character.isascii() and character.isalpha() else "KeyQ"
+                # Windows reports AltGr as Ctrl+Alt (and Blink still inserts
+                # the text there); Linux reports it as a key of its own.
+                modifiers = 6 if character == "@" and WINDOWS else 0
+                for pressed in (True, False):
+                    key = {"key": character, "code": code, "modifiers": modifiers, "pressed": pressed}
+                    if pressed:
+                        key["text"] = character
+                    command("input", {"input": {"type": "keyboard", "payload": key}})
+            typed = True
 
     result = 0
     latest = state["latest"]
@@ -455,6 +513,16 @@ def main(argv: list[str] | None = None) -> int:
             if distinct < 2:
                 print("the newest frame is blank", file=sys.stderr)
                 result = 1
+            if args.type_text and not (args.url or args.youtube):
+                if not typed:
+                    print("the page never focused its field", file=sys.stderr)
+                    result = 1
+                elif corner_is(frame, TYPED_GREEN):
+                    print(f"typed {args.type_text!r} into the page")
+                else:
+                    corner = tuple(pixels[(5 * width + 5) * 4 :][:3])
+                    print(f"the typed text did not reach the page (corner {corner})", file=sys.stderr)
+                    result = 1
             if args.png:
                 write_png(args.png, width, height, pixels)
     print("events:", " ".join(dict.fromkeys(events)))

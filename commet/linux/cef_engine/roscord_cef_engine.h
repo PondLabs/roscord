@@ -25,7 +25,7 @@
 extern "C" {
 #endif
 
-#define ROSCORD_CEF_ENGINE_ABI_VERSION 1u
+#define ROSCORD_CEF_ENGINE_ABI_VERSION 2u
 
 #if defined(ROSCORD_CEF_ENGINE_IMPLEMENTATION)
 #define ROSCORD_CEF_ENGINE_EXPORT __attribute__((visibility("default")))
@@ -155,9 +155,11 @@ ROSCORD_CEF_ENGINE_EXPORT void roscord_cef_engine_pointer(uint64_t surface_id, i
                                 double y, uint32_t buttons,
                                 uint32_t modifiers, double delta_x,
                                 double delta_y);
+// `text` is what the press typed (empty for releases, shortcuts and keys that
+// type nothing); each UTF-16 unit becomes a CHAR event.
 ROSCORD_CEF_ENGINE_EXPORT void roscord_cef_engine_key(uint64_t surface_id, const char* key,
-                            const char* code, uint32_t modifiers,
-                            int32_t pressed);
+                            const char* code, const char* text,
+                            uint32_t modifiers, int32_t pressed);
 ROSCORD_CEF_ENGINE_EXPORT void roscord_cef_engine_ime(uint64_t surface_id, int32_t phase,
                             const char* text, uint32_t selection_start,
                             uint32_t selection_end);

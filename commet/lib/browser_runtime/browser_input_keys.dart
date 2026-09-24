@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'browser_runtime.dart';
@@ -155,6 +156,40 @@ String w3cKey(KeyEvent event) {
   }
   final label = event.logicalKey.keyLabel;
   return label.isEmpty ? 'Unidentified' : label;
+}
+
+/// The text a key press types, or null for releases, shortcuts and keys that
+/// type nothing. The hosts turn it into character events.
+///
+/// Windows reports what the keyboard layout produced: a control character
+/// for Ctrl shortcuts, nothing for an unmapped Ctrl+Alt combination, and the
+/// character for AltGr, which it reports as Ctrl+Alt. Linux reports a key's
+/// character under Ctrl and Alt too, so there those modifiers type nothing,
+/// while AltGr, a key of its own there, still types.
+String? typedText(
+  KeyEvent event, {
+  TargetPlatform? platform,
+  HardwareKeyboard? keyboard,
+}) {
+  if (event is KeyUpEvent) return null;
+  final state = keyboard ?? HardwareKeyboard.instance;
+  if (state.isMetaPressed) return null;
+  final chorded = state.isControlPressed || state.isAltPressed;
+  final logical = event.logicalKey;
+  if (logical == LogicalKeyboardKey.enter ||
+      logical == LogicalKeyboardKey.numpadEnter) {
+    return chorded ? null : '\r';
+  }
+  if (logical == LogicalKeyboardKey.tab) return chorded ? null : '\t';
+  final character = event.character;
+  if (character == null ||
+      character.isEmpty ||
+      character.runes.any((rune) => rune < 0x20 || rune == 0x7f)) {
+    return null;
+  }
+  final windows = (platform ?? defaultTargetPlatform) == TargetPlatform.windows;
+  if (!windows && chorded) return null;
+  return character;
 }
 
 /// [InputModifiers] bits for the modifier keys held right now.

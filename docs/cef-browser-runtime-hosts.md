@@ -47,7 +47,9 @@ BGRA to RGBA. It then sends `frame_ready` with the ring's name in
 
 - **Linux ring**: POSIX shared memory,
   `/roscord-cef-<host pid>-<random>-<surface>-<generation>`. It is created
-  exclusively with mode 0600. It is unlinked when the surface closes, or when
+  exclusively with mode 0600, with its pages allocated up front so a full
+  `/dev/shm` drops the frame instead of crashing the host. It is unlinked
+  when the surface closes, or when
   a bigger frame needs bigger slots and the ring is replaced by the next
   generation. A starting host removes rings left behind by dead hosts.
 - **Windows ring**: a named file mapping, `Local\roscord-cef-...`, replaced
@@ -78,7 +80,8 @@ The Linux host paints at 30 fps by default (`ROSCORD_CEF_FRAME_RATE`, 1 to
 - moves and hovers, and a leave when the pointer exits;
 - wheel and trackpad pans;
 - focus;
-- keys as W3C `key` and `code` values with modifier bits.
+- keys as W3C `key` and `code` values with modifier bits, plus the text
+  the press typed (`typedText`).
 
 Escape also reaches the app, which uses it to close the dialog.
 
@@ -87,7 +90,11 @@ Escape also reaches the app, which uses it to close the dialog.
 - translate `code` into Windows virtual-key and scan codes, and into X11
   evdev codes (`browser_surface/native/browser_input.h`);
 - count clicks;
-- send a character event for keys that type one.
+- send character events for the text a press typed.
+
+The text comes from the platform's keyboard layout, so AltGr characters and
+Windows dead keys type correctly. Windows reports AltGr as Ctrl+Alt, so a
+rule based on modifiers would block them.
 
 The page's cursor comes back as `cursor_changed` (a CSS keyword), and the view
 shows the matching Flutter cursor.
@@ -187,8 +194,12 @@ wrapper builds against the experimental API.
 - Smoke-test options: `--youtube <video id>` opens the YouTube wrapper,
   `--png out.png` saves the newest frame, and `--click`/`--hover` send input.
   CI adds `--software`.
+- `--type TEXT` types into the fixture's input field. It sends `@` the way
+  Windows reports AltGr.
 - `ROSCORD_CEF_HOST_LOG=<file>` makes the Linux host log its process starts
-  and lifecycle. `ROSCORD_CEF_LOG_FILE=<file>` turns on CEF's own log.
+  and lifecycle. The Windows host writes the stage that stopped it there, and
+  on stderr, when it exits before opening its pipe. `ROSCORD_CEF_LOG_FILE=<file>`
+  turns on CEF's own log on Linux.
 - Unit tests:
   - Dart: `unit_test/embedded_browser_surface_test.dart`,
     `browser_input_keys_test.dart`, `media_embed_adapter_test.dart` and
@@ -222,9 +233,11 @@ These exist but are off. They are where adblock-rust would plug in.
   - Installing the helper root-owned with mode 4755 fixes it, and the Debian
     package job does that. So does an AppArmor profile that allows `userns`
     for `cef_host`.
-- **Input methods.** Keys go through as key events. Composition from an
-  input method and dead keys do not: the `ime` command exists, but the view
-  does not drive it yet.
+- **Input methods.** Keys go through as key events with the text they
+  typed. The view does not drive composition from an input method yet (the
+  `ime` command exists). Dead keys work on Windows, where the layout composes
+  the character. They do not work on Linux, where GTK composes only for text
+  fields.
 - **Windows `<select>`.** Drop-downs are not composited into the frame yet.
 - **Linux standalone surfaces.** The engine only renders off-screen, and
   nothing presents standalone (owned-window) surfaces on Linux.

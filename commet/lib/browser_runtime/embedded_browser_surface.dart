@@ -299,6 +299,7 @@ class EmbeddedBrowserSurface {
     String code, {
     int modifiers = 0,
     required bool pressed,
+    String? text,
   }) =>
       _send(
         (sequence) => SurfaceCommand.input(
@@ -309,6 +310,7 @@ class EmbeddedBrowserSurface {
             code: code,
             modifiers: modifiers,
             pressed: pressed,
+            text: text,
           ),
         ),
       );
@@ -622,6 +624,7 @@ class _EmbeddedBrowserViewState extends State<EmbeddedBrowserView> {
         w3cCode(event.physicalKey),
         modifiers: currentInputModifiers(),
         pressed: pressed,
+        text: typedText(event),
       ),
     );
     // Escape also reaches the app, which uses it to leave fullscreen or
