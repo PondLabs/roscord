@@ -34,13 +34,18 @@ enum DiagnosticConsent { granted, denied }
 /// Uses FNV-1a 64-bit and renders as `profile-<16 hex>` so logs never carry
 /// the raw stable local account-record identity.
 String hashProfileKey(String profileKey) {
-  var hash = 0xcbf29ce484222325;
+  // BigInt, not int: the web build has no 64-bit integers, and a signed VM
+  // int would print a set top bit as a minus sign.
+  var hash = _fnvOffsetBasis;
   for (final unit in profileKey.codeUnits) {
-    hash ^= unit;
-    hash = (hash * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF;
+    hash = ((hash ^ BigInt.from(unit)) * _fnvPrime) & _fnvMask;
   }
   return 'profile-${hash.toRadixString(16).padLeft(16, '0')}';
 }
+
+final BigInt _fnvOffsetBasis = BigInt.parse('cbf29ce484222325', radix: 16);
+final BigInt _fnvPrime = BigInt.parse('100000001b3', radix: 16);
+final BigInt _fnvMask = (BigInt.one << 64) - BigInt.one;
 
 /// Records only the origin (scheme + host) of a URL, never the full URL,
 /// path, query, or fragment. Controlled fixture URLs map to their origin;

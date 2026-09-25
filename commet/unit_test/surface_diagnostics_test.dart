@@ -13,6 +13,14 @@ void main() {
       expect(first, isNot(other));
     });
 
+    test('profile hashes are FNV-1a 64 as 16 hex digits on every platform', () {
+      // Reference vectors from the FNV spec. dart2js has no 64-bit ints, and
+      // on the VM a set top bit made the hash negative ("profile--...").
+      expect(hashProfileKey(''), 'profile-cbf29ce484222325');
+      expect(hashProfileKey('a'), 'profile-af63dc4c8601ec8c');
+      expect(hashProfileKey('foobar'), 'profile-85944171f73967e8');
+    });
+
     test('origins are recorded instead of full URLs', () {
       expect(
         diagnosticOrigin('https://widgets.test/view?x=1#frag'),
