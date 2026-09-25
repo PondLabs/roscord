@@ -10,6 +10,9 @@ class MainFlutterWindow: NSWindow {
 
     RegisterGeneratedPlugins(registry: flutterViewController)
 
+    // COMMET: the call controls in the Dock menu (issue #146).
+    VoiceDockMenu.shared.attach(to: flutterViewController.engine.binaryMessenger)
+
     super.awakeFromNib()
   }
 }

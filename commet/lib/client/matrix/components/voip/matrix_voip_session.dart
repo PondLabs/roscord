@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:commet/client/client.dart';
 import 'package:commet/client/components/voip/android_screencapture_source.dart';
+import 'package:commet/client/components/voip/deafen_rule.dart';
 import 'package:commet/client/components/voip/voip_session.dart';
 import 'package:commet/client/components/voip/voip_stream.dart';
 import 'package:commet/client/components/voip/webrtc_default_devices.dart';
@@ -72,7 +73,9 @@ class MatrixVoipSession implements VoipSession {
   @override
   Stream<void> get onStateChanged => _onStateChanged.stream;
 
-  bool _isDeafened = false;
+  final DeafenRule _deafen = DeafenRule();
+
+  bool get _isDeafened => _deafen.deafened;
 
   @override
   bool get isDeafened => _isDeafened;
@@ -165,9 +168,10 @@ class MatrixVoipSession implements VoipSession {
 
   @override
   Future<void> setMicrophoneMute(bool state) async {
-    // Regra do Discord: desmutar microfone enquanto ensurdecido cancela o deafen
+    // As in Discord, unmuting while deafened undeafens too (DeafenRule).
     if (!state && _isDeafened) {
-      await setDeafened(false);
+      _deafen.unmute();
+      await _applyDeafened(micMuted: false);
       return;
     }
     return session.setMicrophoneMuted(state);
@@ -175,10 +179,20 @@ class MatrixVoipSession implements VoipSession {
 
   @override
   Future<void> setDeafened(bool state) async {
-    _isDeafened = state;
-
     if (state) {
-      await session.setMicrophoneMuted(true);
+      _deafen.deafen(micMuted: isMicrophoneMuted);
+      await _applyDeafened(micMuted: true);
+    } else {
+      // Back to the mute from before deafening (DeafenRule).
+      await _applyDeafened(
+          micMuted: _deafen.undeafen(micMuted: isMicrophoneMuted));
+    }
+  }
+
+  Future<void> _applyDeafened({required bool micMuted}) async {
+    await session.setMicrophoneMuted(micMuted);
+
+    if (_isDeafened) {
       for (var remoteStream in session.getRemoteStreams) {
         var tracks = remoteStream.stream?.getAudioTracks();
         if (tracks != null) {
@@ -188,7 +202,6 @@ class MatrixVoipSession implements VoipSession {
         }
       }
     } else {
-      await session.setMicrophoneMuted(false);
       for (var remoteStream in session.getRemoteStreams) {
         var tracks = remoteStream.stream?.getAudioTracks();
         if (tracks != null) {

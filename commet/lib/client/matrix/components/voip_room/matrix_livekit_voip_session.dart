@@ -8,6 +8,7 @@ import 'package:commet/client/components/activities/activities_component.dart';
 import 'package:commet/client/components/voip/audio_processing/audio_processing_manager.dart';
 import 'package:commet/client/components/voip/audio_processing/microphone_noise_suppression.dart';
 import 'package:commet/client/components/voip/audio_processing/noise_suppression_notice.dart';
+import 'package:commet/client/components/voip/deafen_rule.dart';
 import 'package:commet/client/components/voip/voip_session.dart';
 import 'package:commet/client/components/voip/voip_stream.dart';
 import 'package:commet/client/components/user_presence/user_idle_watcher.dart';
@@ -935,7 +936,9 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
     }
   }
 
-  bool _isDeafened = false;
+  final DeafenRule _deafen = DeafenRule();
+
+  bool get _isDeafened => _deafen.deafened;
 
   @override
   bool get isDeafened => _isDeafened;
@@ -1002,9 +1005,10 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
 
   @override
   Future<void> setMicrophoneMute(bool state) async {
-    // Regra do Discord: desmutar microfone enquanto ensurdecido cancela o deafen
+    // As in Discord, unmuting while deafened undeafens too (DeafenRule).
     if (!state && _isDeafened) {
-      await setDeafened(false);
+      _deafen.unmute();
+      await _applyDeafened(micMuted: false);
       return;
     }
 
@@ -1018,11 +1022,21 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
 
   @override
   Future<void> setDeafened(bool state) async {
-    _isDeafened = state;
+    if (state) {
+      _deafen.deafen(micMuted: isMicrophoneMuted);
+      await _applyDeafened(micMuted: true);
+    } else {
+      // Back to the mute from before deafening (DeafenRule).
+      await _applyDeafened(
+          micMuted: _deafen.undeafen(micMuted: isMicrophoneMuted));
+    }
+  }
 
-    await livekitRoom.localParticipant?.setMicrophoneEnabled(!state,
-        audioCaptureOptions: await _micOptions(enabling: !state));
-    if (!state) unawaited(_noiseSuppression.update());
+  Future<void> _applyDeafened({required bool micMuted}) async {
+    await livekitRoom.localParticipant?.setMicrophoneEnabled(!micMuted,
+        audioCaptureOptions: await _micOptions(enabling: !micMuted));
+    // A noise suppression change made while muted is applied now.
+    if (!micMuted) unawaited(_noiseSuppression.update());
 
     for (var stream in streams) {
       if (stream is MatrixLivekitVoipStream) {
@@ -1032,7 +1046,7 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
 
     final localIdentity = livekitRoom.localParticipant?.identity;
     if (localIdentity != null) {
-      _setStreamsDeafened(localIdentity, state);
+      _setStreamsDeafened(localIdentity, _isDeafened);
     }
 
     _broadcastVoiceState();

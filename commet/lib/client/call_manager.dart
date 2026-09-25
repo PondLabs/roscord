@@ -175,6 +175,26 @@ class CallManager {
     }));
   }
 
+  /// Leaves every call the user is in, for the disconnect control outside
+  /// the window. A call that is only ringing is not one they are in: it goes
+  /// on ringing rather than being declined on their behalf.
+  Future<void> disconnect() async {
+    final calls = currentSessions
+        .where((session) =>
+            session.state != VoipState.incoming &&
+            session.state != VoipState.ended)
+        .toList();
+
+    await Future.wait(calls.map((session) async {
+      try {
+        Log.i("Disconnecting from ${session.roomName}");
+        await session.hangUpCall();
+      } catch (e, s) {
+        Log.onError(e, s, content: "Could not leave ${session.roomName}");
+      }
+    }));
+  }
+
   VoipSession? getCallInRoom(Client client, String roomId) {
     return currentSessions
         .where(
@@ -304,13 +324,12 @@ class CallManager {
     }
   }
 
+  /// Unmuting a deafened session undeafens it too, and opens the mic even if
+  /// it was muted before deafening: the session does both (DeafenRule).
+  /// Undeafening instead would put that earlier mute back.
   void unmute() {
     for (var session in currentSessions) {
-      if (session.isDeafened) {
-        session.setDeafened(false);
-      } else {
-        session.setMicrophoneMute(false);
-      }
+      session.setMicrophoneMute(false);
     }
 
     playUnmuteSound();

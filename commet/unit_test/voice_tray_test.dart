@@ -1,4 +1,5 @@
 import 'package:commet/client/components/voip/voip_session.dart';
+import 'package:commet/utils/voice_controls/voice_controls.dart';
 import 'package:commet/utils/voice_tray.dart';
 import 'package:test/test.dart';
 
@@ -55,6 +56,32 @@ void main() {
             _Session(VoipState.connecting),
           ]),
           VoiceTrayStatus.live);
+    });
+  });
+
+  group("Tray menu", () {
+    List<String> menu(VoiceCallState state) => VoiceTray.menuOf(state)
+        .items!
+        .map((item) => item.type == "separator" ? "-" : item.label!)
+        .toList();
+
+    test("open and quit when not in a call", () {
+      expect(menu(VoiceCallState.idle), ["Open roscord", "-", "Quit"]);
+    });
+
+    test("the call controls, disconnect included, while in a call", () {
+      expect(
+          menu(
+              const VoiceCallState(inCall: true, muted: true, deafened: false)),
+          [
+            "Open roscord",
+            "-",
+            "Unmute",
+            "Deafen",
+            "Disconnect",
+            "-",
+            "Quit",
+          ]);
     });
   });
 }

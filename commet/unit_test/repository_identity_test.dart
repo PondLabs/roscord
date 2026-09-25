@@ -118,7 +118,9 @@ final _legacyIdentityAllowlist = <_Allowance>[
     path:
         r'linux/(?:flatpak|debian/usr/share/applications)/chat\.commet\.commetapp\.desktop',
     token: r'.*commet.*',
-    count: 9,
+    // Three of these are the call control actions' Exec lines in the
+    // Debian file, which run the installed executable (issue #146).
+    count: 12,
     reason: _distributionIdentity,
   ),
   _Allowance(

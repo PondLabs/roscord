@@ -7,3 +7,22 @@ Icon=commet-desktop
 StartupWMClass=chat.commet.commetapp
 Comment=Your space to connect!
 Categories=Network;InstantMessaging;Chat;
+Actions=ToggleMute;ToggleDeafen;Disconnect
+
+[Desktop Action ToggleMute]
+Name=Mute or Unmute
+Name[pt_BR]=Silenciar ou dessilenciar
+Icon=audio-input-microphone-symbolic
+Exec=/usr/lib/chat.commet.commetapp/commet --shortcut toggle_mute
+
+[Desktop Action ToggleDeafen]
+Name=Deafen or Undeafen
+Name[pt_BR]=Desativar ou reativar áudio
+Icon=audio-headphones-symbolic
+Exec=/usr/lib/chat.commet.commetapp/commet --shortcut toggle_deafen
+
+[Desktop Action Disconnect]
+Name=Disconnect
+Name[pt_BR]=Desconectar
+Icon=call-stop-symbolic
+Exec=/usr/lib/chat.commet.commetapp/commet --shortcut disconnect

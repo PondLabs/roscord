@@ -2237,5 +2237,41 @@
     "placeholders": {
       "roomName": {}
     }
+  },
+  "labelVoiceControlMute": "Mute",
+  "@labelVoiceControlMute": {
+    "description": "Call control outside the window (taskbar thumbnail, Dock menu, tray) that mutes the microphone",
+    "type": "text",
+    "placeholders": {}
+  },
+  "labelVoiceControlUnmute": "Unmute",
+  "@labelVoiceControlUnmute": {
+    "description": "Call control outside the window that unmutes the microphone, and undeafens when deafened",
+    "type": "text",
+    "placeholders": {}
+  },
+  "labelVoiceControlDeafen": "Deafen",
+  "@labelVoiceControlDeafen": {
+    "description": "Call control outside the window that stops the user hearing the call",
+    "type": "text",
+    "placeholders": {}
+  },
+  "labelVoiceControlUndeafen": "Undeafen",
+  "@labelVoiceControlUndeafen": {
+    "description": "Call control outside the window that lets the user hear the call again",
+    "type": "text",
+    "placeholders": {}
+  },
+  "labelVoiceControlDisconnect": "Disconnect",
+  "@labelVoiceControlDisconnect": {
+    "description": "Call control outside the window that leaves the call",
+    "type": "text",
+    "placeholders": {}
+  },
+  "tooltipPopOutControls": "Pop out call controls",
+  "@tooltipPopOutControls": {
+    "description": "Tooltip on the call panel button (browser only) that opens the mute, deafen and disconnect buttons in a small window that stays on top of other windows",
+    "type": "text",
+    "placeholders": {}
   }
 }
