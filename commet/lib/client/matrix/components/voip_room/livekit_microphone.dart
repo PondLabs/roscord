@@ -5,6 +5,9 @@ import 'package:collection/collection.dart';
 import 'package:commet/client/components/voip/audio_processing/audio_processing_manager.dart';
 import 'package:commet/client/components/voip/audio_processing/microphone_noise_suppression.dart';
 import 'package:commet/client/components/voip/audio_processing/noise_suppression_notice.dart';
+import 'package:commet/client/components/voip/audio_processing/shared_audio_processing.dart';
+import 'package:commet/debug/log.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:livekit_client/livekit_client.dart' as lk;
 
 /// Capture options for a room's microphone. WebRTC's (the browser's) own
@@ -111,5 +114,51 @@ class LivekitMicrophone implements MicrophoneCapture {
     if (track == null) return;
     await track.restartTrack(track.currentOptions
         .copyWith(noiseSuppression: webrtcNoiseSuppression));
+  }
+}
+
+/// Desktop: once [custom] (screen-share audio, the DJ booth's music) has
+/// written its options onto the audio processing module WebRTC shares with
+/// the microphone, writes the microphone's back (see
+/// shared_audio_processing.dart). A custom source writes them when its
+/// sender is negotiated, which LiveKit does after announcing the
+/// publication, so this waits for the sender to have outbound RTP
+/// statistics, and restores anyway after [timeout].
+Future<bool> restoreMicrophoneProcessingAfter(
+  lk.LocalTrackPublication custom,
+  lk.LocalParticipant participant, {
+  bool? overridden,
+  Duration timeout = const Duration(seconds: 10),
+  Duration poll = const Duration(milliseconds: 100),
+}) async {
+  if (!(overridden ?? customAudioSourcesOverrideMicrophone)) return false;
+  if (custom.kind != lk.TrackType.AUDIO ||
+      custom.source == lk.TrackSource.microphone) {
+    return false;
+  }
+  final sender = custom.track?.sender;
+  if (sender != null) {
+    final deadline = DateTime.now().add(timeout);
+    while (!await _negotiated(sender)) {
+      if (DateTime.now().isAfter(deadline)) {
+        Log.w("Voice: a custom audio source was not negotiated in "
+            "${timeout.inSeconds} s; restoring the microphone's processing "
+            "anyway");
+        break;
+      }
+      await Future<void>.delayed(poll);
+    }
+  }
+  final track = microphonePublication(participant)?.track;
+  if (track == null) return false;
+  return restoreMicrophoneProcessing(track.mediaStreamTrack,
+      overridden: overridden);
+}
+
+Future<bool> _negotiated(rtc.RTCRtpSender sender) async {
+  try {
+    return (await sender.getStats()).any((r) => r.type == 'outbound-rtp');
+  } catch (_) {
+    return false;
   }
 }

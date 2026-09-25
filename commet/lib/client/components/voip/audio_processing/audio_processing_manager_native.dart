@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:ffi';
 
+import 'package:collection/collection.dart';
+
 import 'package:commet/client/components/voip/audio_processing/audio_dsp_settings.dart';
 import 'package:commet/client/components/voip/audio_processing/audio_processing_manager.dart';
 import 'package:commet/client/components/voip/audio_processing/audio_processing_manager_stub.dart'
@@ -488,6 +490,20 @@ class NativeAudioProcessingManager extends AudioProcessingManager {
     return [...await lb.send.getStats(), ...await lb.recv.getStats()];
   }
 
+  /// The microphone test's capture track, for the native noise loop.
+  @visibleForTesting
+  webrtc.MediaStreamTrack? get debugMicTestMicrophone =>
+      _loopback?.mic.getAudioTracks().firstOrNull;
+
+  /// Sends [track] next to the microphone test's microphone, as a call
+  /// sends the DJ booth's music or a screen share's audio next to it, for
+  /// the native noise loop.
+  @visibleForTesting
+  Future<void> debugMicTestAddTrack(
+      webrtc.MediaStreamTrack track, webrtc.MediaStream stream) async {
+    await _loopback?.addTrack(track, stream);
+  }
+
   @override
   Future<void> setMicTestMonitor(bool enabled) async {
     _monitor = enabled;
@@ -586,7 +602,8 @@ class _MicLoopback {
       };
       recv.onTrack = (event) {
         final track = event.track;
-        if (track.kind != 'audio') return;
+        // The first audio track is the microphone's.
+        if (track.kind != 'audio' || lb._remote != null) return;
         lb._remote = track;
         lb._applyMonitor();
       };
@@ -614,6 +631,18 @@ class _MicLoopback {
       await _closeAll(send, recv, mic);
       rethrow;
     }
+  }
+
+  /// Another track on the sending side, negotiated like the first.
+  Future<void> addTrack(
+      webrtc.MediaStreamTrack track, webrtc.MediaStream stream) async {
+    await send.addTrack(track, stream);
+    final offer = await send.createOffer({});
+    await send.setLocalDescription(offer);
+    await recv.setRemoteDescription(offer);
+    final answer = await recv.createAnswer({});
+    await recv.setLocalDescription(answer);
+    await send.setRemoteDescription(answer);
   }
 
   void setMonitor(bool enabled) {

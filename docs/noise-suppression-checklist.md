@@ -51,7 +51,7 @@ Status legend: `[ ]` open, `[x]` done.
 | 7 | `build.yml` web artifacts had no wasm; `release.yml` lacked the wasm32 target | CI | fixed c01bef24 |
 | 8 | Watchdog, restart and mute act on the DJ music or screen audio when the mic was not published first | `audioTrackPublications.firstOrNull` | fixed f7c1e8a8 |
 | 9 | Legacy 1:1 ignores the preference: desktop runs both suppressors, the web never runs ours | SDK constraints straight to getUserMedia | fixed 69ab030c |
-| 10 | Desktop: screen audio or DJ music switches WebRTC's NS/AEC off for the mic | per-sender options applied to the shared APM (confirmed in libwebrtc source) | open: needs a product decision, see Known gaps |
+| 10 | Desktop: screen audio or DJ music switches WebRTC's NS/AEC/AGC off for the mic, until a mute and unmute (measured: -41 → -29 dB of room noise) | per-sender options applied to the shared APM, last writer wins | mitigated (option B, chosen 2026-09-25): the mic's options written back after each custom source; relies on a libwebrtc internal, guarded by the native loop (see Known gaps in docs/voice-audio-processing.md) |
 | 11 | Every fallback was a log line: the user never learned suppression was not ours | | fixed f7c1e8a8, a56519ea |
 | 12 | `isProcessing` true for 0.5 s with no audio at every start and restart | frames 0 counted as progress | fixed 22131905 |
 | 13 | After an app refresh, the old CallManager's late hang-up takes the DSP off the rejoined call | DSP relied on "a CallManager's list is empty" | fixed dae2dd1a |

@@ -299,6 +299,8 @@ tools/voice_dsp/native_noise_loop.sh
 | The browser DSP suppresses; a missing or broken wasm or worklet is caught by `probe()` and `create()` | `web_noise_loop.mjs` | ci `voice-dsp` |
 | What a room's RTCRtpSender carries in the browser is suppressed, before and after a restart; a legacy call's too; no wasm keeps the browser's suppressor | `web_noise_loop.mjs --app` | ci `voice-dsp` |
 | Inside the real WebRTC (Linux): the microphone test on the picked device, "Hear myself" off, noise ≥ 20 dB down in what is encoded | `native_noise_loop.sh` | integration-test |
+| Screen audio and DJ music do not leave the microphone without WebRTC's processing: restored after negotiation, not for the mic itself, not while muted, desktop only | `shared_audio_processing_test.dart` | ci `test` |
+| ... and inside the real WebRTC, with the DJ's music track: restored to within 3 dB of before (the libwebrtc internal it relies on still holds) | `native_noise_loop.sh` | integration-test |
 
 `publish` in ci.yml waits for `voice-dsp`: a release does not go out with
 browser suppression broken. The Rust and Dart tests run in `test`, which
@@ -322,10 +324,13 @@ Ordered by how badly it hurts if wrong.
    call makes it and puts it on a sender, and the SFU does not touch audio,
    but no loop joins a room: a native test against a local `livekit-server
    --dev` would close that.
-4. **Screen-share system audio and DJ music with suppression on.** Custom
-   sources bypass the capture APM, so they are not gated; their options
-   still switch WebRTC's own NS and AEC off for the microphone (see "Known
-   gaps").
+4. **Screen-share system audio and DJ music with speakers.** Custom sources
+   bypass the capture APM, so they are not gated, and the microphone's echo
+   cancellation is restored after they start (see "Known gaps"). The loop
+   measures noise suppression coming back; that the echo canceller comes
+   back with it follows from the same options, but only a listener hears
+   echo: share a video with sound on speakers and ask someone whether they
+   hear themselves.
 5. **Encrypted rooms on web** still decrypt with the processed track, before
    and after a mic switch.
 6. **Packaged builds** (flatpak, .deb, MSIX, a web server serving
@@ -454,16 +459,50 @@ your speakers." within two seconds of the video starting.
   glue not written.
 - Desktop: every audio sender's AudioOptions are merged into its channel's
   and applied to the one APM the process shares
-  (`WebRtcVoiceSendChannel::SetOptions`, `ApplyAudioProcessingOptions`).
-  Screen-share system audio and the DJ booth's music are custom sources
-  created with echo cancellation, noise suppression and gain control off, so
-  publishing either switches those off for the microphone until it is
-  re-enabled. With our DSP on, WebRTC's NS is off anyway and our hook keeps
-  running; what is lost is echo cancellation, and noise suppression where
-  WebRTC's is the one meant to run (preference off, DSP unavailable, the
-  watchdog's fallback). Not fixed: it needs a decision on what options a
-  custom source should carry (the microphone's, or none), in
-  `flutter_screen_capture.cc` and `commet_music_source.h`.
+  (`WebRtcVoiceSendChannel::SetAudioSend` → `SetOptions` →
+  `ApplyAudioProcessingOptions`), the last writer wins, and removing a
+  sender writes nothing back. Screen-share system audio and the DJ booth's
+  music are custom sources created with echo cancellation, gain control and
+  noise suppression off. Measured by the native loop: WebRTC's processing
+  takes the room noise from -29 to -41 dB on the microphone, and with the
+  DJ's music published it is back at -29 until the microphone's options are
+  written again. What the user loses is echo cancellation (echo for everyone
+  listening to someone on loudspeakers) and gain control, and noise
+  suppression where WebRTC's is the one meant to run (preference off, DSP
+  unavailable, the watchdog's fallback).
+
+  **Mitigation in place (option B, 2026-09-25):** after any local audio
+  publication that is not the microphone, once its sender is negotiated
+  (it has outbound RTP statistics), `restoreMicrophoneProcessingAfter`
+  (`voip_room/livekit_microphone.dart`) turns the microphone's track off
+  and on, and re-enabling it makes its sender write its options back
+  (`audio_processing/shared_audio_processing.dart`). A muted microphone is
+  left alone: unmuting writes them. Each restore logs "Voice: put the
+  microphone's echo cancellation, gain control and noise suppression back
+  after a custom audio source".
+
+  **The weak point, for whoever looks at this later:** the mitigation relies
+  on a libwebrtc internal (a re-enabled sender re-applies its options), not
+  on an API. `integration_test/voice_dsp/native_noise_test.dart` ("a custom
+  audio source leaves the microphone's processing alone", run by
+  `tools/voice_dsp/native_noise_loop.sh` and the integration-test workflow)
+  measures it inside the real WebRTC in three phases and prints them:
+  `before -40.9 dB, with the custom source -28.8 dB, restored -40.8 dB`.
+  - It fails when "restored" does not come back to "before": a libwebrtc
+    update stopped re-applying options on re-enable. Then the options have
+    to travel with the custom source instead (option A): create the screen
+    audio and music sources with the microphone's options
+    (`flutter_screen_capture.cc`, `commet_music_source.h`; the values from
+    `microphoneConstraints`), and recreate them when the preference flips.
+  - It prints "no longer changes the microphone's processing" when "with the
+    custom source" stays near "before": the leak is gone in that libwebrtc
+    and the mitigation can be removed.
+  - `check_contracts.py` fails if a merge drops the call from the session or
+    the re-enable from `restoreMicrophoneProcessing`.
+
+  Also: the microphone is disabled for the ~10 ms between the two platform
+  calls, and a custom source whose sender is never negotiated gets the
+  microphone restored after 10 s anyway.
 - Web per-user volume goes through a `volume` constraint browsers ignore;
   fix with the LiveKit audio element's `volume` and a GainNode for boost.
 - Only channel 0 reaches the native hook; a stereo mic's second channel is

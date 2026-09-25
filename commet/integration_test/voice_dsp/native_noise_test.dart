@@ -14,12 +14,20 @@
 library;
 
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:commet/client/components/voip/audio_processing/audio_processing_manager.dart';
 import 'package:commet/client/components/voip/audio_processing/audio_processing_manager_native.dart';
+import 'package:commet/client/components/voip/audio_processing/shared_audio_processing.dart';
 import 'package:commet/client/components/voip/webrtc_default_devices.dart';
+import 'package:commet/client/matrix/components/dj/native/dj_music_player.dart';
 import 'package:commet/main.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
+// The stream flutter-webrtc returns for native tracks, as the DJ booth
+// builds it.
+// ignore: implementation_imports
+import 'package:flutter_webrtc/src/native/media_stream_impl.dart';
 import 'package:integration_test/integration_test.dart';
 
 const _mic = String.fromEnvironment('NS_LOOP_MIC');
@@ -28,6 +36,7 @@ const _fixture = String.fromEnvironment('NS_LOOP_FIXTURE');
 const _results = String.fromEnvironment('NS_LOOP_RESULTS');
 const _captureOverrides = String.fromEnvironment('NS_LOOP_CAPTURE');
 const _out = String.fromEnvironment('NS_LOOP_OUT');
+const _roomNoise = String.fromEnvironment('NS_LOOP_ROOM_NOISE');
 const _monitor = bool.fromEnvironment('NS_LOOP_MONITOR');
 
 void main() {
@@ -123,6 +132,129 @@ void main() {
       expect(report.noiseSuppressionActive, isTrue);
 
       await dsp.stopMicTest();
+    });
+  });
+
+  // Desktop WebRTC shares one audio processing module between every sender,
+  // and a custom source (the DJ booth's music, a screen share's audio) writes
+  // its own options there: echo cancellation, gain control and noise
+  // suppression off. The app writes the microphone's back
+  // (restoreMicrophoneProcessing), which relies on a libwebrtc internal:
+  // re-enabling a track makes its sender apply its options again. This is
+  // the test that says when that stops being true.
+  //
+  // Our DSP is made transparent (suppression off, the gate wide open), so
+  // what changes the room noise is WebRTC's own processing on the
+  // microphone, measured on what its sender encodes: A before the custom
+  // source, B once it is sent too, C after the microphone's options are
+  // written back.
+  testWidgets("a custom audio source leaves the microphone's processing alone",
+      (tester) async {
+    expect(_roomNoise, isNotEmpty,
+        reason: 'run tools/voice_dsp/native_noise_loop.sh');
+
+    await tester.runAsync(() async {
+      await preferences.init();
+      await preferences.voipNoiseSuppression.set(false);
+      await preferences.voipInputSensitivityAuto.set(false);
+      await preferences.voipInputSensitivityDb.set(-90);
+      await preferences.voipFarEndDucking.set(false);
+      await preferences.voipSpeakerBleed.set(false);
+      await preferences.voipDefaultAudioInput.set(_mic);
+      await preferences.voipDefaultAudioOutput.set(_out);
+
+      final dsp =
+          AudioProcessingManager.instance as NativeAudioProcessingManager;
+      await WebrtcDefaultDevices.selectOutputDevice();
+      expect(await dsp.startMicTest(), isTrue);
+      await dsp.setMicTestMonitor(false);
+      // ignore: invalid_use_of_visible_for_testing_member
+      final mic = dsp.debugMicTestMicrophone!;
+
+      final started = DateTime.now();
+      double now() => DateTime.now().difference(started).inMilliseconds / 1000;
+      final samples = <({double t, double energy, double duration})>[];
+      var sampling = true;
+      final sampler = () async {
+        double? lastE, lastD;
+        while (sampling) {
+          // ignore: invalid_use_of_visible_for_testing_member
+          for (final r in await dsp.debugMicTestStats()) {
+            final v = r.values;
+            if (r.type != 'media-source' || v['trackIdentifier'] != mic.id) {
+              continue;
+            }
+            final e = (v['totalAudioEnergy'] as num?)?.toDouble();
+            final d = (v['totalSamplesDuration'] as num?)?.toDouble();
+            if (e != null && d != null && lastE != null && d > lastD!) {
+              samples.add((t: now(), energy: e - lastE, duration: d - lastD));
+            }
+            lastE = e;
+            lastD = d;
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        }
+      }();
+
+      final noise =
+          await Process.start('paplay', ['--device=$_micSink', _roomNoise]);
+      Future<void> until(double t) => Future<void>.delayed(
+          Duration(milliseconds: ((t - now()) * 1000).round()));
+
+      await until(4.5);
+      final player = DjMusicPlayer(DjMusicBindings.load()!);
+      final response = await rtc.WebRTC.invokeMethod(
+          'commetCreateMusicTrack', <String, dynamic>{
+        'ctx': player.handleAddress,
+        'pull': player.pullAddress,
+      });
+      final music = MediaStreamNative(response['streamId'], 'local')
+        ..setMediaTracks(response['audioTracks'], response['videoTracks']);
+      final musicTrack = music.getAudioTracks().first;
+      // ignore: invalid_use_of_visible_for_testing_member
+      await dsp.debugMicTestAddTrack(musicTrack, music);
+
+      await until(9.0);
+      final restored = restoreMicrophoneProcessing(mic);
+
+      await until(14.0);
+      sampling = false;
+      await sampler;
+      noise.kill();
+      await noise.exitCode;
+      await rtc.WebRTC.invokeMethod(
+          'commetStopMusicTrack', <String, dynamic>{'trackId': musicTrack.id});
+      player.free();
+      await dsp.stopMicTest();
+
+      double level(double from, double to) {
+        var e = 0.0, d = 0.0;
+        for (final s in samples.where((s) => s.t >= from && s.t < to)) {
+          e += s.energy;
+          d += s.duration;
+        }
+        return d > 0 ? 10 * math.log(e / d) / math.ln10 : double.nan;
+      }
+
+      final a = level(2.0, 4.5), b = level(6.5, 9.0), c = level(11.0, 14.0);
+      final summary = 'before ${a.toStringAsFixed(1)} dB, with the custom '
+          'source ${b.toStringAsFixed(1)} dB, restored ${c.toStringAsFixed(1)} dB';
+      await File('$_results/custom_source.txt').writeAsString('$summary\n');
+      // ignore: avoid_print
+      print('custom audio source: $summary');
+      if ((b - a).abs() < 3) {
+        // ignore: avoid_print
+        print('custom audio source: it no longer changes the microphone\'s '
+            'processing in this libwebrtc; restoreMicrophoneProcessing may '
+            'not be needed any more (docs/voice-audio-processing.md)');
+      }
+
+      expect(restored, isTrue);
+      expect(c, closeTo(a, 3),
+          reason: 'the microphone\'s processing did not come back after '
+              'restoreMicrophoneProcessing: $summary. libwebrtc no longer '
+              'reapplies a sender\'s options when its track is re-enabled; '
+              'see shared_audio_processing.dart');
     });
   });
 }

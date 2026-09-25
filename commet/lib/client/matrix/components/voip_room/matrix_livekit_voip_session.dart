@@ -714,6 +714,21 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
       _ownCaptureTrack(track);
     }
 
+    // Screen-share audio or the DJ booth's music: on desktop they switch
+    // the microphone's echo cancellation, gain control and WebRTC noise
+    // suppression off unless it is put back (shared_audio_processing.dart).
+    // Also for a republished share refused below: removing a source does not
+    // undo what it wrote.
+    final local = livekitRoom.localParticipant;
+    if (local != null) {
+      unawaited(restoreMicrophoneProcessingAfter(event.publication, local)
+          .catchError((Object e, StackTrace s) {
+        Log.onError(e, s,
+            content: "Could not restore the microphone's processing");
+        return false;
+      }));
+    }
+
     // A full reconnect clears LiveKit's publication map and republishes the
     // track objects it held. A share this session stopped must not come back:
     // the republish is refused as soon as it arrives, so one click is enough

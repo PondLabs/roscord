@@ -68,6 +68,14 @@ MUST_CONTAIN = [
      "the commet_dsp_* symbols ship inside librust_lib_commet"),
     ("rust/rust/Cargo.toml", r'^audio_dsp = \{ path = "\.\./audio_dsp" \}',
      "librust_lib_commet links the DSP crate"),
+    ("commet/lib/client/matrix/components/voip_room/matrix_livekit_voip_session.dart",
+     r"restoreMicrophoneProcessingAfter\(event\.publication",
+     "screen audio and DJ music leave the microphone's echo cancellation and "
+     "WebRTC noise suppression on (shared_audio_processing.dart)"),
+    ("commet/lib/client/components/voip/audio_processing/shared_audio_processing.dart",
+     r"microphone\.enabled = false;\s*microphone\.enabled = true;",
+     "restoreMicrophoneProcessing re-enables the microphone so its sender "
+     "writes its options back"),
     ("commet/web/index.html", r'<script src="audio_dsp\.js"></script>',
      "the web app loads the DSP glue"),
     ("commet/scripts/prepare-web.sh", r"^\./scripts/build-audio-dsp-wasm\.sh$",

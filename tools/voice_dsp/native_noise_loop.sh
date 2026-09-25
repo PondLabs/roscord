@@ -53,6 +53,7 @@ status=0
     --dart-define=NS_LOOP_MIC="${tag}Mic" \
     --dart-define=NS_LOOP_MIC_SINK="${tag}_feed" \
     --dart-define=NS_LOOP_FIXTURE="$fixtures/noisy_speech_48k.wav" \
+    --dart-define=NS_LOOP_ROOM_NOISE="$fixtures/room_noise_48k.wav" \
     --dart-define=NS_LOOP_RESULTS="$work/results" \
     --dart-define=NS_LOOP_CAPTURE="${NS_LOOP_CAPTURE:-}" \
     --dart-define=NS_LOOP_OUT="${tag}Out" \
@@ -69,4 +70,5 @@ if [ "$status" != 0 ]; then
   exit "$status"
 fi
 echo "DSP report (rate frames flags): $(cat "$work/results/report.txt")"
+echo "WebRTC processing of the microphone around a custom audio source: $(cat "$work/results/custom_source.txt")"
 node "$repo/tools/voice_dsp/measure_stats.mjs" "$work/results"

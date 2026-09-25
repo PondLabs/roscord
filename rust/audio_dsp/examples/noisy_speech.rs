@@ -13,6 +13,8 @@
 //! * `noisy_speech_48k.labels`: one character per 10 ms block of that file:
 //!   `s` the user is talking, `n` only noise and far enough from speech that
 //!   the gate's hold and release are over, `.` neither (do not measure).
+//! * `room_noise_48k.wav`: [`ROOM_NOISE_S`] of the same noise, nobody
+//!   talking.
 //!
 //! The levels are the ones `tests/speaker_bleed.rs` calls typical: the user
 //! at -22 dBFS RMS, the room at about -40 dBFS.
@@ -25,6 +27,7 @@ use audio_dsp::FRAME_SIZE;
 const RATE: usize = 48_000;
 const LEAD_S: f32 = 3.0;
 const TAIL_S: f32 = 2.0;
+const ROOM_NOISE_S: f32 = 16.0;
 /// Only the first two utterances: long enough to measure, short enough that
 /// a real-time loop stays under ten seconds.
 const SPEECH_S: f32 = 5.5;
@@ -89,6 +92,19 @@ fn main() {
     )
     .unwrap();
     std::fs::write(out_dir.join("noisy_speech_48k.labels"), &labels).unwrap();
+
+    // The same room without anyone talking, long enough to hold a noise
+    // level through several changes (native_noise_test.dart, the custom
+    // audio source test).
+    let room = (ROOM_NOISE_S * RATE as f32) as usize;
+    let rumble = coloured_noise(room, 0.08, RUMBLE_DBFS, 0x5eed);
+    let hiss = coloured_noise(room, 0.6, HISS_DBFS, 0xf00d);
+    let room_noise: Vec<f32> = (0..room).map(|i| rumble[i] + hiss[i]).collect();
+    std::fs::write(
+        out_dir.join("room_noise_48k.wav"),
+        write_wav_pcm16(RATE, &room_noise),
+    )
+    .unwrap();
     let noise_only: Vec<f32> = (0..total).map(|i| rumble[i] + hiss[i]).collect();
     println!(
         "{}: {:.1} s, speech {:.1} dBFS, noise {:.1} dBFS, {} speech / {} noise blocks",
