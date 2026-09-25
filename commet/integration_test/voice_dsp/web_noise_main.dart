@@ -13,6 +13,7 @@ import 'dart:js_interop';
 import 'dart:js_interop_unsafe';
 
 import 'package:commet/client/components/voip/audio_processing/audio_processing_manager.dart';
+import 'package:commet/client/components/voip/audio_processing/noise_suppressed_media_devices.dart';
 import 'package:commet/client/matrix/components/voip_room/livekit_microphone.dart';
 import 'package:commet/main.dart' show preferences;
 // ignore: depend_on_referenced_packages
@@ -20,6 +21,8 @@ import 'package:dart_webrtc/dart_webrtc.dart' show MediaStreamTrackWeb;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:livekit_client/livekit_client.dart' as lk;
+import 'package:webrtc_interface/webrtc_interface.dart'
+    show MediaDevices, MediaStream;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -70,8 +73,31 @@ Future<void> main() async {
       return null;
     }
 
+    // A legacy 1:1 call's microphone: matrix-dart-sdk asks the call's
+    // MediaDevices with its own constraints (UserMediaConstraints).
+    Future<JSAny?> legacy() async {
+      // The room's microphone closed first: Chrome's fake microphone plays
+      // its file from the start only for a capture that opens it.
+      await track.stop();
+      await pc.close();
+      final spy = _SpyDevices(rtc.navigator.mediaDevices);
+      final stream = await NoiseSuppressedMediaDevices(spy).getUserMedia({
+        'audio': {
+          'echoCancellation': true,
+          'noiseSuppression': true,
+          'autoGainControl': false,
+        },
+        'video': false,
+      });
+      loop['legacySent'] = _js(stream.getAudioTracks().first);
+      loop['legacyRaw'] = _js(spy.last!.getAudioTracks().first);
+      loop['legacyProcessed'] = (!identical(stream, spy.last)).toJS;
+      return null;
+    }
+
     expose();
     loop['restart'] = (() => restart().toJS).toJS;
+    loop['legacy'] = (() => legacy().toJS).toJS;
     loop['refresh'] = expose.toJS;
     loop['state'] = 'published'.toJS;
   } catch (e, s) {
@@ -82,3 +108,17 @@ Future<void> main() async {
 
 JSObject? _js(rtc.MediaStreamTrack? track) =>
     track is MediaStreamTrackWeb ? track.jsTrack : null;
+
+/// Keeps the stream the browser handed over, before the voice DSP.
+class _SpyDevices implements MediaDevices {
+  final MediaDevices inner;
+  MediaStream? last;
+  _SpyDevices(this.inner);
+
+  @override
+  Future<MediaStream> getUserMedia(Map<String, dynamic> constraints) async =>
+      last = await inner.getUserMedia(constraints);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}

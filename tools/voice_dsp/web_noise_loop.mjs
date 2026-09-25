@@ -39,7 +39,8 @@
 // way a voice room does and puts it on an RTCRtpSender. Scenarios:
 //   app         what the sender carries is suppressed, and still is after
 //               the microphone is restarted (a device switch, the
-//               preference flipping)
+//               preference flipping); and a legacy 1:1 call's microphone,
+//               captured with matrix-dart-sdk's own constraints, is too
 //   app-nowasm  audio_dsp.wasm answers 404: the browser's suppressor stays
 //               on, there is no processor, and the app knows why
 import { spawn } from "node:child_process";
@@ -287,6 +288,9 @@ async function appScenario(name, fixture) {
       await evaluate("__voiceLoop.refresh()");
       out.restarted = JSON.parse(await evaluate(state));
       out.second = await evaluate(record);
+      await evaluate("__voiceLoop.legacy()");
+      out.legacyProcessed = await evaluate("__voiceLoop.legacyProcessed");
+      out.legacy = await evaluate(`window.__voiceLoopRecord(__voiceLoop.legacyRaw, __voiceLoop.legacySent, ${seconds})`);
       return out;
     });
     const problems = [];
@@ -308,6 +312,8 @@ async function appScenario(name, fixture) {
       if (r.restarted?.processor !== true) problems.push("the restart dropped the processor");
       if (r.restarted?.sendingProcessed !== true) problems.push("after the restart the sender does not carry the processed track");
       summary.restarted = checkLevels(problems, "after a restart", fixture, r.second);
+      if (r.legacyProcessed !== true) problems.push("a legacy 1:1 call's microphone does not go through the DSP");
+      summary.legacy = checkLevels(problems, "legacy 1:1 call", fixture, r.legacy);
     }
     return { name, ok: problems.length === 0, problems, summary, logs: r.logs };
   } finally {

@@ -9,8 +9,10 @@ import 'package:commet/client/matrix/components/voip_room/matrix_livekit_voip_se
 import 'package:commet/client/matrix/components/voip_room/matrix_livekit_voip_stream.dart';
 import 'package:commet/debug/log.dart';
 // ignore: depend_on_referenced_packages
-import 'package:dart_webrtc/dart_webrtc.dart' show MediaStreamTrackWeb;
-import 'package:flutter_webrtc/flutter_webrtc.dart' show MediaStreamTrack;
+import 'package:dart_webrtc/dart_webrtc.dart'
+    show MediaStreamTrackWeb, MediaStreamWeb;
+import 'package:flutter_webrtc/flutter_webrtc.dart'
+    show MediaStream, MediaStreamTrack;
 import 'package:livekit_client/livekit_client.dart' as lk;
 import 'package:web/web.dart' as web;
 
@@ -117,7 +119,8 @@ class WebAudioProcessingManager extends AudioProcessingManager {
   }
 
   @override
-  bool get isActive => _current?.graph != null || _testGraph != null;
+  bool get isActive =>
+      _current?.graph != null || _testGraph != null || _streamGraphs.isNotEmpty;
 
   @override
   bool get isTesting => _testGraph != null;
@@ -153,6 +156,7 @@ class WebAudioProcessingManager extends AudioProcessingManager {
       _roomSession = null;
       _detachRoom();
     }
+    if (!isInCall) await _destroyStreamGraphs();
     notifyStateChanged();
   }
 
@@ -161,6 +165,58 @@ class WebAudioProcessingManager extends AudioProcessingManager {
     final params = settings.toMap().jsify();
     _current?.graph?.setParams(params);
     _testGraph?.setParams(params);
+    for (final s in _streamGraphs) {
+      s.graph.setParams(params);
+    }
+  }
+
+  /// Legacy 1:1 calls' microphones (processMicrophoneStream), with the raw
+  /// capture each one reads: until the calls end.
+  final List<({_DspGraph graph, web.MediaStreamTrack raw})> _streamGraphs = [];
+
+  @override
+  Future<MediaStream?> processMicrophoneStream(MediaStream stream) async {
+    final api = _commetAudioDsp;
+    final audio = stream.getAudioTracks().firstOrNull;
+    if (api == null || audio is! MediaStreamTrackWeb) return null;
+    try {
+      final g =
+          await api.create(audio.jsTrack, settings.toMap().jsify()).toDart;
+      g.onReport = ((JSObject r) {
+        publishReport(_reportFromJs(r));
+      }).toJS;
+      g.onError = ((JSString message) {
+        Log.e("Voice DSP worklet error: ${message.toDart}");
+      }).toJS;
+      _streamGraphs.add((graph: g, raw: audio.jsTrack));
+      final tracks = <web.MediaStreamTrack>[
+        g.processedTrack,
+        for (final video in stream.getVideoTracks())
+          if (video is MediaStreamTrackWeb) video.jsTrack,
+      ];
+      Log.i("Voice DSP: AudioWorklet graph running for a 1:1 call");
+      notifyStateChanged();
+      return MediaStreamWeb(web.MediaStream(tracks.toJS), 'local');
+    } catch (e, s) {
+      Log.onError(e, s, content: "Voice DSP: failed to build the audio graph");
+      _graphFailed("$e");
+      return null;
+    }
+  }
+
+  Future<void> _destroyStreamGraphs() async {
+    final graphs = [..._streamGraphs];
+    _streamGraphs.clear();
+    for (final s in graphs) {
+      // The call stops the processed track it was given; the microphone
+      // behind it is ours to close.
+      s.raw.stop();
+      try {
+        await s.graph.destroy().toDart;
+      } catch (e, st) {
+        Log.onError(e, st, content: "Voice DSP: error tearing down graph");
+      }
+    }
   }
 
   @override

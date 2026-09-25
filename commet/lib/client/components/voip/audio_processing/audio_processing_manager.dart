@@ -4,6 +4,7 @@ import 'package:commet/client/components/voip/audio_processing/audio_dsp_setting
 import 'package:commet/client/components/voip/voip_session.dart';
 import 'package:commet/main.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
 import 'package:livekit_client/livekit_client.dart' as lk;
 
 import 'audio_processing_manager_stub.dart'
@@ -147,6 +148,15 @@ abstract class AudioProcessingManager {
 
   /// Web only: a processor to hand to `AudioCaptureOptions`. Null elsewhere.
   lk.TrackProcessor<lk.AudioProcessorOptions>? createTrackProcessor();
+
+  /// A microphone capture that is not a LiveKit track (a legacy 1:1 call),
+  /// captured with WebRTC's own suppressor off because ours runs: the
+  /// stream to send instead, or null if ours could not start on it.
+  /// Native platforms process every capture inside WebRTC already and hand
+  /// the stream back; the web runs it through the AudioWorklet.
+  Future<webrtc.MediaStream?> processMicrophoneStream(
+          webrtc.MediaStream stream) async =>
+      stream;
 
   /// Push new tunables into a running DSP.
   Future<void> applySettings(AudioDspSettings settings);
