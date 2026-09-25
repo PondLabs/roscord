@@ -2,19 +2,22 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
-import 'package:collection/collection.dart';
 import 'package:commet/client/call_manager.dart';
 import 'package:commet/client/client.dart';
 import 'package:commet/client/components/activities/activities_component.dart';
 import 'package:commet/client/components/voip/audio_processing/audio_processing_manager.dart';
+import 'package:commet/client/components/voip/audio_processing/microphone_noise_suppression.dart';
+import 'package:commet/client/components/voip/audio_processing/noise_suppression_notice.dart';
 import 'package:commet/client/components/voip/voip_session.dart';
 import 'package:commet/client/components/voip/voip_stream.dart';
 import 'package:commet/client/components/user_presence/user_idle_watcher.dart';
+import 'package:commet/client/components/voip/webrtc_default_devices.dart';
 import 'package:commet/client/components/voip/webrtc_screencapture_source.dart';
 import 'package:commet/client/components/voip/android_screencapture_source.dart';
 import 'package:commet/client/matrix/components/dj/dj_booths.dart';
 import 'package:commet/client/matrix/components/voip_room/call_membership_writes.dart';
 import 'package:commet/client/matrix/components/voip_room/call_membership_publisher.dart';
+import 'package:commet/client/matrix/components/voip_room/livekit_microphone.dart';
 import 'package:commet/client/matrix/components/voip_room/matrix_call_membership.dart';
 import 'package:commet/client/matrix/components/voip_room/matrix_livekit_encryption_key_provider.dart';
 import 'package:commet/client/matrix/components/voip_room/matrix_livekit_voip_stream.dart';
@@ -139,15 +142,15 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
       _onVolumeChanged.add(());
     });
 
-    _dspNoiseSuppression = preferences.voipNoiseSuppression.value;
-    _settingsSub = preferences.onSettingChanged.listen((_) {
-      final now = preferences.voipNoiseSuppression.value;
-      if (now == _dspNoiseSuppression) return;
-      _dspNoiseSuppression = now;
-      _reapplyNoiseSuppression();
+    // Whatever changed (the preference, the DSP), the microphone is brought
+    // in line; and once a second, which is also the DSP watchdog and what
+    // catches up with a change that came while the microphone was muted or
+    // not yet published.
+    _settingsSub =
+        preferences.onSettingChanged.listen((_) => _noiseSuppression.update());
+    _dspWatchdog = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (state != VoipState.ended) _noiseSuppression.update();
     });
-    _dspWatchdog =
-        Timer.periodic(const Duration(seconds: 1), (_) => _checkDspAlive());
 
     // Being away from the machine is part of what our membership says, so
     // the channel list shows it for someone who is sitting in the call
@@ -166,74 +169,23 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
       StreamController.broadcast();
 
   StreamSubscription? _settingsSub;
-  bool _dspNoiseSuppression = false;
 
   final UserIdleWatcher _idleWatcher = UserIdleWatcher.instance;
 
-  /// The microphone track is created with WebRTC's suppressor off whenever
-  /// our DSP is supported (MatrixLivekitBackend.join), which is decided by
-  /// the library loading, before anything has been captured. If the DSP
-  /// then never receives audio, the call would have neither suppressor.
-  /// Once that has been seen for [_dspStallLimit] of live microphone, WebRTC's
-  /// suppressor goes back on for the rest of the call.
-  bool _dspFailed = false;
-  DateTime? _dspStalledSince;
+  /// Who takes the noise out of our microphone, kept true for the call: our
+  /// DSP, or WebRTC's (the browser's) own suppressor when ours is off or
+  /// cannot run. See MicrophoneNoiseSuppression.
+  late final MicrophoneNoiseSuppression _noiseSuppression =
+      MicrophoneNoiseSuppression(
+    dsp: AudioProcessingManager.instance,
+    microphone: () => LivekitMicrophone.of(livekitRoom.localParticipant),
+    preference: () => preferences.voipNoiseSuppression.value,
+    onDspFailed: warnNoiseSuppressionFellBack,
+  );
   Timer? _dspWatchdog;
-  static const _dspStallLimit = Duration(seconds: 4);
-
-  void _checkDspAlive() {
-    if (_dspFailed || state == VoipState.ended) return;
-    final dsp = AudioProcessingManager.instance;
-    final pub =
-        livekitRoom.localParticipant?.audioTrackPublications.firstOrNull;
-    final micLive = pub != null && pub.track != null && !pub.muted;
-    if (!dsp.isSupported || !_dspNoiseSuppression || !micLive) {
-      _dspStalledSince = null;
-      return;
-    }
-    if (dsp.isProcessing) {
-      _dspStalledSince = null;
-      return;
-    }
-    final since = _dspStalledSince ??= DateTime.now();
-    if (DateTime.now().difference(since) < _dspStallLimit) return;
-    _dspFailed = true;
-    Log.w("Voice DSP: no microphone audio reached it in "
-        "${_dspStallLimit.inSeconds} s of live microphone; turning WebRTC's "
-        "noise suppression back on for this call");
-    _reapplyNoiseSuppression();
-  }
 
   lk.EventsListener<lk.RoomEvent>? _roomListener;
   Timer? _volumeTimer;
-
-  /// The WebRTC / browser noise suppressor is a capture option fixed when
-  /// the microphone track is created (off while our DSP suppresses, see
-  /// MatrixLivekitBackend.join). Toggling our suppressor mid-call therefore
-  /// has to recreate the track with the opposite option, otherwise the user
-  /// ends up with both or neither.
-  Future<void> _reapplyNoiseSuppression() async {
-    final dsp = AudioProcessingManager.instance;
-    if (!dsp.isSupported) return;
-    final participant = livekitRoom.localParticipant;
-    if (participant == null) return;
-    final pub = participant.audioTrackPublications.firstOrNull;
-    final track = pub?.track;
-    if (pub == null || track is! lk.LocalAudioTrack || pub.muted) return;
-
-    final wantWebrtcSuppression = !_dspNoiseSuppression || _dspFailed;
-    if (track.currentOptions.noiseSuppression == wantWebrtcSuppression) {
-      return;
-    }
-    try {
-      await track.restartTrack(track.currentOptions
-          .copyWith(noiseSuppression: wantWebrtcSuppression));
-      Log.i("Voice DSP: restarted the microphone, WebRTC noise suppression "
-          "${wantWebrtcSuppression ? "on" : "off"}");
-    } catch (e, s) {
-      Log.onError(e, s, content: "Voice DSP: could not restart microphone");
-    }
-  }
 
   @override
   Stream<VoipState> get onConnectionStateChanged => _onConnectionChanged.stream;
@@ -762,6 +714,21 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
       _ownCaptureTrack(track);
     }
 
+    // Screen-share audio or the DJ booth's music: on desktop they switch
+    // the microphone's echo cancellation, gain control and WebRTC noise
+    // suppression off unless it is put back (shared_audio_processing.dart).
+    // Also for a republished share refused below: removing a source does not
+    // undo what it wrote.
+    final local = livekitRoom.localParticipant;
+    if (local != null) {
+      unawaited(restoreMicrophoneProcessingAfter(event.publication, local)
+          .catchError((Object e, StackTrace s) {
+        Log.onError(e, s,
+            content: "Could not restore the microphone's processing");
+        return false;
+      }));
+    }
+
     // A full reconnect clears LiveKit's publication map and republishes the
     // track objects it held. A share this session stopped must not come back:
     // the republish is refused as soon as it arrives, so one click is enough
@@ -1021,26 +988,17 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
   @override
   String get sessionId => "";
 
-  /// What the microphone is already capturing with, told to keep capturing
-  /// while muted.
-  ///
-  /// Muting a track otherwise closes the microphone and unmuting opens it
-  /// again (`AudioCaptureOptions.stopAudioCaptureOnMute` defaults to true).
-  /// On desktop that is a fresh getUserMedia, a reset of WebRTC's shared
-  /// audio processing and a teardown of the DSP processor on every mute,
-  /// which is a lot of moving parts for "stop sending me". The device stays
-  /// open for the call instead, as it does in Discord; the track is only
-  /// disabled, so nothing is sent.
-  ///
-  /// Null before the microphone has ever been published, where these
-  /// options would be the ones it is *created* with: the join path owns
-  /// that choice (see MatrixLivekitBackend.join).
-  lk.AudioCaptureOptions? _micOptions() {
-    final track =
-        livekitRoom.localParticipant?.audioTrackPublications.firstOrNull?.track;
-    if (track is! lk.LocalAudioTrack) return null;
-    return track.currentOptions.copyWith(stopAudioCaptureOnMute: false);
-  }
+  /// Options for turning the microphone on or off; see
+  /// [microphoneOptionsToToggle]. The device stays open while muted, as it
+  /// does in Discord: muting only disables the track.
+  Future<lk.AudioCaptureOptions?> _micOptions({required bool enabling}) =>
+      microphoneOptionsToToggle(
+        livekitRoom.localParticipant,
+        enabling: enabling,
+        dsp: AudioProcessingManager.instance,
+        noiseSuppressionPreference: preferences.voipNoiseSuppression.value,
+        deviceId: WebrtcDefaultDevices.getDefaultMicrophoneId,
+      );
 
   @override
   Future<void> setMicrophoneMute(bool state) async {
@@ -1050,8 +1008,10 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
       return;
     }
 
-    await livekitRoom.localParticipant
-        ?.setMicrophoneEnabled(!state, audioCaptureOptions: _micOptions());
+    await livekitRoom.localParticipant?.setMicrophoneEnabled(!state,
+        audioCaptureOptions: await _micOptions(enabling: !state));
+    // A noise suppression change made while muted is applied now.
+    if (!state) unawaited(_noiseSuppression.update());
     _publishMembershipState();
     _stateChanged.add(());
   }
@@ -1060,8 +1020,9 @@ class MatrixLivekitVoipSession implements VoipSession, ScreenShareWatching {
   Future<void> setDeafened(bool state) async {
     _isDeafened = state;
 
-    await livekitRoom.localParticipant
-        ?.setMicrophoneEnabled(!state, audioCaptureOptions: _micOptions());
+    await livekitRoom.localParticipant?.setMicrophoneEnabled(!state,
+        audioCaptureOptions: await _micOptions(enabling: !state));
+    if (!state) unawaited(_noiseSuppression.update());
 
     for (var stream in streams) {
       if (stream is MatrixLivekitVoipStream) {

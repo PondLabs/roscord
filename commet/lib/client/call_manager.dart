@@ -118,14 +118,15 @@ class CallManager {
   }
 
   void onSessionEnded(VoipSession event) {
-    // By identity: LiveKit sessions all report an empty sessionId, so a late
-    // hang up used to de-register the call the user had just rejoined
-    // (issue #48).
-    currentSessions.removeWhere((element) => identical(element, event));
+    // By equality, not sessionId: LiveKit sessions all report an empty
+    // sessionId, so a late hang up used to de-register the call the user had
+    // just rejoined (issue #48), and a LiveKit session is only equal to
+    // itself. Not by identity either: MatrixVoipComponent hands out a new
+    // MatrixVoipSession for every event about a call, equal by call id, and
+    // a legacy call never left the list.
+    currentSessions.removeWhere((element) => element == event);
 
-    if (currentSessions.isEmpty) {
-      AudioProcessingManager.instance.onSessionEnded();
-    }
+    AudioProcessingManager.instance.onSessionEnded(event);
 
     if (currentSessions.where((e) => e.state == VoipState.incoming).isEmpty) {
       stopRingtone();
@@ -365,10 +366,16 @@ class CallManager {
     }
   }
 
-  Player getSoundPlayer() {
-    player ??= Player(configuration: PlayerConfiguration());
-    player!.setVolume(preferences.notificationsVolume.value);
-
-    return player!;
+  /// Null where no player can be made (media_kit not initialised, as in
+  /// tests): a call sound that cannot play must not get in the way of the
+  /// bookkeeping around it, such as releasing the voice DSP when a call ends.
+  Player? getSoundPlayer() {
+    try {
+      player ??= Player(configuration: PlayerConfiguration());
+      player!.setVolume(preferences.notificationsVolume.value);
+    } catch (e) {
+      Log.w("Could not play a call sound: $e");
+    }
+    return player;
   }
 }

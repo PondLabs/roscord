@@ -81,6 +81,15 @@ jobs:
           channel: stable
           cache: true
 
+      # The noise suppression tests put a recording through the voice DSP's
+      # own library (commet/unit_test/noise_suppression/voice_dsp_fixture.dart);
+      # without these they fail rather than skip in CI.
+      - name: Build the voice DSP for its tests
+        if: steps.find.outputs.dart == 'true'
+        run: |
+          cargo build -p audio_dsp
+          cargo run -q -p audio_dsp --release --example noisy_speech -- target/voice-fixtures
+
       - name: Dart unit tests
         if: steps.find.outputs.dart == 'true'
         working-directory: commet
@@ -91,6 +100,48 @@ jobs:
       - name: Rust tests
         if: steps.find.outputs.rust_crates != ''
         run: cargo test ${{ steps.find.outputs.rust_crates }}
+
+  # Noise suppression on its way out of the app, where a merge breaks it
+  # without a compile error: the contracts between Rust, Dart, C++ and JS,
+  # the web build carrying audio_dsp.wasm, and a noisy recording through the
+  # browser's DSP and through the web app's own Dart and vendored LiveKit.
+  # The release waits for it. See docs/voice-audio-processing.md, "What the
+  # tests guard".
+  voice-dsp:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.9'
+          channel: stable
+          cache: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Setup Chrome
+        id: chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Code generation
+        working-directory: commet
+        run: dart run scripts/codegen.dart
+
+      - name: Noise suppression in the browser
+        env:
+          CHROME: ${{ steps.chrome.outputs.chrome-path }}
+        run: tools/voice_dsp/web_loops.sh
 
   version:
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -150,7 +201,7 @@ jobs:
       platforms: '["windows", "linux", "macos"]'
 
   publish:
-    needs: [test, version, build-release]
+    needs: [test, voice-dsp, version, build-release]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: write

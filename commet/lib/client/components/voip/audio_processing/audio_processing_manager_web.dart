@@ -3,13 +3,16 @@ import 'dart:js_interop';
 
 import 'package:commet/client/components/voip/audio_processing/audio_dsp_settings.dart';
 import 'package:commet/client/components/voip/audio_processing/audio_processing_manager.dart';
+import 'package:commet/client/components/voip/audio_processing/noise_suppression_notice.dart';
 import 'package:commet/client/components/voip/voip_session.dart';
 import 'package:commet/client/matrix/components/voip_room/matrix_livekit_voip_session.dart';
 import 'package:commet/client/matrix/components/voip_room/matrix_livekit_voip_stream.dart';
 import 'package:commet/debug/log.dart';
 // ignore: depend_on_referenced_packages
-import 'package:dart_webrtc/dart_webrtc.dart' show MediaStreamTrackWeb;
-import 'package:flutter_webrtc/flutter_webrtc.dart' show MediaStreamTrack;
+import 'package:dart_webrtc/dart_webrtc.dart'
+    show MediaStreamTrackWeb, MediaStreamWeb;
+import 'package:flutter_webrtc/flutter_webrtc.dart'
+    show MediaStream, MediaStreamTrack;
 import 'package:livekit_client/livekit_client.dart' as lk;
 import 'package:web/web.dart' as web;
 
@@ -22,8 +25,14 @@ external _CommetAudioDsp? get _commetAudioDsp;
 
 extension type _CommetAudioDsp._(JSObject _) implements JSObject {
   external bool get isSupported;
+  external JSPromise<_Probe> probe();
   external JSPromise<_DspGraph> create(
       web.MediaStreamTrack track, JSAny? params);
+}
+
+extension type _Probe._(JSObject _) implements JSObject {
+  external bool get ok;
+  external String get reason;
 }
 
 extension type _DspGraph._(JSObject _) implements JSObject {
@@ -49,21 +58,69 @@ class WebAudioProcessingManager extends AudioProcessingManager {
   CommetWebTrackProcessor? _current;
   lk.EventsListener<lk.RoomEvent>? _roomListener;
   lk.Room? _room;
-  bool _inCall = false;
+  VoipSession? _roomSession;
 
   _DspGraph? _testGraph;
   web.MediaStream? _testStream;
   bool _monitor = false;
   Future<void> _testOps = Future.value();
 
-  @override
-  bool get isSupported => _commetAudioDsp?.isSupported ?? false;
+  WebAudioProcessingManager() {
+    // Early, so the settings page and the first call rarely wait for it.
+    ensureReady();
+  }
+
+  /// What window.commetAudioDsp.probe() found: null until it answered.
+  bool? _probeOk;
+  String? _unavailableReason;
+  Future<bool>? _probing;
 
   @override
-  bool get isActive => _current?.graph != null || _testGraph != null;
+  bool get isSupported =>
+      (_commetAudioDsp?.isSupported ?? false) && _probeOk != false;
 
   @override
-  bool get isInCall => _inCall;
+  String? get unavailableReason {
+    if (_commetAudioDsp == null) return "audio_dsp.js did not load";
+    return _probeOk == false ? _unavailableReason : null;
+  }
+
+  @override
+  Future<bool> ensureReady() {
+    final api = _commetAudioDsp;
+    if (api == null) return Future.value(false);
+    if (_probeOk == true) return Future.value(true);
+    return _probing ??= () async {
+      try {
+        final result = await api.probe().toDart;
+        _probeOk = result.ok;
+        _unavailableReason = result.ok ? null : result.reason;
+      } catch (e) {
+        _probeOk = false;
+        _unavailableReason = "$e";
+      } finally {
+        _probing = null;
+      }
+      if (_probeOk != true) {
+        Log.w("Voice DSP: cannot run in this browser: $_unavailableReason");
+      }
+      notifyStateChanged();
+      return _probeOk == true;
+    }();
+  }
+
+  /// A graph failed to start although the probe passed. Until a new probe
+  /// says otherwise, calls keep the browser's suppressor on.
+  void _graphFailed(String reason) {
+    _probeOk = false;
+    _unavailableReason = reason;
+    warnNoiseSuppressionUnavailable(reason);
+    notifyStateChanged();
+  }
+
+  @override
+  bool get isActive =>
+      _current?.graph != null || _testGraph != null || _streamGraphs.isNotEmpty;
 
   @override
   bool get isTesting => _testGraph != null;
@@ -84,17 +141,22 @@ class WebAudioProcessingManager extends AudioProcessingManager {
       Log.i("Voice DSP: stopping the microphone test, a call started");
       await stopMicTest();
     }
-    _inCall = true;
+    addSession(session);
     if (session is MatrixLivekitVoipSession) {
       _attachRoom(session.livekitRoom);
+      _roomSession = session;
     }
     notifyStateChanged();
   }
 
   @override
-  Future<void> onSessionEnded() async {
-    _inCall = false;
-    _detachRoom();
+  Future<void> onSessionEnded(VoipSession session) async {
+    if (!removeSession(session)) return;
+    if (session == _roomSession) {
+      _roomSession = null;
+      _detachRoom();
+    }
+    if (!isInCall) await _destroyStreamGraphs();
     notifyStateChanged();
   }
 
@@ -103,6 +165,58 @@ class WebAudioProcessingManager extends AudioProcessingManager {
     final params = settings.toMap().jsify();
     _current?.graph?.setParams(params);
     _testGraph?.setParams(params);
+    for (final s in _streamGraphs) {
+      s.graph.setParams(params);
+    }
+  }
+
+  /// Legacy 1:1 calls' microphones (processMicrophoneStream), with the raw
+  /// capture each one reads: until the calls end.
+  final List<({_DspGraph graph, web.MediaStreamTrack raw})> _streamGraphs = [];
+
+  @override
+  Future<MediaStream?> processMicrophoneStream(MediaStream stream) async {
+    final api = _commetAudioDsp;
+    final audio = stream.getAudioTracks().firstOrNull;
+    if (api == null || audio is! MediaStreamTrackWeb) return null;
+    try {
+      final g =
+          await api.create(audio.jsTrack, settings.toMap().jsify()).toDart;
+      g.onReport = ((JSObject r) {
+        publishReport(_reportFromJs(r));
+      }).toJS;
+      g.onError = ((JSString message) {
+        Log.e("Voice DSP worklet error: ${message.toDart}");
+      }).toJS;
+      _streamGraphs.add((graph: g, raw: audio.jsTrack));
+      final tracks = <web.MediaStreamTrack>[
+        g.processedTrack,
+        for (final video in stream.getVideoTracks())
+          if (video is MediaStreamTrackWeb) video.jsTrack,
+      ];
+      Log.i("Voice DSP: AudioWorklet graph running for a 1:1 call");
+      notifyStateChanged();
+      return MediaStreamWeb(web.MediaStream(tracks.toJS), 'local');
+    } catch (e, s) {
+      Log.onError(e, s, content: "Voice DSP: failed to build the audio graph");
+      _graphFailed("$e");
+      return null;
+    }
+  }
+
+  Future<void> _destroyStreamGraphs() async {
+    final graphs = [..._streamGraphs];
+    _streamGraphs.clear();
+    for (final s in graphs) {
+      // The call stops the processed track it was given; the microphone
+      // behind it is ours to close.
+      s.raw.stop();
+      try {
+        await s.graph.destroy().toDart;
+      } catch (e, st) {
+        Log.onError(e, st, content: "Voice DSP: error tearing down graph");
+      }
+    }
   }
 
   @override
@@ -121,11 +235,11 @@ class WebAudioProcessingManager extends AudioProcessingManager {
 
   @override
   Future<bool> startMicTest() async {
-    if (!isSupported || _inCall) return false;
+    if (!isSupported || isInCall) return false;
     if (isTesting) return true;
     var started = false;
     _testOps = _testOps.then((_) async {
-      if (_inCall || isTesting) return;
+      if (isInCall || isTesting) return;
       started = await _createTest();
       notifyStateChanged();
     });
@@ -343,16 +457,16 @@ class CommetWebTrackProcessor
         await g.resume().toDart;
       }
 
-      final ready = (await g.ready.toDart).toDart;
-      if (!ready) {
-        Log.e("Voice DSP: worklet failed to start, audio passes through");
-      }
       manager.onGraphReady(this);
       Log.i("Voice DSP: AudioWorklet graph running (${g.state})");
     } catch (e, s) {
+      // No processed track: LiveKit sends the raw microphone, whose browser
+      // suppressor was turned off for ours. The session's next update puts
+      // it back once the manager says the DSP cannot run.
       Log.onError(e, s, content: "Voice DSP: failed to build the audio graph");
       graph = null;
       _processedTrack = null;
+      manager._graphFailed("$e");
     }
   }
 

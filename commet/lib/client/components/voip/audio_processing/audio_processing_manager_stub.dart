@@ -15,9 +15,6 @@ class UnsupportedAudioProcessingManager extends AudioProcessingManager {
   bool get isActive => false;
 
   @override
-  bool get isInCall => false;
-
-  @override
   bool get isTesting => false;
 
   @override
@@ -27,7 +24,7 @@ class UnsupportedAudioProcessingManager extends AudioProcessingManager {
   Future<void> onSessionStarted(VoipSession session) async {}
 
   @override
-  Future<void> onSessionEnded() async {}
+  Future<void> onSessionEnded(VoipSession session) async {}
 
   @override
   lk.TrackProcessor<lk.AudioProcessorOptions>? createTrackProcessor() => null;

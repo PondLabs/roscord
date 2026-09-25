@@ -9,6 +9,8 @@
 // worklets cannot fetch. Until it is instantiated the node passes audio
 // through untouched.
 
+// Mirrors rust/audio_dsp/src/ffi.rs, like audio_dsp.js does.
+const ABI_VERSION = 2;
 const PARAMS_SIZE = 24;
 const REPORT_SIZE = 28;
 const REPORT_EVERY_QUANTA = 38; // 38 * 128 / 48000 = ~100 ms
@@ -44,7 +46,7 @@ class CommetDspProcessor extends AudioWorkletProcessor {
         if (this.destroyed) return;
         const ex = instance.exports;
         const abi = ex.commet_dsp_abi_version();
-        if (abi !== 2) {
+        if (abi !== ABI_VERSION) {
           this.port.postMessage({ type: "error", message: "audio_dsp ABI " + abi + " unsupported" });
           return;
         }

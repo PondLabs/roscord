@@ -13,12 +13,14 @@ void main() {
       expect(first, isNot(other));
     });
 
-    test('profile hashes are FNV-1a 64 as 16 hex digits on every platform', () {
-      // Reference vectors from the FNV spec. dart2js has no 64-bit ints, and
-      // on the VM a set top bit made the hash negative ("profile--...").
-      expect(hashProfileKey(''), 'profile-cbf29ce484222325');
-      expect(hashProfileKey('a'), 'profile-af63dc4c8601ec8c');
-      expect(hashProfileKey('foobar'), 'profile-85944171f73967e8');
+    // What the native int version produced (a signed 64-bit FNV-1a), so the
+    // web-compatible one keeps identifiers already in logs.
+    test('profile hashes stay what they were', () {
+      expect(hashProfileKey(''), 'profile--340d631b7bdddcdb');
+      expect(hashProfileKey('account-record-1'), 'profile-4055526e7907c9d4');
+      expect(hashProfileKey('@alice:example.org'), 'profile-0862de498e9b8025');
+      expect(hashProfileKey('a'), 'profile--509c23b379fe1374');
+      expect(hashProfileKey('profile'), 'profile--7522cb619e745ef2');
     });
 
     test('origins are recorded instead of full URLs', () {
