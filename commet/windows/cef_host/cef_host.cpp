@@ -2997,14 +2997,10 @@ void HostController::ApplyInputOnUi(
     event.windows_key_code =
         known ? codes.windows_key_code
               : browser_surface::WindowsKeyCodeForKey(key);
-    // native_key_code is the WM_KEYDOWN/WM_KEYUP lParam: repeat count, scan
-    // code, extended-key flag and, for a release, the previous-state and
-    // transition bits.
-    const int scan = known ? codes.windows_scan : 0;
-    uint32_t lparam = 1u | (static_cast<uint32_t>(scan & 0xff) << 16);
-    if ((scan & 0xff00) == 0xe000) lparam |= 1u << 24;
-    if (!pressed) lparam |= (1u << 30) | (1u << 31);
-    event.native_key_code = static_cast<int>(lparam);
+    // native_key_code is the scan code, 0xE0-prefixed for extended keys: CEF
+    // 152 turns it into KeyboardEvent.code with NativeKeycodeToDomCode, which
+    // finds nothing for a WM_KEYDOWN lParam (pages then saw an empty code).
+    event.native_key_code = known ? codes.windows_scan : 0;
     event.modifiers = browser_surface::CefFlagsFor(modifiers, 0) |
                       (known ? codes.location_flags : 0u);
     event.is_system_key =

@@ -197,6 +197,10 @@ wrapper builds against the experimental API.
   CI adds `--software`.
 - `--type TEXT` types into the fixture's input field. It sends `@` the way
   Windows reports AltGr.
+  - The page turns green only when the text arrived and every key press
+    carried a `KeyboardEvent.code`.
+  - It also lists the key events it received, which shows up in `--png`
+    frames.
 - `ROSCORD_CEF_HOST_LOG=<file>` makes the Linux host log its process starts
   and lifecycle. The Windows host writes the stage that stopped it there, and
   on stderr, when it exits before opening its pipe. `ROSCORD_CEF_LOG_FILE=<file>`

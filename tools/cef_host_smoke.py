@@ -43,7 +43,8 @@ RING_SLOT_BYTES = 64
 WINDOWS = sys.platform == "win32"
 
 # The page turns purple once its field has focus (so `--type` can start) and
-# green once the field holds exactly the text `--type` sent.
+# green once the field holds exactly the text `--type` sent, every key press
+# having named its physical key (KeyboardEvent.code).
 FIXTURE_HTML = """<!DOCTYPE html>
 <html><body style="margin:0;background:#1e6fd9;color:#fff;font:48px sans-serif">
 <div style="padding:40px">roscord cef_host smoke test</div>
@@ -51,9 +52,14 @@ FIXTURE_HTML = """<!DOCTYPE html>
 <div id="log" style="padding:16px 40px;font:20px monospace;white-space:pre"></div>
 <script>
 const field = document.getElementById("field");
+let codes = true;
 const paint = () => {{
-  document.body.style.background = field.value === {expected} ? "#1a7f37" : "#6f3fd9";
+  document.body.style.background =
+      field.value === {expected} && codes ? "#1a7f37" : "#6f3fd9";
 }};
+document.addEventListener("keydown", (event) => {{
+  if (!event.code) codes = false;
+}}, true);
 field.addEventListener("focus", paint);
 field.addEventListener("input", paint);
 field.focus();
