@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:commet/client/components/voip/audio_processing/audio_dsp_settings.dart';
 import 'package:commet/client/components/voip/voip_session.dart';
 import 'package:commet/main.dart';
+import 'package:flutter/foundation.dart';
 import 'package:livekit_client/livekit_client.dart' as lk;
 
 import 'audio_processing_manager_stub.dart'
@@ -32,6 +33,11 @@ abstract class AudioProcessingManager {
 
   static AudioProcessingManager get instance =>
       _instance ??= createAudioProcessingManager();
+
+  /// Replaces [instance], for tests.
+  @visibleForTesting
+  static set debugInstance(AudioProcessingManager? manager) =>
+      _instance = manager;
 
   StreamSubscription? _settingsSubscription;
   AudioDspSettings _lastSettings = AudioDspSettings.fromPreferences();
