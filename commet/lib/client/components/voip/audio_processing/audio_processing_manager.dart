@@ -60,8 +60,20 @@ abstract class AudioProcessingManager {
     });
   }
 
-  /// Whether this platform can run the DSP at all.
+  /// Whether the DSP can run here. On the web this is only exact once
+  /// [ensureReady] has completed.
   bool get isSupported;
+
+  /// Finds out whether the DSP can run, where that takes a moment: the web
+  /// fetches and test-runs audio_dsp.wasm. A call awaits this before it
+  /// decides who suppresses noise, so a DSP that cannot run is known before
+  /// WebRTC's (the browser's) suppressor is turned off for it.
+  Future<bool> ensureReady() async => isSupported;
+
+  /// Why the DSP cannot run on a platform that is meant to have it (the
+  /// library or the wasm is missing or broken), for the user to see. Null
+  /// when it runs, and where it simply does not exist yet (Android).
+  String? get unavailableReason => null;
 
   /// Whether the DSP is currently attached to a call or a microphone test.
   bool get isActive;

@@ -14,3 +14,20 @@ String get messageNoiseSuppressionFellBack => Intl.message(
 /// Our DSP was given up on for the rest of the call.
 void warnNoiseSuppressionFellBack() =>
     DjToast.show(messageNoiseSuppressionFellBack, isError: true);
+
+String messageNoiseSuppressionUnavailable(String reason) => Intl.message(
+    "Noise suppression can't run ($reason). The basic one is on instead.",
+    args: [reason],
+    name: "messageNoiseSuppressionUnavailable",
+    desc:
+        "Shown when a call starts with noise suppression turned on but the app's own suppressor cannot run; the reason is technical");
+
+bool _warnedUnavailable = false;
+
+/// The user asked for our DSP and it cannot run here. Once per run of the
+/// app: it is the same news at every call.
+void warnNoiseSuppressionUnavailable(String reason) {
+  if (_warnedUnavailable) return;
+  _warnedUnavailable = true;
+  DjToast.show(messageNoiseSuppressionUnavailable(reason), isError: true);
+}

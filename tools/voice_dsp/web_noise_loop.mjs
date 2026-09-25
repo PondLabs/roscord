@@ -12,7 +12,7 @@
 //
 //   node tools/voice_dsp/web_noise_loop.mjs [--web-root commet/web]
 //        [--fixture-dir target/voice-fixtures] [--chrome google-chrome-stable]
-//        [--scenario dsp,off,toggle,nowasm]
+//        [--scenario dsp,off,toggle,nowasm,badwasm,noworklet]
 //
 // --web-root is where audio_dsp.js, audio_dsp.worklet.js and audio_dsp.wasm
 // are served from: commet/web after scripts/prepare-web.sh, or
@@ -26,8 +26,11 @@
 //           loop can tell)
 //   toggle  created with everything off, then setParams(defaults), as when
 //           the preference flips mid-call: must suppress like dsp
-//   nowasm  audio_dsp.wasm answers 404: create() must fail, not hand back a
-//           graph that passes audio through
+//   nowasm  audio_dsp.wasm answers 404: probe() must say so (the app then
+//           keeps the browser's suppressor on) and create() must fail, not
+//           hand back a graph that passes audio through
+//   badwasm audio_dsp.wasm is not WebAssembly: the same
+//   noworklet audio_dsp.worklet.js answers 404: the same
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
@@ -52,7 +55,7 @@ function arg(name, fallback) {
 const webRoot = resolve(repo, arg("web-root", "commet/web"));
 const fixtureDir = resolve(repo, arg("fixture-dir", "target/voice-fixtures"));
 const chrome = arg("chrome", process.env.CHROME || "google-chrome-stable");
-const scenarios = arg("scenario", "dsp,off,toggle,nowasm").split(",");
+const scenarios = arg("scenario", "dsp,off,toggle,nowasm,badwasm,noworklet").split(",");
 
 function ensureFixture() {
   const wav = join(fixtureDir, "noisy_speech_48k.wav");
@@ -93,15 +96,20 @@ function fixtureBlocks(path) {
 
 const MIME = { ".js": "text/javascript", ".html": "text/html", ".wasm": "application/wasm" };
 
-function serve({ wasm404 }) {
+function serve({ broken }) {
   const server = createServer((req, res) => {
     const url = new URL(req.url, "http://x");
     let file;
     if (url.pathname === "/" || url.pathname === "/index.html") file = join(here, "harness/index.html");
     else if (url.pathname.startsWith("/__harness/")) file = join(here, "harness", url.pathname.slice("/__harness/".length));
     else if (["/audio_dsp.js", "/audio_dsp.worklet.js", "/audio_dsp.wasm"].includes(url.pathname)) {
-      if (wasm404 && url.pathname === "/audio_dsp.wasm") file = null;
-      else file = join(webRoot, url.pathname.slice(1));
+      if (url.pathname === "/audio_dsp.wasm" && broken === "nowasm") file = null;
+      else if (url.pathname === "/audio_dsp.worklet.js" && broken === "noworklet") file = null;
+      else if (url.pathname === "/audio_dsp.wasm" && broken === "badwasm") {
+        res.writeHead(200, { "content-type": "application/wasm" });
+        res.end(Buffer.from("this is not WebAssembly"));
+        return;
+      } else file = join(webRoot, url.pathname.slice(1));
     }
     if (!file || !existsSync(file)) {
       res.writeHead(404);
@@ -241,16 +249,19 @@ function measure(fixture, raw, processed) {
 
 async function scenario(name, fixture) {
   const seconds = (fixture.blocks.length * BLOCK) / RATE + 1;
-  const server = await serve({ wasm404: name === "nowasm" });
+  const broken = ["nowasm", "badwasm", "noworklet"].includes(name);
+  const server = await serve({ broken: broken ? name : null });
   try {
-    const url = `http://127.0.0.1:${server.address().port}/?scenario=${name === "nowasm" ? "dsp" : name}&seconds=${seconds}`;
+    const url = `http://127.0.0.1:${server.address().port}/?scenario=${broken ? "dsp" : name}&seconds=${seconds}`;
     const r = await runInChrome(url, fixture.wav, seconds);
     const problems = [];
     let summary = {};
-    if (name === "nowasm") {
-      if (!r.createError) problems.push("create() succeeded without audio_dsp.wasm: the graph would publish unprocessed audio");
-      summary = { createError: r.createError };
+    if (broken) {
+      if (r.probe?.ok !== false || !r.probe?.reason) problems.push(`probe() said ${JSON.stringify(r.probe)}: the app would turn the browser's suppressor off for a DSP that cannot run`);
+      if (!r.createError) problems.push("create() succeeded without a working audio_dsp.wasm: the graph would publish unprocessed audio");
+      summary = { probe: r.probe, createError: r.createError };
     } else {
+      if (r.probe?.ok !== true) problems.push(`probe() said ${JSON.stringify(r.probe)}`);
       if (r.createError) problems.push(`create() failed: ${r.createError}`);
       else {
         if (r.ready !== true) problems.push(`worklet ready = ${r.ready}`);

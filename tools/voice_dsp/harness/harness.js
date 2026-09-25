@@ -37,6 +37,9 @@
     });
     const track = stream.getAudioTracks()[0];
 
+    // What the app asks before a call decides who suppresses noise.
+    result.probe = await window.commetAudioDsp.probe();
+
     let graph;
     try {
       graph = await window.commetAudioDsp.create(track, scenario === "dsp" ? appDefaults : off);

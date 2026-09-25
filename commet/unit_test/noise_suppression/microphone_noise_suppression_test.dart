@@ -16,9 +16,24 @@ class _Dsp extends UnsupportedAudioProcessingManager {
   bool processing = true;
   final List<FakeAudioProcessor> processors = [];
 
-  /// Like the web manager: a new processor per microphone.
+  /// What ensureReady finds out, like the web manager's probe of
+  /// audio_dsp.wasm: until it has answered, [isSupported] is optimistic.
+  String? probeFailure;
+
+  @override
+  Future<bool> ensureReady() async {
+    if (probeFailure != null) supported = false;
+    return supported;
+  }
+
+  @override
+  String? get unavailableReason => supported ? null : probeFailure;
+
+  /// Like the web manager: a new processor per microphone, none without
+  /// the DSP.
   @override
   lk.TrackProcessor<lk.AudioProcessorOptions>? createTrackProcessor() {
+    if (!supported) return null;
     final p = FakeAudioProcessor();
     processors.add(p);
     return p;
@@ -131,6 +146,21 @@ void main() {
           microphoneCaptureOptions(dsp: dsp, noiseSuppressionPreference: true)
               .noiseSuppression,
           isTrue);
+    });
+
+    // The web DSP is only known to work once audio_dsp.wasm has been
+    // fetched and test-run. Deciding before that turned the browser's
+    // suppressor off for a DSP that then passed the microphone through.
+    test('a call waits to know whether our DSP can run', () async {
+      dsp.probeFailure = 'audio_dsp.wasm: HTTP 404';
+
+      final options = await prepareMicrophoneCaptureOptions(
+          dsp: dsp, noiseSuppressionPreference: true);
+
+      expect(options.noiseSuppression, isTrue,
+          reason: 'the browser\'s suppressor has to stay on');
+      expect(options.processor, isNull);
+      expect(dsp.unavailableReason, 'audio_dsp.wasm: HTTP 404');
     });
 
     test('nothing restarts while the capture already matches', () async {

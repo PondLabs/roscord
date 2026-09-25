@@ -4,6 +4,7 @@
 import 'package:collection/collection.dart';
 import 'package:commet/client/components/voip/audio_processing/audio_processing_manager.dart';
 import 'package:commet/client/components/voip/audio_processing/microphone_noise_suppression.dart';
+import 'package:commet/client/components/voip/audio_processing/noise_suppression_notice.dart';
 import 'package:livekit_client/livekit_client.dart' as lk;
 
 /// Capture options for a room's microphone. WebRTC's (the browser's) own
@@ -21,6 +22,26 @@ lk.AudioCaptureOptions microphoneCaptureOptions({
           preference: noiseSuppressionPreference),
       processor: dsp.createTrackProcessor(),
     );
+
+/// A room microphone's capture options, once it is known whether our DSP
+/// can run (on the web that means audio_dsp.wasm fetched and test-run). A
+/// user who asked for noise suppression and cannot have ours is told.
+Future<lk.AudioCaptureOptions> prepareMicrophoneCaptureOptions({
+  required AudioProcessingManager dsp,
+  required bool noiseSuppressionPreference,
+  String? deviceId,
+}) async {
+  final ready = await dsp.ensureReady();
+  final reason = dsp.unavailableReason;
+  if (noiseSuppressionPreference && !ready && reason != null) {
+    warnNoiseSuppressionUnavailable(reason);
+  }
+  return microphoneCaptureOptions(
+    dsp: dsp,
+    noiseSuppressionPreference: noiseSuppressionPreference,
+    deviceId: deviceId,
+  );
+}
 
 /// Options for `setMicrophoneEnabled` when the user mutes or unmutes.
 ///
@@ -48,11 +69,12 @@ Future<lk.AudioCaptureOptions?> microphoneOptionsToToggle(
   // Muting what does not exist creates nothing, and a processor made for
   // nothing would replace the web DSP's current one.
   if (!enabling) return null;
-  return microphoneCaptureOptions(
+  return (await prepareMicrophoneCaptureOptions(
     dsp: dsp,
     noiseSuppressionPreference: noiseSuppressionPreference,
     deviceId: await deviceId(),
-  ).copyWith(stopAudioCaptureOnMute: false);
+  ))
+      .copyWith(stopAudioCaptureOnMute: false);
 }
 
 /// The microphone's publication, found by its source. Not "the first audio

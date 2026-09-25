@@ -165,11 +165,17 @@ void main() {
     expect(manager.isActive, isFalse);
   }, skip: voiceDspSkip);
 
-  test('a library without the DSP is not taken for one', () {
+  test('a library without the DSP is not taken for one, and says why', () {
     final other = NativeAudioProcessingManager(
         openLibrary: () => DynamicLibrary.process());
     expect(other.isSupported, isFalse);
+    expect(other.unavailableReason, contains('incomplete'));
     other.dispose();
+
+    final none = NativeAudioProcessingManager(openLibrary: () => null);
+    expect(none.isSupported, isFalse);
+    expect(none.unavailableReason, contains('missing'));
+    none.dispose();
   }, skip: voiceDspSkip);
 
   // Every entry point is looked up when the library loads: a missing one

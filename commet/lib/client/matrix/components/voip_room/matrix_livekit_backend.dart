@@ -247,14 +247,13 @@ class MatrixLivekitBackend {
 
     print("Using default device: ${device}");
 
+    final micOptions = await prepareMicrophoneCaptureOptions(
+      dsp: AudioProcessingManager.instance,
+      noiseSuppressionPreference: preferences.voipNoiseSuppression.value,
+      deviceId: device,
+    );
     lkRoom.localParticipant
-        ?.setMicrophoneEnabled(true,
-            audioCaptureOptions: microphoneCaptureOptions(
-              dsp: AudioProcessingManager.instance,
-              noiseSuppressionPreference:
-                  preferences.voipNoiseSuppression.value,
-              deviceId: device,
-            ))
+        ?.setMicrophoneEnabled(true, audioCaptureOptions: micOptions)
         .catchError((Object e, StackTrace s) {
       // Not awaited on purpose (joining muted is still joining), but a
       // denied microphone must not end up as an unhandled error.

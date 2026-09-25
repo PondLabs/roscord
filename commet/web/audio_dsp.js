@@ -12,12 +12,37 @@
   const WORKLET_URL = "audio_dsp.worklet.js";
   const WASM_URL = "audio_dsp.wasm";
   const TARGET_RATE = 48000;
+  const READY_TIMEOUT_MS = 5000;
 
   const supported =
     typeof AudioContext !== "undefined" &&
     typeof AudioWorkletNode !== "undefined" &&
     typeof WebAssembly !== "undefined" &&
     typeof MediaStreamAudioDestinationNode !== "undefined";
+
+  // What the worklet (audio_dsp.worklet.js) checks and calls. Mirrors
+  // rust/audio_dsp/src/ffi.rs; tools/voice_dsp/check_contracts.py keeps the
+  // copies in step.
+  const ABI_VERSION = 2;
+  const PARAMS_SIZE = 24;
+  const REPORT_SIZE = 28;
+  const WORKLET_EXPORTS = [
+    "commet_dsp_abi_version",
+    "commet_dsp_params_size",
+    "commet_dsp_report_size",
+    "commet_dsp_create",
+    "commet_dsp_destroy",
+    "commet_dsp_set_params",
+    "commet_dsp_get_report",
+    "commet_dsp_process_stream",
+    "commet_dsp_feed_render",
+    "commet_dsp_alloc_f32",
+    "commet_dsp_free_f32",
+    "commet_dsp_params_alloc",
+    "commet_dsp_params_free",
+    "commet_dsp_report_alloc",
+    "commet_dsp_report_free",
+  ];
 
   let wasmPromise = null;
   function loadWasm() {
@@ -31,6 +56,46 @@
       });
     }
     return wasmPromise;
+  }
+
+  // Whether the DSP can run here: audio_dsp.wasm fetched, compiled and
+  // speaking the worklet's ABI. The app asks before a call decides who
+  // suppresses noise, so a missing or broken wasm is known up front, instead
+  // of when the call's worklet fails with the browser's suppressor already
+  // turned off. Only a success is kept: a fetch that failed is tried again.
+  let probed = null;
+  function probe() {
+    if (probed) return probed;
+    const attempt = (async () => {
+      if (!supported) return { ok: false, reason: "this browser has no AudioWorklet or WebAssembly" };
+      try {
+        // The worklet module has to load too: a missing or broken
+        // audio_dsp.worklet.js fails every call the same way.
+        await new OfflineAudioContext(1, 128, TARGET_RATE).audioWorklet.addModule(WORKLET_URL);
+        const bytes = await loadWasm();
+        const { instance } = await WebAssembly.instantiate(bytes.slice(0), {});
+        const ex = instance.exports;
+        for (const name of WORKLET_EXPORTS) {
+          if (typeof ex[name] !== "function") return { ok: false, reason: "audio_dsp.wasm has no " + name };
+        }
+        const abi = ex.commet_dsp_abi_version();
+        if (abi !== ABI_VERSION) return { ok: false, reason: "audio_dsp.wasm is ABI " + abi + ", expected " + ABI_VERSION };
+        if (ex.commet_dsp_params_size() !== PARAMS_SIZE || ex.commet_dsp_report_size() !== REPORT_SIZE) {
+          return { ok: false, reason: "audio_dsp.wasm struct sizes do not match" };
+        }
+        return { ok: true, reason: "" };
+      } catch (e) {
+        return { ok: false, reason: String((e && e.message) || e) };
+      }
+    })();
+    probed = attempt;
+    attempt.then((r) => {
+      if (!r.ok) {
+        console.error("commetAudioDsp: " + r.reason);
+        if (probed === attempt) probed = null;
+      }
+    });
+    return attempt;
   }
 
   async function create(track, params) {
@@ -67,6 +132,7 @@
       // Microphone test: the processed signal can also go to the speakers.
       let monitoring = false;
       let readyResolve;
+      let failure = null;
       const ready = new Promise((res) => (readyResolve = res));
 
       const graph = {
@@ -127,12 +193,24 @@
         else if (msg.type === "ready") readyResolve(true);
         else if (msg.type === "error") {
           console.error("commetAudioDsp worklet: " + msg.message);
+          failure = msg.message;
           readyResolve(false);
           if (graph.onError) graph.onError(msg.message);
         }
       };
 
       await ctx.resume();
+      // Not before the DSP runs in the worklet: until then it passes the
+      // microphone through untouched, and whoever publishes processedTrack
+      // has turned the browser's suppressor off because ours is on.
+      const started = await Promise.race([
+        ready,
+        new Promise((res) => setTimeout(() => res(false), READY_TIMEOUT_MS)),
+      ]);
+      if (started !== true) {
+        await graph.destroy();
+        throw new Error("audio_dsp worklet did not start: " + (failure || "no answer in " + READY_TIMEOUT_MS + " ms"));
+      }
       return graph;
     } catch (err) {
       try { await ctx.close(); } catch (e) {}
@@ -140,5 +218,5 @@
     }
   }
 
-  window.commetAudioDsp = { isSupported: supported, create: create };
+  window.commetAudioDsp = { isSupported: supported, probe: probe, create: create };
 })();

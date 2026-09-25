@@ -226,25 +226,35 @@ class NativeAudioProcessingManager extends AudioProcessingManager {
 
   static const _pollInterval = Duration(milliseconds: 100);
 
+  String? _unavailableReason;
+
   _Bindings? get bindings {
     if (_loadAttempted) return _bindings;
     _loadAttempted = true;
     final lib = _openLibrary();
-    if (lib == null) return null;
+    if (lib == null) {
+      _unavailableReason = "the voice library (librust_lib_commet) is missing";
+      return null;
+    }
     try {
       final b = _Bindings(lib, _symbols);
       final abi = b.abiVersion();
       if (abi != _Bindings.expectedAbi) {
-        Log.w("Voice DSP: ABI $abi, expected ${_Bindings.expectedAbi}");
+        _unavailableReason = "the voice library is ABI $abi, "
+            "this build expects ${_Bindings.expectedAbi}";
+        Log.w("Voice DSP: $_unavailableReason");
         return null;
       }
       if (b.paramsSize() != sizeOf<DspParams>() ||
           b.reportSize() != sizeOf<DspReport>()) {
+        _unavailableReason =
+            "the voice library's structures do not match this build";
         Log.w("Voice DSP: struct size mismatch between Dart and Rust");
         return null;
       }
       _bindings = b;
     } catch (e, s) {
+      _unavailableReason = "the voice library is incomplete ($e)";
       Log.onError(e, s, content: "Voice DSP: symbol lookup failed");
       return null;
     }
@@ -253,6 +263,9 @@ class NativeAudioProcessingManager extends AudioProcessingManager {
 
   @override
   bool get isSupported => bindings != null;
+
+  @override
+  String? get unavailableReason => isSupported ? null : _unavailableReason;
 
   @override
   bool get isActive => _installed;
