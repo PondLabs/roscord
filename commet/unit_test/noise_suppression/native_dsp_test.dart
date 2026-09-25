@@ -107,6 +107,18 @@ void main() {
         reason: 'turned back on: $on');
   }, skip: voiceDspSkip);
 
+  test('isProcessing follows the audio the hook actually gets', () async {
+    await manager.onSessionStarted(_Session('call'));
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    expect(manager.isProcessing, isFalse,
+        reason: 'no audio has reached the hook yet');
+
+    plugin.initialize(48000);
+    send(Float32List.sublistView(fixture.samples, 0, 48000));
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    expect(manager.isProcessing, isTrue);
+  }, skip: voiceDspSkip);
+
   test('a library without the DSP is not taken for one', () {
     final other = NativeAudioProcessingManager(
         openLibrary: () => DynamicLibrary.process());

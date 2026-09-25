@@ -139,9 +139,15 @@ abstract class AudioProcessingManager {
     _lastReport = report;
     if (report.frames != _lastFrames) {
       _lastFrames = report.frames;
-      final now = DateTime.now();
-      _framesAdvancedAt = now;
-      if (report.gateOpen) _gateOpenAt = now;
+      // Zero is a DSP that has not had a block yet: a new one, or one whose
+      // capture just restarted. Counting that as progress made isProcessing
+      // true for half a second with no audio at all, which the call's
+      // watchdog takes as the DSP working.
+      if (report.frames > 0) {
+        final now = DateTime.now();
+        _framesAdvancedAt = now;
+        if (report.gateOpen) _gateOpenAt = now;
+      }
     }
 
     if (_reports.hasListener) {
