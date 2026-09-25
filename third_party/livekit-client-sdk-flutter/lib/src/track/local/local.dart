@@ -297,6 +297,13 @@ abstract class LocalTrack extends Track {
 
     currentOptions = options ?? currentOptions;
 
+    // COMMET: taken before stop(), which already stops the processor and
+    // forgets it. Taken after, as upstream does, it was always null: every
+    // restart (a microphone switch, the noise suppression preference
+    // flipping mid-call) went on without the web voice DSP, sending the raw
+    // microphone with the browser's suppressor off.
+    final processor = _processor;
+
     // stop if not already stopped...
     await stop();
 
@@ -304,26 +311,30 @@ abstract class LocalTrack extends Track {
     final newStream = await LocalTrack.createStream(currentOptions);
     final newTrack = newStream.getTracks().first;
 
-    final processor = _processor;
-
     await stopProcessor();
+
+    // set new stream & track to this object
+    updateMediaStreamAndTrack(newStream, newTrack);
+
+    // COMMET: the processor before the sender. setProcessor puts its
+    // processed track on the sender, so the sender goes from the old
+    // processed track to the new one and the raw capture never goes out.
+    // The capture itself only goes on the sender when there is nothing
+    // processed to send.
+    if (processor != null) {
+      await setProcessor(processor);
+    }
+    final processed = _processor?.processedTrack != null;
 
     // replace track on sender
     try {
-      await sender?.replaceTrack(newTrack);
+      if (!processed) await sender?.replaceTrack(newTrack);
       if (this is LocalVideoTrack) {
         final videoTrack = this as LocalVideoTrack;
         await videoTrack.replaceTrackForMultiCodecSimulcast(newTrack);
       }
     } catch (error) {
       logger.severe('RTCRtpSender.replaceTrack() did throw $error');
-    }
-
-    // set new stream & track to this object
-    updateMediaStreamAndTrack(newStream, newTrack);
-
-    if (processor != null) {
-      await setProcessor(processor);
     }
 
     // mark as started
