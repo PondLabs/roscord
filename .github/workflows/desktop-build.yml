@@ -179,9 +179,15 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
+          $env:ROSCORD_CEF_LOG_FILE = Join-Path $env:GITHUB_WORKSPACE "cef-windows.log"
           python tools/cef_host_smoke.py --bundle $env:BUNDLE --seconds 6 --software `
             --type 'roscord@ok' --png cef-smoke-windows.png
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $code = $LASTEXITCODE
+          if ($code -ne 0 -and (Test-Path $env:ROSCORD_CEF_LOG_FILE)) {
+            Write-Output "---- CEF log ----"
+            Get-Content $env:ROSCORD_CEF_LOG_FILE -Tail 150
+          }
+          if ($code -ne 0) { exit $code }
 
       # Plays a real YouTube embed through the host and keeps the last frame,
       # so every run shows whether the video plays.  YouTube may refuse

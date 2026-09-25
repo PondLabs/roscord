@@ -5033,7 +5033,18 @@ int RunHost(HINSTANCE instance, void* sandbox_info) {
   settings.no_sandbox = false;
   settings.multi_threaded_message_loop = true;
   settings.windowless_rendering_enabled = true;
-  settings.log_severity = LOGSEVERITY_DISABLE;
+  // $ROSCORD_CEF_LOG_FILE turns CEF's own log on, which is the only account
+  // of a host that stops inside CEF.
+  std::array<wchar_t, MAX_PATH> cef_log{};
+  const DWORD cef_log_length = GetEnvironmentVariableW(
+      L"ROSCORD_CEF_LOG_FILE", cef_log.data(),
+      static_cast<DWORD>(cef_log.size()));
+  if (cef_log_length > 0 && cef_log_length < cef_log.size()) {
+    CefString(&settings.log_file) = std::wstring(cef_log.data(), cef_log_length);
+    settings.log_severity = LOGSEVERITY_INFO;
+  } else {
+    settings.log_severity = LOGSEVERITY_DISABLE;
+  }
   // CEF requires every request context's cache_path to sit below this root,
   // and each persistent account profile is a directory of the profile root.
   CefString(&settings.root_cache_path) = args->profile_root.wstring();
