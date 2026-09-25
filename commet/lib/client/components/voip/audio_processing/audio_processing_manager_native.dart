@@ -163,6 +163,13 @@ class _Bindings {
 /// recording (through the APM and our hook) and lets us play the result
 /// back.
 class NativeAudioProcessingManager extends AudioProcessingManager {
+  /// Where the DSP's C ABI comes from: librust_lib_commet in the app, the
+  /// crate's own cdylib in tests.
+  final DynamicLibrary? Function() _openLibrary;
+
+  NativeAudioProcessingManager({DynamicLibrary? Function()? openLibrary})
+      : _openLibrary = openLibrary ?? openRustLibrary;
+
   _Bindings? _bindings;
   bool _loadAttempted = false;
 
@@ -188,7 +195,7 @@ class NativeAudioProcessingManager extends AudioProcessingManager {
   _Bindings? get bindings {
     if (_loadAttempted) return _bindings;
     _loadAttempted = true;
-    final lib = openRustLibrary();
+    final lib = _openLibrary();
     if (lib == null) return null;
     try {
       final b = _Bindings(lib);
