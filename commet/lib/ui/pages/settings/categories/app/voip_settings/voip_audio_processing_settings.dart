@@ -107,6 +107,13 @@ class _VoipAudioProcessingSettingsState
       desc:
           "Shown instead of the audio processing settings on platforms without the voice DSP");
 
+  String labelVoipAudioProcessingBroken(String reason) => Intl.message(
+      "Noise suppression can't run: $reason. Calls use the basic one instead.",
+      args: [reason],
+      name: "labelVoipAudioProcessingBroken",
+      desc:
+          "Shown instead of the audio processing settings when the voice DSP should be available but failed to load; the reason is technical");
+
   String get labelVoipInputMeterIdle => Intl.message(
       "Start a microphone test or join a voice call to see your live input level.",
       name: "labelVoipInputMeterIdle",
@@ -185,6 +192,11 @@ class _VoipAudioProcessingSettingsState
       if (!mounted) return;
       setState(() {});
     });
+    // On the web whether the DSP can run is only known once the wasm has
+    // been test-run.
+    manager.ensureReady().then((_) {
+      if (mounted) setState(() {});
+    });
   }
 
   @override
@@ -219,9 +231,12 @@ class _VoipAudioProcessingSettingsState
   Widget build(BuildContext context) {
     final manager = AudioProcessingManager.instance;
     if (!manager.isSupported) {
+      final reason = manager.unavailableReason;
       return Padding(
         padding: const EdgeInsets.all(8),
-        child: tiamat.Text.labelLow(labelVoipAudioProcessingUnavailable),
+        child: reason == null
+            ? tiamat.Text.labelLow(labelVoipAudioProcessingUnavailable)
+            : tiamat.Text.error(labelVoipAudioProcessingBroken(reason)),
       );
     }
 

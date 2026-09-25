@@ -2,6 +2,7 @@
 
 import 'dart:async';
 
+import 'package:commet/client/components/voip/audio_processing/noise_suppressed_media_devices.dart';
 import 'package:commet/client/components/component.dart';
 import 'package:commet/client/components/voip/voip_component.dart';
 import 'package:commet/client/components/voip/voip_session.dart';
@@ -45,8 +46,11 @@ class MatrixVoipComponent
   @override
   bool get isWeb => PlatformUtils.isWeb;
 
+  /// The microphone of a 1:1 call is captured like every other microphone
+  /// of the app, and through the voice DSP on the web.
   @override
-  MediaDevices get mediaDevices => webrtc.navigator.mediaDevices;
+  late final MediaDevices mediaDevices =
+      NoiseSuppressedMediaDevices(webrtc.navigator.mediaDevices);
 
   MatrixVoipComponent(this.client) {
     voip = mx.VoIP(client.getMatrixClient(), this);

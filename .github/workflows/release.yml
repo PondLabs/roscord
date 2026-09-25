@@ -578,6 +578,8 @@ jobs:
       
       - uses: moonrepo/setup-rust@v1
       - run: rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu
+      # prepare-web.sh builds the voice DSP to wasm with the default toolchain.
+      - run: rustup target add wasm32-unknown-unknown
       
       - name: Prepare web
         run: |
@@ -589,6 +591,9 @@ jobs:
           cd $PROJECT_PATH
           dart run scripts/build_release.dart --platform web --version_tag ${{ github.event.release.tag_name || 'v0.0.0-artifact' }} --git_hash ${{ github.sha }}
       
+      - name: The web build carries the voice DSP
+        run: python3 tools/voice_dsp/check_contracts.py --web-build $PROJECT_PATH/build/web
+
       - name: Create archive
         run: |
           cd $PROJECT_PATH/build

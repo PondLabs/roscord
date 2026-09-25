@@ -46,7 +46,20 @@ wherever the server's offer has it (`lib/src/core/engine.dart`).
 (`lib/src/track/options.dart`): it used to rebuild the options from six of
 the nine, so a copy went back to `stopAudioCaptureOnMute: true` and dropped
 the `processor`, which took the web AudioWorklet off the track whenever the
-microphone was restarted to change one option.
+microphone was restarted to change one option. `LocalTrack.restartTrack`
+(`lib/src/track/local/local.dart`) takes the processor before `stop()`,
+which drops it (upstream reads it after, so every restart lost it), and
+puts it on before touching the sender, so the raw capture never goes out.
+
+`tools/voice_dsp/check_contracts.py` fails CI when the `// COMMET` count of
+either package goes down or a change noise suppression needs goes missing:
+raise its floor when you add markers.
+
+Two upstream flutter-webrtc behaviours on desktop that bit us (see
+`docs/voice-audio-processing.md`, "Signal chain"): `getUserMedia` selects
+the input only from `optional: [{sourceId}]` and records from device 0
+otherwise, and `MediaTrackForId` finds local tracks before received ones
+with the same id.
 The iOS and macOS podspecs pin `WebRTC-SDK` to `150.7871.01`, the version the
 vendored `flutter-webrtc` pins (upstream livekit_client made the same move in
 2.13.0). CocoaPods installs a single copy of the pod, so if the two pins
