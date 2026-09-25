@@ -42,7 +42,7 @@ below is mandatory:
   staged digest must match `cef.runtime.manifest.json` from
   `tools/cef_runtime.py metadata`.
 - `sandbox_bootstrap`: the Windows bootstrap pair (`cef_host.exe`,
-  `client.dll`, `chrome_elf.dll`), the Linux sandbox pair (`libcef.so`,
+  `cef_host.dll`, `chrome_elf.dll`), the Linux sandbox pair (`libcef.so`,
   `chrome-sandbox`), `bypass_flags_absent`, and `sandbox_info_forwarded`.
   `--no-sandbox`, `--disable-web-security`, `--allow-file-access-from-files`,
   and `--remote-debugging-port` must be absent from every shipped config.

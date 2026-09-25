@@ -244,6 +244,90 @@ void main() {
     expect(event.toJson()['payload'], containsPair('user_gesture', true));
   });
 
+  test('round-trips frame ring names, input modifiers and text, and cursors',
+      () {
+    final event = SurfaceEvent.fromJson({
+      'type': 'frame_ready',
+      'payload': {
+        'surface_id': 3,
+        'sequence': 4,
+        'frame': {
+          'slot': 1,
+          'width': 640,
+          'height': 360,
+          'stride': 2560,
+          'format': 'rgba_premultiplied',
+          'sequence': 9,
+          'buffer': 'roscord-cef-10-ab-3-1',
+        },
+      },
+    }) as FrameReadyEvent;
+    expect(event.frame.buffer, 'roscord-cef-10-ab-3-1');
+    expect(event.frame.format, PixelFormat.rgbaPremultiplied);
+    expect(
+      event.frame.toJson(),
+      containsPair('buffer', 'roscord-cef-10-ab-3-1'),
+    );
+    // Fixture frames have no ring behind them.
+    final fixture = FrameReference(
+      slot: 0,
+      width: 2,
+      height: 2,
+      stride: 8,
+      format: PixelFormat.bgraPremultiplied,
+      sequence: 1,
+    );
+    expect(fixture.toJson().containsKey('buffer'), isFalse);
+    expect(FrameReference.fromJson(fixture.toJson()).buffer, isNull);
+    expect(
+      () => FrameReference.fromJson({...fixture.toJson(), 'buffer': 7}),
+      throwsA(isA<ProtocolException>()),
+    );
+
+    final pointer = InputEvent.fromJson(
+      InputEvent.pointer(
+        kind: PointerKind.down,
+        x: 1,
+        y: 2,
+        buttons: 1,
+        modifiers: InputModifiers.shift | InputModifiers.control,
+      ).toJson(),
+    ) as PointerInput;
+    expect(pointer.modifiers, InputModifiers.shift | InputModifiers.control);
+    // Senders that predate modifiers omit them.
+    final plain = InputEvent.fromJson({
+      'type': 'pointer',
+      'payload': {'kind': 'move', 'x': 1, 'y': 2},
+    }) as PointerInput;
+    expect(plain.modifiers, 0);
+
+    final typed = InputEvent.fromJson(
+      InputEvent.keyboard(
+        key: '@',
+        code: 'KeyQ',
+        modifiers: InputModifiers.control | InputModifiers.alt,
+        pressed: true,
+        text: '@',
+      ).toJson(),
+    ) as KeyboardInput;
+    expect(typed.text, '@');
+    final released =
+        InputEvent.keyboard(key: 'q', code: 'KeyQ', pressed: false);
+    expect(released.toJson()['payload'], isNot(contains('text')));
+    expect(
+      (InputEvent.fromJson(released.toJson()) as KeyboardInput).text,
+      isNull,
+    );
+
+    final cursor = SurfaceEvent.fromJson({
+      'type': 'cursor_changed',
+      'payload': {'surface_id': 3, 'sequence': 5, 'cursor': 'pointer'},
+    });
+    expect(cursor, isA<CursorChangedEvent>());
+    expect((cursor as CursorChangedEvent).cursor, 'pointer');
+    expect(cursor.toJson()['payload'], containsPair('cursor', 'pointer'));
+  });
+
   test(
     'round-trips recursive binary script values and immutable policy data',
     () {

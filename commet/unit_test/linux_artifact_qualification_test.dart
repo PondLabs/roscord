@@ -214,16 +214,23 @@ void main() {
     });
   });
 
-  group('Linux official video remains the preserved native/external path', () {
-    test('video never routes through CEF', () {
+  group('Linux official video plays through the bundled CEF host', () {
+    test('video routes through CEF like Windows', () {
+      expect(linuxOfficialVideoPath, 'cef-official-embed');
       expect(
-          linuxOfficialVideoPath, 'native-yt-dlp-mpv-or-deliberate-external');
-      expect(linuxOfficialVideoUsesCef, isFalse);
-      // The adapter keeps Linux on its native path: only Windows uses CEF.
-      expect(mediaEmbedUsesCef(isWeb: false, isWindows: false), isFalse);
-      assertLinuxVideoPreserved(usesCef: false);
+        linuxOfficialVideoFallback,
+        'native-yt-dlp-mpv-or-deliberate-external',
+      );
+      expect(linuxOfficialVideoUsesCef, isTrue);
       expect(
-        () => assertLinuxVideoPreserved(usesCef: true),
+        mediaEmbedUsesCef(isWeb: false, isWindows: false, isLinux: true),
+        isTrue,
+      );
+      expect(mediaEmbedUsesCef(isWeb: true, isWindows: false, isLinux: true),
+          isFalse);
+      assertLinuxVideoUsesCef(usesCef: true);
+      expect(
+        () => assertLinuxVideoUsesCef(usesCef: false),
         throwsA(isA<BrowserRuntimeException>()),
       );
     });

@@ -9,8 +9,9 @@ import 'browser_runtime.dart';
 /// embedded as a Flutter texture and standalone in a roscord-owned window —
 /// through CEF windowless/off-screen rendering with CPU `OnPaint` copied into
 /// client-owned memory. Clean environments without WebKitGTK or host CEF
-/// still pass, and Linux official video remains the preserved native/external
-/// path (yt-dlp/mpv or a deliberate external browser), never a CEF surface.
+/// still pass, and Linux official video plays the provider's own embed
+/// through the bundled CEF host, like Windows; only a build without CEF falls
+/// back to yt-dlp/mpv or a deliberate external browser.
 ///
 /// This library owns the pure qualification policy; the out-of-process
 /// `cef_host` enforces the staged-payload and sandbox rules at launch while
@@ -99,9 +100,11 @@ const Set<String> sandboxBypassFlags = {
   '--disable-namespace-sandbox',
 };
 
-/// Linux official video remains the preserved native/external path, never a
-/// CEF surface.
-const String linuxOfficialVideoPath =
+/// Linux official video plays the provider's embed in a CEF surface.
+const String linuxOfficialVideoPath = 'cef-official-embed';
+
+/// What a build without a bundled CEF host does with official video instead.
+const String linuxOfficialVideoFallback =
     'native-yt-dlp-mpv-or-deliberate-external';
 
 /// Parses a released native package id. Matching is exact and lowercase so an
@@ -214,6 +217,21 @@ void assertPortableProvesUserNamespace({required bool userNamespaceProbed}) {
   }
 }
 
+/// Whether CEF's sandbox can start on this system, from the AppArmor
+/// unprivileged user namespace restriction ([userNamespaceRestriction], the
+/// sysctl's contents, or null where the kernel has none) and the mode bits of
+/// the bundled `chrome-sandbox` helper.
+///
+/// `cef_host` runs the real probe at launch. This only recognises the common
+/// case where it would fail, Ubuntu 24.04's default restriction with no
+/// setuid helper installed, so callers can keep their non-CEF path instead of
+/// offering a surface that cannot open.
+bool linuxCefSandboxUsable({
+  required String? userNamespaceRestriction,
+  required int helperMode,
+}) =>
+    userNamespaceRestriction?.trim() != '1' || helperMode & 0x800 != 0;
+
 /// Returns true for sandbox-bypass flags that must never appear on a
 /// production command line.
 bool isSandboxBypassFlag(String flag) => sandboxBypassFlags.contains(flag);
@@ -310,15 +328,15 @@ void assertCleanEnvironment({
   }
 }
 
-/// Linux official video never routes through CEF.
-bool get linuxOfficialVideoUsesCef => false;
+/// Linux official video routes through CEF when the build bundles it.
+bool get linuxOfficialVideoUsesCef => true;
 
-/// Proves the preserved native/external official-video path.
-void assertLinuxVideoPreserved({required bool usesCef}) {
-  if (usesCef) {
+/// Proves Linux official video plays through the bundled CEF host.
+void assertLinuxVideoUsesCef({required bool usesCef}) {
+  if (!usesCef) {
     throw const BrowserRuntimeException(
       BrowserRuntimeErrorCode.invalidCommand,
-      'Linux official video remains the preserved native/external path',
+      'Linux official video plays through the bundled CEF host',
     );
   }
 }

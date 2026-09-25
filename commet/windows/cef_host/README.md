@@ -17,10 +17,12 @@ runtime files for compilation; the SDK directory is a build input and is not
 copied into the shipped Flutter bundle.  The ordinary `stage` command remains
 the release-payload staging path and intentionally omits the SDK.
 
-The target builds `client.dll` and copies the locked `Release/bootstrap.exe` to
-`cef_host.exe`.  The CEF bootstrap is the process entry point and loads the
-client DLL with `--module=client.dll`; it supplies the sandbox handle to both
-`CefExecuteProcess` and `CefInitialize`.  The host rejects startup when the
+The target builds `cef_host.dll` and copies the locked `Release/bootstrap.exe`
+to `cef_host.exe`.  The CEF bootstrap is the process entry point.  Renamed, it
+loads the DLL named after itself from its own directory (`--module` only
+applies while it is still called `bootstrap.exe`), and both must be signed
+with the same certificate or both be unsigned.  It supplies the sandbox handle
+to both `CefExecuteProcess` and `CefInitialize`.  The host rejects startup when the
 bootstrap/client inputs, bundled CEF modules/resources, parent process, or
 authenticated pipe cannot be verified.  It never downloads CEF and never
 uses a system CEF installation.
@@ -40,7 +42,17 @@ creates an embedded windowless or standalone owned CEF browser at the
 caller-declared URL and emits `opened` followed by `event/ready`; `close`
 emits `event/closed` after CEF closes the browser.  Navigation, redirects,
 TLS errors, and popups are mediated by the surface policy; CEF-owned pointers
-and buffers never cross this transport.
+and buffers never cross this transport.  The pipe uses overlapped I/O, so
+events go out while a read is pending.
+
+Embedded surfaces paint into a shared-memory frame ring (a named file
+mapping, `Local\roscord-cef-...`) that the app's `browser_surface` plugin
+draws into a Flutter texture; `frame_ready` names the ring and slot.  Input
+arrives as W3C key codes and Flutter pointer buttons and is translated with
+`browser_surface/native/browser_input.h`.  See
+[`docs/cef-browser-runtime-hosts.md`](../../../docs/cef-browser-runtime-hosts.md),
+which also covers `tools/cef_host_smoke.py`, the smoke test CI runs against
+the built bundle.
 
 The fixture is a development/smoke-test surface.  It does not provide a
 production fallback or a second browser engine; CEF initialization and the

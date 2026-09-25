@@ -78,14 +78,15 @@ fallback browser backend.
 
 `EmbeddedBrowserSurface` (`commet/lib/browser_runtime/embedded_browser_surface.dart`)
 owns one `PresentationMode.embedded` surface through the four-operation seam.
-The Windows host renders windowless OSR; CPU `OnPaint` is copied synchronously
-into client-owned memory (`SurfaceState::frame_pixels`) and published as a
-`frame_ready` event carrying only slot/size/stride/format/sequence. The Dart
-`ClientFrameRing` keeps the newest frame, coalescing older frames, and
-acknowledges presentation with `release_frame`. The Flutter `EmbeddedBrowserView`
-presents the newest reference through a `Texture` in normal composition (or
-frame metadata in tests without a native binding). No host buffer is ever
-retained past the paint callback and no host handle crosses into Dart.
+The host renders windowless OSR. It copies each CPU `OnPaint` into the next
+slot of the surface's shared-memory frame ring and publishes a `frame_ready`
+event carrying the ring name, slot, size, stride, format and sequence. The
+Dart `ClientFrameRing` keeps the newest frame, coalescing older frames. The
+`browser_surface` plugin draws the slot into the Flutter `Texture` that
+`EmbeddedBrowserView` shows (frame metadata in tests without a native
+binding). A per-slot seqlock keeps a slot the host is rewriting from being
+drawn. No CEF buffer is retained past the paint callback, and pixels never
+reach Dart. See `docs/cef-browser-runtime-hosts.md`.
 
 Input, resize/DPI, focus, and close travel as ordered typed commands:
 pointer down/up/move/enter/leave, wheel deltas, keyboard press/release,
@@ -163,10 +164,12 @@ never adapted.
   forwards pointer/wheel/focus plus resize/DPI. `MediaEmbedAdapter` keeps one
   active session with serialized opens. Disposal closes the runtime surface
   and the loopback server: no profile, host, or owned-window leak.
-- Routing is Windows-only (`mediaEmbedUsesCef`: `!isWeb && isWindows`).
-  Linux keeps native yt-dlp/mpv when available or a deliberate external
-  browser; web, macOS, Android, and iOS keep their existing paths. No CEF
-  fallback and no standalone surface is added for Linux. The legacy WebView
+- Windows and Linux route through CEF (`mediaEmbedUsesCef`:
+  `!isWeb && (isWindows || isLinux)`) when the build bundles the host. A
+  Linux build without it, or where CEF's sandbox cannot start, keeps native
+  yt-dlp/mpv when available or a deliberate external browser. Web, macOS,
+  Android, and iOS keep their existing paths. There is no standalone
+  official-video surface. The legacy WebView
   branches were deleted at the cutover (#132); desktop routing is now
   unconditional (see below).
 

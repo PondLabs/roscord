@@ -7,6 +7,7 @@ import 'package:dart_ipc/dart_ipc.dart' as ipc;
 import 'package:path/path.dart' as path;
 
 import 'browser_runtime.dart';
+import 'linux_artifact_qualification.dart';
 import 'runtime_lifecycle.dart';
 
 typedef BrowserHostConnector = Future<Socket> Function(String endpoint);
@@ -15,9 +16,83 @@ typedef BrowserHostStarter = Future<Process> Function(
   List<String> arguments,
 );
 
+/// Whether this build bundles a CEF host the desktop runtime can start: the
+/// host executable and, on Linux, its runtime directory and a sandbox route
+/// (see [linuxCefSandboxUsable]).  Development builds without CEF return
+/// false, so callers can pick another playback path instead of failing when
+/// a surface opens.
+bool isBundledBrowserRuntimeAvailable() {
+  if (Platform.isWindows) {
+    return _bundledHostExecutable(CefHostFlavor.windows) != null;
+  }
+  if (Platform.isLinux) {
+    final cefRoot = _bundledCefRoot();
+    return _bundledHostExecutable(CefHostFlavor.linux) != null &&
+        cefRoot != null &&
+        _linuxSandboxUsable(cefRoot);
+  }
+  return false;
+}
+
+bool _linuxSandboxUsable(String cefRoot) {
+  try {
+    final restriction =
+        File('/proc/sys/kernel/apparmor_restrict_unprivileged_userns');
+    return linuxCefSandboxUsable(
+      userNamespaceRestriction:
+          restriction.existsSync() ? restriction.readAsStringSync() : null,
+      helperMode:
+          File(path.join(cefRoot, 'Release', 'chrome-sandbox')).statSync().mode,
+    );
+  } on FileSystemException {
+    // The host decides; it fails closed with a clear error.
+    return true;
+  }
+}
+
+List<String> _hostExecutableCandidates(CefHostFlavor flavor) {
+  final executableDirectory = path.dirname(Platform.resolvedExecutable);
+  return switch (flavor) {
+    CefHostFlavor.windows => [
+        path.join(executableDirectory, 'cef_host', 'cef_host.exe'),
+        path.join(executableDirectory, 'cef_host.exe'),
+      ],
+    CefHostFlavor.linux => [
+        path.join(executableDirectory, 'cef_host', 'cef_host'),
+        path.join(executableDirectory, 'cef_host'),
+      ],
+  };
+}
+
+String? _bundledHostExecutable(CefHostFlavor flavor) {
+  for (final candidate in _hostExecutableCandidates(flavor)) {
+    if (File(candidate).existsSync()) return candidate;
+  }
+  return null;
+}
+
+List<String> _cefRootCandidates() {
+  final executableDirectory = path.dirname(Platform.resolvedExecutable);
+  return [
+    path.join(executableDirectory, 'cef'),
+    path.join(executableDirectory, '..', 'lib', 'roscord', 'cef'),
+    path.join('/app', 'lib', 'roscord', 'cef'),
+    path.join('/usr', 'lib', 'roscord', 'cef'),
+  ];
+}
+
+String? _bundledCefRoot() {
+  for (final candidate in _cefRootCandidates()) {
+    if (File(path.join(candidate, 'Release', 'libcef.so')).existsSync()) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
 /// Which desktop host topology a runtime drives.
 ///
-/// Windows uses a named-pipe endpoint and `--module/--pipe/--nonce` launch
+/// Windows uses a named-pipe endpoint and `--pipe/--nonce` launch
 /// arguments; Linux uses an owner-only Unix-socket endpoint and the
 /// `--socket/--parent-nonce/--cef-root` arguments enforced by the Rust
 /// `cef_host`. Both flavors share the authenticated, versioned, length-framed
@@ -152,6 +227,9 @@ class WindowsBrowserRuntime implements BrowserRuntime {
     _ensurePageOperationsAvailable();
     final requestId = _allocateRequestId();
     final pending = Completer<SurfaceId>();
+    // Host loss can fail this before it is awaited below (while the host is
+    // still starting); the failure then surfaces through that await.
+    pending.future.ignore();
     _pendingOpens[requestId] = pending;
     _openSpecs[requestId] = spec;
     try {
@@ -398,7 +476,6 @@ class WindowsBrowserRuntime implements BrowserRuntime {
         : r'\\.\pipe\roscord-browser-' + '$_parentProcessId-$nonce';
     final hostArguments = switch (hostFlavor) {
       CefHostFlavor.windows => <String>[
-          '--module=client.dll',
           '--pipe=$endpoint',
           '--nonce=$nonce',
           '--parent-pid=$_parentProcessId',
@@ -577,20 +654,9 @@ class WindowsBrowserRuntime implements BrowserRuntime {
 
   String _resolveHostExecutable() {
     if (_hostExecutable != null) return _hostExecutable;
-    final executableDirectory = path.dirname(Platform.resolvedExecutable);
-    final candidates = switch (hostFlavor) {
-      CefHostFlavor.windows => [
-          path.join(executableDirectory, 'cef_host', 'cef_host.exe'),
-          path.join(executableDirectory, 'cef_host.exe'),
-        ],
-      CefHostFlavor.linux => [
-          path.join(executableDirectory, 'cef_host', 'cef_host'),
-          path.join(executableDirectory, 'cef_host'),
-        ],
-    };
-    for (final candidate in candidates) {
-      if (File(candidate).existsSync()) return candidate;
-    }
+    final found = _bundledHostExecutable(hostFlavor);
+    if (found != null) return found;
+    final candidates = _hostExecutableCandidates(hostFlavor);
     // Both messages stay present: startup qualification greps the Windows
     // spelling, while Linux callers surface the platform-correct error.
     throw BrowserRuntimeException(
@@ -1191,16 +1257,9 @@ class WindowsBrowserRuntime implements BrowserRuntime {
   String _resolveCefRoot() {
     final configured = _cefRoot;
     if (configured != null && configured.isNotEmpty) return configured;
-    final executableDirectory = path.dirname(Platform.resolvedExecutable);
-    final candidates = [
-      path.join(executableDirectory, 'cef'),
-      path.join(executableDirectory, '..', 'lib', 'roscord', 'cef'),
-      path.join('/app', 'lib', 'roscord', 'cef'),
-      path.join('/usr', 'lib', 'roscord', 'cef'),
-    ];
-    for (final candidate in candidates) {
-      if (Directory(candidate).existsSync()) return candidate;
-    }
+    final found = _bundledCefRoot();
+    if (found != null) return path.normalize(found);
+    final candidates = _cefRootCandidates();
     throw BrowserRuntimeException(
       BrowserRuntimeErrorCode.protocol,
       'bundled CEF runtime was not found in ${candidates.join(', ')}',
@@ -1219,8 +1278,13 @@ class WindowsBrowserRuntime implements BrowserRuntime {
     final parent = _socketRoot ??
         Platform.environment['XDG_RUNTIME_DIR'] ??
         Directory.systemTemp.path;
+    // AF_UNIX paths are limited to 107 bytes, so the directory carries only
+    // part of the nonce; the full nonce still authenticates every frame.
     final directory = Directory(
-      path.join(parent, 'roscord-browser-$_parentProcessId-$nonce'),
+      path.join(
+        parent,
+        'roscord-cef-$_parentProcessId-${nonce.substring(0, 16)}',
+      ),
     );
     directory.createSync(recursive: true);
     return path.join(directory.path, 'host.sock');

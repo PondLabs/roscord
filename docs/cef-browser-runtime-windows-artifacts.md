@@ -11,14 +11,19 @@ The Windows `Release` directory next to `commet.exe` carries the CEF payload
 in `cef_host/` (installed by `commet/windows/cef_host/CMakeLists.txt` when
 `ROSCORD_BUILD_CEF_HOST=ON`); this nested layout is also what
 `WindowsBrowserRuntime._resolveHostExecutable` prefers.  The CMake install
-flattens the archive's `Release/` contents into the payload root, renames the
-locked `Release/bootstrap.exe` to `cef_host.exe`, keeps `Resources/` as a
-subdirectory, and adds the project-built `client.dll` plus the smoke-test
-fixtures:
+flattens the archive's `Release/` and `Resources/` contents into the payload
+root, renames the locked `Release/bootstrap.exe` to `cef_host.exe`, and adds
+the project-built `cef_host.dll` plus the smoke-test fixtures.
+
+- CEF loads `icudtl.dat`, the `.pak` files and `locales/` from the directory
+  that holds `libcef.dll`, whatever `CefSettings` says. Without ICU data
+  there, the host dies in `InitializeICU`.
+- A renamed bootstrap loads the DLL named after itself from its own
+  directory. `--module` only applies while it keeps the name `bootstrap.exe`.
 
 ```text
 <Release>/cef_host/cef_host.exe        # renamed locked bootstrap.exe
-<Release>/cef_host/client.dll          # project-built bootstrap client
+<Release>/cef_host/cef_host.dll        # project-built bootstrap client
 <Release>/cef_host/libcef.dll
 <Release>/cef_host/chrome_elf.dll
 <Release>/cef_host/d3dcompiler_47.dll  # graphics / software fallback
@@ -30,11 +35,11 @@ fixtures:
 <Release>/cef_host/vk_swiftshader.dll
 <Release>/cef_host/vk_swiftshader_icd.json
 <Release>/cef_host/vulkan-1.dll
-<Release>/cef_host/Resources/chrome_100_percent.pak
-<Release>/cef_host/Resources/chrome_200_percent.pak
-<Release>/cef_host/Resources/icudtl.dat
-<Release>/cef_host/Resources/resources.pak
-<Release>/cef_host/Resources/locales/en-US.pak (+ further staged locales)
+<Release>/cef_host/chrome_100_percent.pak
+<Release>/cef_host/chrome_200_percent.pak
+<Release>/cef_host/icudtl.dat
+<Release>/cef_host/resources.pak
+<Release>/cef_host/locales/en-US.pak   (+ further staged locales)
 <Release>/cef_host/fixtures/fixture.html
 ```
 
@@ -69,7 +74,7 @@ files, and `THIRD_PARTY_NOTICES.txt`.
 
 ## Signatures
 
-Production signs the PE binaries (`cef_host.exe`, `client.dll`, `libcef.dll`,
+Production signs the PE binaries (`cef_host.exe`, `cef_host.dll`, `libcef.dll`,
 `chrome_elf.dll`, and the remaining shipped DLLs) with Authenticode, and the
 Windows ZIP, portable archive, manifests, SBOM, and notices with the project
 release key as detached sidecars.  The auditable record is
@@ -99,7 +104,7 @@ python tools/qualify_windows_artifact.py \
 It verifies, in order: required CEF resources, the bootstrap/client pair,
 helpers, locales (including `en-US.pak`), graphics dependencies, and sandbox
 inputs are staged; payload bytes match the manifest (with the
-`bootstrap.exe` -> `cef_host.exe` rename and the `client.dll` project entry);
+`bootstrap.exe` -> `cef_host.exe` rename and the `cef_host.dll` project entry);
 notices, CycloneDX SBOM, and provenance are complete and lock-consistent;
 native binaries pass hash checks (and detached `signatures.json` checks with
 `--require-signatures`); the sandbox/bootstrap pair is present with no
@@ -122,7 +127,7 @@ bytes are clean, and any other binary carrying those markers fails closed.
 
 ## Sandbox and bootstrap failures block opening
 
-`cef_host` (M138+ `bootstrap.exe` + `client.dll` exporting `RunWinMain`)
+`cef_host` (M138+ `bootstrap.exe` + `cef_host.dll` exporting `RunWinMain`)
 forwards the bootstrap sandbox information to both `CefExecuteProcess` and
 `CefInitialize`, runs with `settings.no_sandbox = false`, and refuses to
 serve surfaces when the check fails:

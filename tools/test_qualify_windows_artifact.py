@@ -25,7 +25,7 @@ def _build_qualified_fixture(directory: Path):
     staged = directory / "staged"
     project = directory / "project"
     project.mkdir()
-    (project / "client.dll").write_bytes(b"client-dll-bytes")
+    (project / "cef_host.dll").write_bytes(b"client-dll-bytes")
     result = cef_runtime.stage_runtime(
         "windows-x64",
         archives["windows-x64"],
@@ -45,11 +45,13 @@ def _build_qualified_fixture(directory: Path):
             # Archive-root notice inputs ship as generated notices, mirroring
             # the CMake install layout.
             continue
-        source = staged.joinpath(*PurePosixPath(relative).parts)
+        source = staged.joinpath(
+            *PurePosixPath(cef_runtime.staged_path("windows-x64", relative)).parts
+        )
         target = payload.joinpath(*PurePosixPath(_payload_name(relative)).parts)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
-    shutil.copyfile(project / "client.dll", payload / "client.dll")
+    shutil.copyfile(project / "cef_host.dll", payload / "cef_host.dll")
     (payload / "fixtures").mkdir(exist_ok=True)
     (payload / "fixtures" / "fixture.html").write_bytes(b"<html>fixture</html>")
     (payload / "fixtures" / "README.md").write_bytes(b"fixture readme")
@@ -114,7 +116,7 @@ class QualifyWindowsArtifactTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             directory = Path(temporary)
             lock, bundle, metadata = _build_qualified_fixture(directory)
-            (bundle / "cef_host" / "Resources" / "locales" / "en-US.pak").unlink()
+            (bundle / "cef_host" / "locales" / "en-US.pak").unlink()
             with self.assertRaises(QualificationError):
                 qualify_windows_artifact.qualify(bundle, metadata, lock)
 
@@ -122,7 +124,7 @@ class QualifyWindowsArtifactTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             directory = Path(temporary)
             lock, bundle, metadata = _build_qualified_fixture(directory)
-            (bundle / "cef_host" / "client.dll").unlink()
+            (bundle / "cef_host" / "cef_host.dll").unlink()
             with self.assertRaises(QualificationError):
                 qualify_windows_artifact.qualify(bundle, metadata, lock)
 

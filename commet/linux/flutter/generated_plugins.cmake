@@ -3,6 +3,7 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  browser_surface
   desktop_drop
   dynamic_color
   file_selector_linux

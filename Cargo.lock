@@ -741,7 +741,6 @@ dependencies = [
  "audio_decode",
  "audio_dsp",
  "base64",
- "cc",
  "dj_audio",
  "flutter_rust_bridge",
  "libc",
