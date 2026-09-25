@@ -5,6 +5,7 @@ import 'package:commet/client/components/voip/audio_processing/audio_dsp_setting
 import 'package:commet/client/components/voip/audio_processing/audio_processing_manager.dart';
 import 'package:commet/client/components/voip/audio_processing/audio_processing_manager_stub.dart'
     show UnsupportedAudioProcessingManager;
+import 'package:commet/client/components/voip/audio_processing/microphone_noise_suppression.dart';
 import 'package:commet/client/components/voip/voip_session.dart';
 import 'package:commet/client/components/voip/webrtc_default_devices.dart';
 import 'package:commet/config/platform_utils.dart';
@@ -442,7 +443,9 @@ class NativeAudioProcessingManager extends AudioProcessingManager {
   Future<bool> _startLoopback() async {
     try {
       final lb = await _MicLoopback.start(
-          noiseSuppression: !settings.noiseSuppression, monitor: _monitor);
+          noiseSuppression: MicrophoneNoiseSuppression.webrtcSuppressorFor(this,
+              preference: settings.noiseSuppression),
+          monitor: _monitor);
       _loopback = lb;
       Log.i("Voice DSP: microphone test running");
       return true;
@@ -530,17 +533,14 @@ class _MicLoopback {
     final send = await webrtc.createPeerConnection(config);
     final recv = await webrtc.createPeerConnection(config);
 
-    // Same options as a call (MatrixLivekitBackend.join): WebRTC's own
-    // suppressor only when ours is off.
-    final constraints = <String, dynamic>{
-      'echoCancellation': true,
-      'noiseSuppression': noiseSuppression,
-      'autoGainControl': true,
-    };
-    final deviceId = await WebrtcDefaultDevices.getDefaultMicrophoneId();
-    if (deviceId != null) {
-      constraints['deviceId'] = {'exact': deviceId};
-    }
+    // Captured like a call's microphone: the same processing, WebRTC's own
+    // suppressor only when ours is off, and the device the user picked (it
+    // used to be `deviceId: {exact}`, which desktop WebRTC ignores: the
+    // test listened to device 0).
+    final constraints = microphoneConstraints(
+      webrtcNoiseSuppression: noiseSuppression,
+      deviceId: await WebrtcDefaultDevices.getDefaultMicrophoneId(),
+    );
 
     webrtc.MediaStream? mic;
     try {

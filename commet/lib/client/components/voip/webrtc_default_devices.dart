@@ -17,6 +17,8 @@
 import 'dart:async';
 
 import 'package:collection/collection.dart';
+import 'package:commet/client/components/voip/audio_processing/audio_processing_manager.dart';
+import 'package:commet/client/components/voip/audio_processing/microphone_noise_suppression.dart';
 import 'package:commet/config/platform_utils.dart';
 import 'package:commet/debug/log.dart';
 import 'package:commet/main.dart';
@@ -26,22 +28,26 @@ import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
 enum AudioDeviceKind { input, output }
 
 class WebrtcDefaultDevices {
+  /// The picked microphone for a legacy 1:1 call (desktop), captured like
+  /// any other microphone (microphoneConstraints): the device the user
+  /// picked, which `deviceId: {exact}` never selected on desktop, and
+  /// WebRTC's own noise suppressor only when ours does not run.
   static Future<webrtc.MediaStream?> getDefaultMicrophone() async {
     if (PlatformUtils.isAndroid || PlatformUtils.isWeb) return null;
 
     await initDummyConnection();
 
-    Map<String, dynamic> constraints = {
-      'echoCancellation': true,
-      'noiseSuppression': true,
-      'autoGainControl': false,
-    };
-
     final picked = await _find(AudioDeviceKind.input);
     if (picked != null) {
-      constraints["deviceId"] = {'exact': picked.deviceId};
       await _select(AudioDeviceKind.input, picked);
     }
+    final dsp = AudioProcessingManager.instance;
+    final constraints = microphoneConstraints(
+      webrtcNoiseSuppression: MicrophoneNoiseSuppression.webrtcSuppressorFor(
+          dsp,
+          preference: preferences.voipNoiseSuppression.value),
+      deviceId: picked?.deviceId,
+    );
 
     return await webrtc.navigator.mediaDevices
         .getUserMedia({"audio": constraints});

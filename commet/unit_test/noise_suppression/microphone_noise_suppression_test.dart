@@ -299,6 +299,24 @@ void main() {
     });
   });
 
+  // flutter-webrtc on desktop selects an input only from
+  // `optional: [{sourceId}]` and records from its device 0 otherwise: the
+  // microphone test and legacy calls used `deviceId: {exact}`.
+  test('captures that are not LiveKit tracks name the device like LiveKit', () {
+    final constraints =
+        microphoneConstraints(webrtcNoiseSuppression: false, deviceId: 'mic-7');
+    final optional = (constraints['optional'] as List).cast<Map>();
+    expect(optional, contains(equals({'sourceId': 'mic-7'})));
+    expect(optional, contains(equals({'noiseSuppression': false})));
+    expect(optional, contains(equals({'echoCancellation': true})));
+    expect(constraints.containsKey('deviceId'), isFalse);
+    expect(
+        (microphoneConstraints(webrtcNoiseSuppression: true)['optional']
+                as List)
+            .cast<Map>(),
+        contains(equals({'noiseSuppression': true})));
+  });
+
   test('the microphone is found by its source, not as the first audio track',
       () {
     final microphone = _Publication(lk.TrackSource.microphone);

@@ -2,6 +2,23 @@ import 'dart:async';
 
 import 'package:commet/client/components/voip/audio_processing/audio_processing_manager.dart';
 import 'package:commet/debug/log.dart';
+import 'package:livekit_client/livekit_client.dart' as lk;
+
+/// getUserMedia audio constraints for a microphone capture that is not a
+/// LiveKit track: the microphone test and legacy 1:1 calls. Built the way
+/// LiveKit builds a voice room's (AudioCaptureOptions), so every capture asks
+/// for the same processing and names its device the same way. That way
+/// matters: flutter-webrtc on desktop only selects an input from
+/// `optional: [{sourceId}]`, and records from its device 0, whatever the
+/// user picked, for anything else (`deviceId: {exact: ...}` included).
+Map<String, dynamic> microphoneConstraints({
+  required bool webrtcNoiseSuppression,
+  String? deviceId,
+}) =>
+    lk.AudioCaptureOptions(
+      deviceId: deviceId,
+      noiseSuppression: webrtcNoiseSuppression,
+    ).toMediaConstraintsMap();
 
 /// A call's microphone capture, as [MicrophoneNoiseSuppression] needs it.
 abstract class MicrophoneCapture {
