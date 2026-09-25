@@ -4514,10 +4514,13 @@ void HostController::CreateBrowserOnUi(uint64_t surface_id, std::string url,
   CefBrowserSettings settings;
   settings.windowless_frame_rate = 30;
   auto client = new BrowserClient(this, surface_id);
-  auto browser = CefBrowserHost::CreateBrowserSync(
-      window_info, client, url, settings, nullptr, surface->request_context);
-  if (browser == nullptr) {
-    SendError(std::nullopt, "runtime_failed", "CEF rejected the fixture surface");
+  // Asynchronous on purpose: a request context made by CreateContext starts
+  // uninitialized, and CreateBrowserSync refuses one that is not ready yet
+  // (it returns null without a word), while CreateBrowser waits for it.
+  // OnAfterCreated records the browser and reports the surface ready.
+  if (!CefBrowserHost::CreateBrowser(window_info, client, url, settings,
+                                     nullptr, surface->request_context)) {
+    SendError(std::nullopt, "runtime_failed", "CEF rejected the surface");
     HWND failed_window = nullptr;
     {
       std::lock_guard lock(state_mutex_);
@@ -4530,12 +4533,6 @@ void HostController::CreateBrowserOnUi(uint64_t surface_id, std::string url,
     }
     DestroyStandaloneWindow(failed_window);
     closed_condition_.notify_all();
-    return;
-  }
-  std::lock_guard lock(state_mutex_);
-  const auto iterator = surfaces_.find(surface_id);
-  if (iterator != surfaces_.end()) {
-    iterator->second.browser = browser;
   }
 }
 

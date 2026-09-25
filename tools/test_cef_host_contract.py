@@ -322,7 +322,7 @@ class CefHostContractTests(unittest.TestCase):
         self.assertIn("SendOpened", SOURCE)
         self.assertIn("SendReady", SOURCE)
         self.assertIn("SendClosed", SOURCE)
-        self.assertIn("CreateBrowserSync", SOURCE)
+        self.assertIn("CefBrowserHost::CreateBrowser(", SOURCE)
         self.assertIn("CloseBrowser(true)", SOURCE)
 
     def test_script_commands_execute_in_cef_and_page_messages_return_as_events(self) -> None:
