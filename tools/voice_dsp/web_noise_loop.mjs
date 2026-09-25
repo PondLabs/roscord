@@ -42,18 +42,22 @@
 //               preference flipping)
 //   app-nowasm  audio_dsp.wasm answers 404: the browser's suppressor stays
 //               on, there is no processor, and the app knows why
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const MIN_NOISE_DROP_DB = 20;
-const MAX_SPEECH_LOSS_DB = 4;
-const OFF_MAX_NOISE_DROP_DB = 3;
-const BLOCK = 480;
-const RATE = 48000;
+import {
+  BLOCK,
+  loadFixture,
+  measure,
+  OFF_MAX_NOISE_DROP_DB,
+  RATE,
+  suppressionProblems,
+} from "./measure.mjs";
+
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "../..");
@@ -68,43 +72,6 @@ const webRoot = appRoot ?? resolve(repo, arg("web-root", "commet/web"));
 const fixtureDir = resolve(repo, arg("fixture-dir", "target/voice-fixtures"));
 const chrome = arg("chrome", process.env.CHROME || "google-chrome-stable");
 const scenarios = arg("scenario", appRoot ? "app,app-nowasm" : "dsp,off,toggle,nowasm,badwasm,noworklet").split(",");
-
-function ensureFixture() {
-  const wav = join(fixtureDir, "noisy_speech_48k.wav");
-  if (!existsSync(wav)) {
-    const r = spawnSync("cargo", ["run", "-q", "-p", "audio_dsp", "--release", "--example", "noisy_speech", "--", fixtureDir], {
-      cwd: repo,
-      stdio: "inherit",
-    });
-    if (r.status !== 0) throw new Error("could not build the fixture");
-  }
-  return { wav, labels: readFileSync(join(fixtureDir, "noisy_speech_48k.labels"), "utf8").trim(), blocks: fixtureBlocks(wav) };
-}
-
-// Mean square per 10 ms block of a mono PCM16 WAV, unit scale.
-function fixtureBlocks(path) {
-  const b = readFileSync(path);
-  let pos = 12;
-  while (pos + 8 <= b.length) {
-    const id = b.toString("ascii", pos, pos + 4);
-    const len = b.readUInt32LE(pos + 4);
-    if (id === "data") {
-      const n = len / 2;
-      const out = [];
-      for (let k = 0; (k + 1) * BLOCK <= n; k++) {
-        let acc = 0;
-        for (let i = 0; i < BLOCK; i++) {
-          const s = b.readInt16LE(pos + 8 + 2 * (k * BLOCK + i)) / 32768;
-          acc += s * s;
-        }
-        out.push(acc / BLOCK);
-      }
-      return out;
-    }
-    pos += 8 + len + (len & 1);
-  }
-  throw new Error(`${path}: no data chunk`);
-}
 
 const MIME = {
   ".js": "text/javascript",
@@ -232,53 +199,6 @@ async function runInChrome(url, wav, drive) {
   }
 }
 
-const db = (x) => 10 * Math.log10(Math.max(x, 1e-12));
-
-// Offset (in blocks) that best lines `b` up with `a`: b[k] ~ a[k + lag].
-function bestLag(a, b, maxLag, weight = () => true) {
-  let best = { lag: 0, score: -Infinity };
-  for (let lag = 0; lag <= maxLag; lag++) {
-    let sa = 0, sb = 0, sab = 0, saa = 0, sbb = 0, n = 0;
-    for (let k = 0; k < b.length && k + lag < a.length; k++) {
-      if (!weight(k + lag)) continue;
-      const x = db(a[k + lag]), y = db(b[k]);
-      sa += x; sb += y; sab += x * y; saa += x * x; sbb += y * y; n++;
-    }
-    if (n < 50) continue;
-    const cov = sab / n - (sa / n) * (sb / n);
-    const score = cov / Math.sqrt((saa / n - (sa / n) ** 2) * (sbb / n - (sb / n) ** 2) || 1);
-    if (score > best.score) best = { lag, score };
-  }
-  return best;
-}
-
-function measure(fixture, raw, processed) {
-  // Where in the fixture the recording starts (it starts a little after
-  // getUserMedia), then how far behind the processed track runs.
-  const start = bestLag(fixture.blocks, raw, 300);
-  const latency = bestLag(raw, processed, 30, (k) => fixture.labels[k + start.lag] === "s");
-  let rawN = 0, procN = 0, nN = 0, rawS = 0, procS = 0, nS = 0;
-  for (let k = 0; k + latency.lag < processed.length && k < raw.length; k++) {
-    const label = fixture.labels[k + start.lag];
-    const p = processed[k + latency.lag];
-    if (label === "n" && k + start.lag > 50) {
-      rawN += raw[k]; procN += p; nN++;
-    } else if (label === "s") {
-      rawS += raw[k]; procS += p; nS++;
-    }
-  }
-  return {
-    startBlock: start.lag,
-    alignment: +start.score.toFixed(3),
-    latencyMs: latency.lag * 10,
-    noiseBlocks: nN,
-    speechBlocks: nS,
-    noiseDropDb: +(db(rawN / nN) - db(procN / nN)).toFixed(1),
-    speechChangeDb: +(db(procS / nS) - db(rawS / nS)).toFixed(1),
-    rawNoiseDbfs: +db(rawN / nN).toFixed(1),
-  };
-}
-
 async function scenario(name, fixture) {
   const seconds = (fixture.blocks.length * BLOCK) / RATE + 1;
   const broken = ["nowasm", "badwasm", "noworklet"].includes(name);
@@ -303,15 +223,13 @@ async function scenario(name, fixture) {
         if (!r.raw || r.raw.length < 200) problems.push(`recorded ${r.raw?.length ?? 0} blocks`);
         else {
           summary = measure(fixture, r.raw, r.processed);
-          if (summary.alignment < 0.6) problems.push(`could not line the recording up with the fixture (${summary.alignment})`);
           const lastReport = r.reports[r.reports.length - 1];
           summary.frames = lastReport?.frames;
           summary.nsActive = lastReport ? (lastReport.flags & 2) !== 0 : undefined;
           if (name === "off") {
             if (summary.noiseDropDb > OFF_MAX_NOISE_DROP_DB) problems.push(`noise dropped ${summary.noiseDropDb} dB with everything off`);
           } else {
-            if (!(summary.noiseDropDb >= MIN_NOISE_DROP_DB)) problems.push(`noise only ${summary.noiseDropDb} dB down (want >= ${MIN_NOISE_DROP_DB})`);
-            if (!(summary.speechChangeDb >= -MAX_SPEECH_LOSS_DB)) problems.push(`speech ${summary.speechChangeDb} dB (want >= -${MAX_SPEECH_LOSS_DB})`);
+            problems.push(...suppressionProblems(summary));
             if (!summary.nsActive) problems.push("the DSP does not report noise suppression active");
           }
         }
@@ -340,9 +258,7 @@ function checkLevels(problems, label, fixture, levels) {
     return {};
   }
   const m = measure(fixture, levels.raw, levels.processed);
-  if (m.alignment < 0.6) problems.push(`${label}: could not line the recording up with the fixture (${m.alignment})`);
-  if (!(m.noiseDropDb >= MIN_NOISE_DROP_DB)) problems.push(`${label}: noise only ${m.noiseDropDb} dB down (want >= ${MIN_NOISE_DROP_DB})`);
-  if (!(m.speechChangeDb >= -MAX_SPEECH_LOSS_DB)) problems.push(`${label}: speech ${m.speechChangeDb} dB (want >= -${MAX_SPEECH_LOSS_DB})`);
+  problems.push(...suppressionProblems(m, label));
   return m;
 }
 
@@ -406,7 +322,7 @@ for (const f of ["audio_dsp.js", "audio_dsp.worklet.js", "audio_dsp.wasm", ...(a
   }
 }
 
-const fixture = ensureFixture();
+const fixture = loadFixture(repo, fixtureDir);
 const results = await Promise.all(scenarios.map((s) => (appRoot ? appScenario(s, fixture) : scenario(s, fixture))));
 let failed = false;
 for (const r of results) {

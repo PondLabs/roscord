@@ -11,6 +11,7 @@ import 'package:commet/client/components/voip/webrtc_default_devices.dart';
 import 'package:commet/config/platform_utils.dart';
 import 'package:commet/config/rust_library.dart';
 import 'package:commet/debug/log.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
 import 'package:livekit_client/livekit_client.dart' as lk;
 
@@ -185,6 +186,11 @@ class _Bindings {
 /// recording (through the APM and our hook) and lets us play the result
 /// back.
 class NativeAudioProcessingManager extends AudioProcessingManager {
+  /// Merged into the microphone test's capture constraints, for the native
+  /// noise loop (integration_test/voice_dsp/native_noise_test.dart).
+  @visibleForTesting
+  static Map<String, dynamic> debugMicTestConstraints = {};
+
   /// Where the DSP's C ABI comes from: librust_lib_commet in the app, the
   /// crate's own cdylib in tests.
   final DynamicLibrary? Function() _openLibrary;
@@ -471,6 +477,17 @@ class NativeAudioProcessingManager extends AudioProcessingManager {
     Log.i("Voice DSP: microphone test stopped");
   }
 
+  /// The microphone test's WebRTC statistics, sending side then receiving
+  /// side, for the native noise loop: a sender's `media-source` energy is
+  /// measured on what leaves the audio processing module, our hook included,
+  /// which is what gets encoded.
+  @visibleForTesting
+  Future<List<webrtc.StatsReport>> debugMicTestStats() async {
+    final lb = _loopback;
+    if (lb == null) return [];
+    return [...await lb.send.getStats(), ...await lb.recv.getStats()];
+  }
+
   @override
   Future<void> setMicTestMonitor(bool enabled) async {
     _monitor = enabled;
@@ -540,7 +557,7 @@ class _MicLoopback {
     final constraints = microphoneConstraints(
       webrtcNoiseSuppression: noiseSuppression,
       deviceId: await WebrtcDefaultDevices.getDefaultMicrophoneId(),
-    );
+    )..addAll(NativeAudioProcessingManager.debugMicTestConstraints);
 
     webrtc.MediaStream? mic;
     try {
