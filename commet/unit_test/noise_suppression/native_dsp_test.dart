@@ -25,9 +25,16 @@ typedef _Alloc = Pointer<Float> Function(int);
 typedef _FreeNative = Void Function(Pointer<Float>, Size);
 typedef _Free = void Function(Pointer<Float>, int);
 
+/// Equal by name, the way MatrixVoipSession is equal by call id.
 class _Session implements VoipSession {
   final String name;
   _Session(this.name);
+
+  @override
+  bool operator ==(Object other) => other is _Session && other.name == name;
+
+  @override
+  int get hashCode => name.hashCode;
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -66,7 +73,10 @@ void main() {
         openLibrary: () => DynamicLibrary.open(dspLibraryPath));
   });
 
-  tearDown(() {
+  tearDown(() async {
+    for (final name in ['call', 'first', 'second', 'rejoined']) {
+      await manager.onSessionEnded(_Session(name));
+    }
     manager.dispose();
     plugin.uninstall();
     webrtc.uninstall();
@@ -117,6 +127,42 @@ void main() {
     send(Float32List.sublistView(fixture.samples, 0, 48000));
     await Future<void>.delayed(const Duration(milliseconds: 250));
     expect(manager.isProcessing, isTrue);
+  }, skip: voiceDspSkip);
+
+  // Leaving one voice channel for another: the leave's teardown and the
+  // join's install run concurrently (CallManager does not await them).
+  test('leaving and joining back to back leaves the DSP on the hook', () async {
+    final first = _Session('first');
+    await manager.onSessionStarted(first);
+
+    final leave = manager.onSessionEnded(first);
+    final join = manager.onSessionStarted(_Session('second'));
+    await Future.wait([leave, join]);
+
+    expect(plugin.hasCaptureProcessor, isTrue,
+        reason: 'plugin calls: ${plugin.calls}');
+    plugin.initialize(48000);
+    final m = measure(fixture.samples, send(fixture.samples), fixture.labels);
+    expect(m.noiseDropDb, greaterThanOrEqualTo(minNoiseDropDb), reason: '$m');
+  }, skip: voiceDspSkip);
+
+  // After an app refresh the old CallManager still sees its own call end,
+  // late, while the user is already in the rejoined one.
+  test('a call ending does not take the DSP off another call', () async {
+    final old = _Session('before the refresh');
+    final rejoined = _Session('rejoined');
+    await manager.onSessionStarted(old);
+    await manager.onSessionStarted(rejoined);
+
+    await manager.onSessionEnded(old);
+
+    expect(plugin.hasCaptureProcessor, isTrue,
+        reason: 'plugin calls: ${plugin.calls}');
+    expect(manager.isInCall, isTrue);
+
+    await manager.onSessionEnded(rejoined);
+    expect(plugin.hasCaptureProcessor, isFalse);
+    expect(manager.isActive, isFalse);
   }, skip: voiceDspSkip);
 
   test('a library without the DSP is not taken for one', () {

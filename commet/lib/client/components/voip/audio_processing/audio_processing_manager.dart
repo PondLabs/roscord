@@ -66,8 +66,27 @@ abstract class AudioProcessingManager {
   /// Whether the DSP is currently attached to a call or a microphone test.
   bool get isActive;
 
+  /// The calls using the DSP, as CallManager reported them, compared with
+  /// `==` like CallManager does. Kept here rather than trusting whoever
+  /// reports an end to know it was the last call: after an app refresh the
+  /// old CallManager still sees its own call end, late, and used to take the
+  /// DSP off the call the user had rejoined in the meantime.
+  final List<VoipSession> _sessions = [];
+
+  /// Registers [session]; false if it already was.
+  @protected
+  bool addSession(VoipSession session) {
+    if (_sessions.contains(session)) return false;
+    _sessions.add(session);
+    return true;
+  }
+
+  /// Forgets [session]; false if it was not registered.
+  @protected
+  bool removeSession(VoipSession session) => _sessions.remove(session);
+
   /// Whether a call is currently using the DSP.
-  bool get isInCall;
+  bool get isInCall => _sessions.isNotEmpty;
 
   /// Whether the microphone test is running (see [startMicTest]).
   bool get isTesting;
@@ -110,8 +129,9 @@ abstract class AudioProcessingManager {
   /// Called by [CallManager] for every session that starts.
   Future<void> onSessionStarted(VoipSession session);
 
-  /// Called by [CallManager] once no sessions remain.
-  Future<void> onSessionEnded();
+  /// Called by [CallManager] for every session that ends. The DSP comes off
+  /// once none of the sessions it was told about is left.
+  Future<void> onSessionEnded(VoipSession session);
 
   /// Web only: a processor to hand to `AudioCaptureOptions`. Null elsewhere.
   lk.TrackProcessor<lk.AudioProcessorOptions>? createTrackProcessor();

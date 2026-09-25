@@ -202,7 +202,6 @@ class NativeAudioProcessingManager extends AudioProcessingManager {
   Pointer<DspReport>? _report;
   Timer? _pollTimer;
   bool _installed = false;
-  bool _inCall = false;
 
   /// Whether the flutter-webrtc loopback is feeding the system mix to the
   /// bleed detector. Start and stop are serialized through [_referenceOps].
@@ -211,8 +210,19 @@ class NativeAudioProcessingManager extends AudioProcessingManager {
 
   _MicLoopback? _loopback;
   bool _monitor = false;
-  // Start/stop/restart are serialized so a fast toggle cannot interleave.
-  Future<void> _testOps = Future.value();
+
+  /// Calls starting and ending, and the microphone test starting, stopping
+  /// and restarting, change what is installed one at a time. Nobody awaits
+  /// them (CallManager, the settings page), and a leave's teardown that
+  /// interleaved with the next join's install ended with the hook cleared
+  /// and its handle freed while the manager believed the DSP installed.
+  Future<void> _ops = Future.value();
+
+  Future<T> _serially<T>(Future<T> Function() op) {
+    final result = _ops.then((_) => op());
+    _ops = result.then<void>((_) {}, onError: (Object _) {});
+    return result;
+  }
 
   static const _pollInterval = Duration(milliseconds: 100);
 
@@ -248,32 +258,29 @@ class NativeAudioProcessingManager extends AudioProcessingManager {
   bool get isActive => _installed;
 
   @override
-  bool get isInCall => _inCall;
-
-  @override
   bool get isTesting => _loopback != null;
 
   @override
   bool get micTestMonitor => _monitor;
 
   @override
-  Future<void> onSessionStarted(VoipSession session) async {
-    // The loopback holds the microphone; the call needs it.
-    if (isTesting) {
-      Log.i("Voice DSP: stopping the microphone test, a call started");
-      await stopMicTest();
-    }
-    _inCall = true;
-    await _install();
-    notifyStateChanged();
-  }
+  Future<void> onSessionStarted(VoipSession session) => _serially(() async {
+        addSession(session);
+        // The loopback holds the microphone; the call needs it.
+        if (_loopback != null) {
+          Log.i("Voice DSP: stopping the microphone test, a call started");
+          await _stopLoopback();
+        }
+        await _install();
+        notifyStateChanged();
+      });
 
   @override
-  Future<void> onSessionEnded() async {
-    _inCall = false;
-    if (!isTesting) await _uninstall();
-    notifyStateChanged();
-  }
+  Future<void> onSessionEnded(VoipSession session) => _serially(() async {
+        if (!removeSession(session)) return;
+        if (!isInCall && _loopback == null) await _uninstall();
+        notifyStateChanged();
+      });
 
   Future<void> _install() async {
     final b = bindings;
@@ -393,37 +400,30 @@ class NativeAudioProcessingManager extends AudioProcessingManager {
   }
 
   @override
-  Future<void> onNoiseSuppressionChanged(bool enabled) async {
-    // The WebRTC suppressor is chosen when the capture starts: restart the
-    // test capture so what the user hears matches the setting.
-    if (!isTesting) return;
-    _testOps = _testOps.then((_) async {
-      final lb = _loopback;
-      if (lb == null) return;
-      await lb.dispose();
-      _loopback = null;
-      await _startLoopback();
-      notifyStateChanged();
-    });
-    await _testOps;
-  }
+  Future<void> onNoiseSuppressionChanged(bool enabled) => _serially(() async {
+        // The WebRTC suppressor is chosen when the capture starts: restart
+        // the test capture so what the user hears matches the setting.
+        if (_loopback == null) return;
+        await _stopLoopback();
+        if (!await _startLoopback() && !isInCall) await _uninstall();
+        notifyStateChanged();
+      });
 
   @override
   Future<bool> startMicTest() async {
-    if (!isSupported || _inCall) return false;
+    if (!isSupported || isInCall) return false;
     if (isTesting) return true;
-    var started = false;
-    _testOps = _testOps.then((_) async {
-      if (_inCall || isTesting) return;
+    return _serially(() async {
+      if (isInCall) return false;
+      if (isTesting) return true;
       await _install();
-      if (!_installed) return;
-      started = await _startLoopback();
+      if (!_installed) return false;
+      final started = await _startLoopback();
       await _syncReference();
       if (!started) await _uninstall();
       notifyStateChanged();
+      return started;
     });
-    await _testOps;
-    return started;
   }
 
   Future<bool> _startLoopback() async {
@@ -440,17 +440,19 @@ class NativeAudioProcessingManager extends AudioProcessingManager {
   }
 
   @override
-  Future<void> stopMicTest() async {
-    _testOps = _testOps.then((_) async {
-      final lb = _loopback;
-      if (lb == null) return;
-      _loopback = null;
-      await lb.dispose();
-      if (!_inCall) await _uninstall();
-      Log.i("Voice DSP: microphone test stopped");
-      notifyStateChanged();
-    });
-    await _testOps;
+  Future<void> stopMicTest() => _serially(() async {
+        if (_loopback == null) return;
+        await _stopLoopback();
+        if (!isInCall) await _uninstall();
+        notifyStateChanged();
+      });
+
+  Future<void> _stopLoopback() async {
+    final lb = _loopback;
+    if (lb == null) return;
+    _loopback = null;
+    await lb.dispose();
+    Log.i("Voice DSP: microphone test stopped");
   }
 
   @override

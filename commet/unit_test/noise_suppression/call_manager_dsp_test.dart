@@ -75,14 +75,14 @@ class _LegacySession implements VoipSession {
 
 class _RecordingDsp extends UnsupportedAudioProcessingManager {
   final List<VoipSession> started = [];
-  int ended = 0;
+  final List<VoipSession> ended = [];
 
   @override
   Future<void> onSessionStarted(VoipSession session) async =>
       started.add(session);
 
   @override
-  Future<void> onSessionEnded() async => ended++;
+  Future<void> onSessionEnded(VoipSession session) async => ended.add(session);
 }
 
 void main() {
@@ -112,7 +112,8 @@ void main() {
     calls.onSessionEnded(_LegacySession(client, "call-1"));
 
     expect(calls.currentSessions, isEmpty);
-    expect(dsp.ended, 1, reason: 'the DSP was never told the call ended');
+    expect(dsp.ended, [_LegacySession(client, "call-1")],
+        reason: 'the DSP was never told the call ended');
   });
 
   // Issue #48: every LiveKit session has sessionId "", so a late hang up of
@@ -126,6 +127,6 @@ void main() {
     calls.onSessionEnded(previous);
 
     expect(calls.currentSessions, [same(rejoined)]);
-    expect(dsp.ended, 0);
+    expect(dsp.ended, [same(previous)]);
   });
 }

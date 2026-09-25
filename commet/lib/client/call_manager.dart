@@ -126,9 +126,7 @@ class CallManager {
     // a legacy call never left the list.
     currentSessions.removeWhere((element) => element == event);
 
-    if (currentSessions.isEmpty) {
-      AudioProcessingManager.instance.onSessionEnded();
-    }
+    AudioProcessingManager.instance.onSessionEnded(event);
 
     if (currentSessions.where((e) => e.state == VoipState.incoming).isEmpty) {
       stopRingtone();

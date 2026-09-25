@@ -49,7 +49,7 @@ class WebAudioProcessingManager extends AudioProcessingManager {
   CommetWebTrackProcessor? _current;
   lk.EventsListener<lk.RoomEvent>? _roomListener;
   lk.Room? _room;
-  bool _inCall = false;
+  VoipSession? _roomSession;
 
   _DspGraph? _testGraph;
   web.MediaStream? _testStream;
@@ -61,9 +61,6 @@ class WebAudioProcessingManager extends AudioProcessingManager {
 
   @override
   bool get isActive => _current?.graph != null || _testGraph != null;
-
-  @override
-  bool get isInCall => _inCall;
 
   @override
   bool get isTesting => _testGraph != null;
@@ -84,17 +81,21 @@ class WebAudioProcessingManager extends AudioProcessingManager {
       Log.i("Voice DSP: stopping the microphone test, a call started");
       await stopMicTest();
     }
-    _inCall = true;
+    addSession(session);
     if (session is MatrixLivekitVoipSession) {
       _attachRoom(session.livekitRoom);
+      _roomSession = session;
     }
     notifyStateChanged();
   }
 
   @override
-  Future<void> onSessionEnded() async {
-    _inCall = false;
-    _detachRoom();
+  Future<void> onSessionEnded(VoipSession session) async {
+    if (!removeSession(session)) return;
+    if (session == _roomSession) {
+      _roomSession = null;
+      _detachRoom();
+    }
     notifyStateChanged();
   }
 
@@ -121,11 +122,11 @@ class WebAudioProcessingManager extends AudioProcessingManager {
 
   @override
   Future<bool> startMicTest() async {
-    if (!isSupported || _inCall) return false;
+    if (!isSupported || isInCall) return false;
     if (isTesting) return true;
     var started = false;
     _testOps = _testOps.then((_) async {
-      if (_inCall || isTesting) return;
+      if (isInCall || isTesting) return;
       started = await _createTest();
       notifyStateChanged();
     });
