@@ -118,14 +118,15 @@ class CallManager {
   }
 
   void onSessionEnded(VoipSession event) {
-    // By identity: LiveKit sessions all report an empty sessionId, so a late
-    // hang up used to de-register the call the user had just rejoined
-    // (issue #48).
-    currentSessions.removeWhere((element) => identical(element, event));
+    // By equality, not sessionId: LiveKit sessions all report an empty
+    // sessionId, so a late hang up used to de-register the call the user had
+    // just rejoined (issue #48), and a LiveKit session is only equal to
+    // itself. Not by identity either: MatrixVoipComponent hands out a new
+    // MatrixVoipSession for every event about a call, equal by call id, and
+    // a legacy call never left the list.
+    currentSessions.removeWhere((element) => element == event);
 
-    if (currentSessions.isEmpty) {
-      AudioProcessingManager.instance.onSessionEnded();
-    }
+    AudioProcessingManager.instance.onSessionEnded(event);
 
     if (currentSessions.where((e) => e.state == VoipState.incoming).isEmpty) {
       stopRingtone();
@@ -167,6 +168,26 @@ class CallManager {
     await Future.wait(others.map((session) async {
       try {
         Log.i("Leaving ${session.roomName} to join another voice channel");
+        await session.hangUpCall();
+      } catch (e, s) {
+        Log.onError(e, s, content: "Could not leave ${session.roomName}");
+      }
+    }));
+  }
+
+  /// Leaves every call the user is in, for the disconnect control outside
+  /// the window. A call that is only ringing is not one they are in: it goes
+  /// on ringing rather than being declined on their behalf.
+  Future<void> disconnect() async {
+    final calls = currentSessions
+        .where((session) =>
+            session.state != VoipState.incoming &&
+            session.state != VoipState.ended)
+        .toList();
+
+    await Future.wait(calls.map((session) async {
+      try {
+        Log.i("Disconnecting from ${session.roomName}");
         await session.hangUpCall();
       } catch (e, s) {
         Log.onError(e, s, content: "Could not leave ${session.roomName}");
@@ -303,13 +324,12 @@ class CallManager {
     }
   }
 
+  /// Unmuting a deafened session undeafens it too, and opens the mic even if
+  /// it was muted before deafening: the session does both (DeafenRule).
+  /// Undeafening instead would put that earlier mute back.
   void unmute() {
     for (var session in currentSessions) {
-      if (session.isDeafened) {
-        session.setDeafened(false);
-      } else {
-        session.setMicrophoneMute(false);
-      }
+      session.setMicrophoneMute(false);
     }
 
     playUnmuteSound();
@@ -365,10 +385,16 @@ class CallManager {
     }
   }
 
-  Player getSoundPlayer() {
-    player ??= Player(configuration: PlayerConfiguration());
-    player!.setVolume(preferences.notificationsVolume.value);
-
-    return player!;
+  /// Null where no player can be made (media_kit not initialised, as in
+  /// tests): a call sound that cannot play must not get in the way of the
+  /// bookkeeping around it, such as releasing the voice DSP when a call ends.
+  Player? getSoundPlayer() {
+    try {
+      player ??= Player(configuration: PlayerConfiguration());
+      player!.setVolume(preferences.notificationsVolume.value);
+    } catch (e) {
+      Log.w("Could not play a call sound: $e");
+    }
+    return player;
   }
 }

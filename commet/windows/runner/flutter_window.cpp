@@ -27,6 +27,10 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
+  // COMMET: call controls under the taskbar thumbnail (issue #146).
+  voice_thumb_bar_ = std::make_unique<VoiceThumbBar>(
+      GetHandle(), flutter_controller_->engine()->messenger());
+
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
   });
@@ -40,6 +44,8 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  // COMMET: the thumbnail buttons' channel goes before the engine it is on.
+  voice_thumb_bar_ = nullptr;
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
@@ -51,6 +57,16 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  // COMMET: the thumbnail buttons first, so no plugin takes their clicks
+  // (tray_manager passes every WM_COMMAND on as a menu click).
+  if (voice_thumb_bar_) {
+    std::optional<LRESULT> result =
+        voice_thumb_bar_->HandleMessage(hwnd, message, wparam, lparam);
+    if (result) {
+      return *result;
+    }
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =

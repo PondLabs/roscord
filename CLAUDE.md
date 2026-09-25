@@ -9,7 +9,9 @@ Hard fork of Commet (a Flutter Matrix client) by PondLabs. Layout:
 - `browser_surface/` Flutter plugin (Linux, Windows) that draws the CEF hosts' shared-memory frames into a texture. The hosts are `commet/windows/cef_host` (C++) and `cef_host` in `rust/rust` plus `commet/linux/cef_engine` (C++) on Linux. See `docs/cef-browser-runtime-hosts.md`.
 - `rust/dj_audio` DJ booth music player (symphonia decode, 48 kHz stereo, C ABI linked into `librust_lib_commet`). See `docs/dj-booth.md`.
 - Away status: the amber dot, and where idle time comes from on each platform. See `docs/away-status.md`.
+- Call controls outside the window: taskbar thumbnail buttons (Windows), Dock menu (macOS), launcher actions and quicklist (Linux), floating panel (browser). See `docs/voice-controls.md`.
 - Updating: check GitHub Releases, and on desktop install one over the running build. See `docs/updating.md`.
+- Instagram reels in the chat: native builds play the MP4 from the embed page, web frames Instagram's embed. See `docs/instagram-reels.md`.
 - `third_party/` vendored packages we modify in place. See `third_party/README.md`.
 
 ## Rules

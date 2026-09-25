@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:commet/client/components/voip/audio_processing/audio_dsp_settings.dart';
 import 'package:commet/client/components/voip/voip_session.dart';
 import 'package:commet/main.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
 import 'package:livekit_client/livekit_client.dart' as lk;
 
 import 'audio_processing_manager_stub.dart'
@@ -33,6 +35,11 @@ abstract class AudioProcessingManager {
   static AudioProcessingManager get instance =>
       _instance ??= createAudioProcessingManager();
 
+  /// Replaces [instance], for tests.
+  @visibleForTesting
+  static set debugInstance(AudioProcessingManager? manager) =>
+      _instance = manager;
+
   StreamSubscription? _settingsSubscription;
   AudioDspSettings _lastSettings = AudioDspSettings.fromPreferences();
 
@@ -54,14 +61,45 @@ abstract class AudioProcessingManager {
     });
   }
 
-  /// Whether this platform can run the DSP at all.
+  /// Whether the DSP can run here. On the web this is only exact once
+  /// [ensureReady] has completed.
   bool get isSupported;
+
+  /// Finds out whether the DSP can run, where that takes a moment: the web
+  /// fetches and test-runs audio_dsp.wasm. A call awaits this before it
+  /// decides who suppresses noise, so a DSP that cannot run is known before
+  /// WebRTC's (the browser's) suppressor is turned off for it.
+  Future<bool> ensureReady() async => isSupported;
+
+  /// Why the DSP cannot run on a platform that is meant to have it (the
+  /// library or the wasm is missing or broken), for the user to see. Null
+  /// when it runs, and where it simply does not exist yet (Android).
+  String? get unavailableReason => null;
 
   /// Whether the DSP is currently attached to a call or a microphone test.
   bool get isActive;
 
+  /// The calls using the DSP, as CallManager reported them, compared with
+  /// `==` like CallManager does. Kept here rather than trusting whoever
+  /// reports an end to know it was the last call: after an app refresh the
+  /// old CallManager still sees its own call end, late, and used to take the
+  /// DSP off the call the user had rejoined in the meantime.
+  final List<VoipSession> _sessions = [];
+
+  /// Registers [session]; false if it already was.
+  @protected
+  bool addSession(VoipSession session) {
+    if (_sessions.contains(session)) return false;
+    _sessions.add(session);
+    return true;
+  }
+
+  /// Forgets [session]; false if it was not registered.
+  @protected
+  bool removeSession(VoipSession session) => _sessions.remove(session);
+
   /// Whether a call is currently using the DSP.
-  bool get isInCall;
+  bool get isInCall => _sessions.isNotEmpty;
 
   /// Whether the microphone test is running (see [startMicTest]).
   bool get isTesting;
@@ -104,11 +142,21 @@ abstract class AudioProcessingManager {
   /// Called by [CallManager] for every session that starts.
   Future<void> onSessionStarted(VoipSession session);
 
-  /// Called by [CallManager] once no sessions remain.
-  Future<void> onSessionEnded();
+  /// Called by [CallManager] for every session that ends. The DSP comes off
+  /// once none of the sessions it was told about is left.
+  Future<void> onSessionEnded(VoipSession session);
 
   /// Web only: a processor to hand to `AudioCaptureOptions`. Null elsewhere.
   lk.TrackProcessor<lk.AudioProcessorOptions>? createTrackProcessor();
+
+  /// A microphone capture that is not a LiveKit track (a legacy 1:1 call),
+  /// captured with WebRTC's own suppressor off because ours runs: the
+  /// stream to send instead, or null if ours could not start on it.
+  /// Native platforms process every capture inside WebRTC already and hand
+  /// the stream back; the web runs it through the AudioWorklet.
+  Future<webrtc.MediaStream?> processMicrophoneStream(
+          webrtc.MediaStream stream) async =>
+      stream;
 
   /// Push new tunables into a running DSP.
   Future<void> applySettings(AudioDspSettings settings);
@@ -133,9 +181,15 @@ abstract class AudioProcessingManager {
     _lastReport = report;
     if (report.frames != _lastFrames) {
       _lastFrames = report.frames;
-      final now = DateTime.now();
-      _framesAdvancedAt = now;
-      if (report.gateOpen) _gateOpenAt = now;
+      // Zero is a DSP that has not had a block yet: a new one, or one whose
+      // capture just restarted. Counting that as progress made isProcessing
+      // true for half a second with no audio at all, which the call's
+      // watchdog takes as the DSP working.
+      if (report.frames > 0) {
+        final now = DateTime.now();
+        _framesAdvancedAt = now;
+        if (report.gateOpen) _gateOpenAt = now;
+      }
     }
 
     if (_reports.hasListener) {

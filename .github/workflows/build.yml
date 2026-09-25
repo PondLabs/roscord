@@ -239,7 +239,22 @@ jobs:
           cd $PROJECT_PATH
           dart run scripts/codegen.dart
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # Built, not committed: without it the voice DSP cannot run in the
+      # browser (docs/voice-audio-processing.md).
+      - name: Build the voice DSP for the web
+        run: |
+          cd $PROJECT_PATH
+          scripts/build-audio-dsp-wasm.sh
+
       - name: Build Web
         run: |
           cd $PROJECT_PATH
           flutter build web --release --dart-define PLATFORM=web
+
+      - name: The web build carries the voice DSP
+        run: python3 tools/voice_dsp/check_contracts.py --web-build $PROJECT_PATH/build/web

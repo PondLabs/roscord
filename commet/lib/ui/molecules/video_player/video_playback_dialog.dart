@@ -16,6 +16,7 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:media_kit_video/media_kit_video.dart'
     show defaultEnterNativeFullscreen, defaultExitNativeFullscreen;
 
+import 'official_embed_frame.dart';
 import 'video_player.dart';
 
 class VideoPlaybackDialog extends StatefulWidget {
@@ -32,10 +33,9 @@ class VideoPlaybackDialog extends StatefulWidget {
   /// dialog. Windows and Linux play official embeds through the bundled CEF
   /// host and the [MediaEmbedAdapter] (a build without one, such as a
   /// development build, cannot); macOS, Android, and iOS keep their web
-  /// view. The web build has no iframe path yet, so it opens the link in the
-  /// browser.
+  /// view; the web build puts the embed in an iframe.
   static bool get supportsOfficialEmbeds {
-    if (kIsWeb) return false;
+    if (kIsWeb) return true;
     if (Platform.isWindows || Platform.isLinux) return _cefBundled;
     return true;
   }
@@ -424,6 +424,8 @@ class _OfficialVideoEmbedState extends State<_OfficialVideoEmbed> {
 
   @override
   Widget build(BuildContext context) {
+    if (kIsWeb) return OfficialEmbedFrame(uri: playbackUri);
+
     // Windows and Linux official-video playback runs through the CEF
     // MediaEmbedAdapter; every other platform keeps its web-view/external
     // path.
@@ -473,9 +475,8 @@ class _OfficialVideoEmbedState extends State<_OfficialVideoEmbed> {
     }
 
     // The remaining InAppWebView branch serves macOS, Android, and iOS only:
-    // Windows and Linux run through CEF above and web falls into the external
-    // path. The legacy Windows loopback workaround is gone with the old
-    // Windows web view.
+    // Web, Windows and Linux return above. The legacy Windows loopback
+    // workaround is gone with the old Windows web view.
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -610,8 +611,8 @@ class _EmbedErrorView extends StatelessWidget {
 /// policy travel in the [SurfaceSpec], disallowed links become explicit
 /// external actions via `LinkUtils`, and closing the dialog closes the
 /// surface so no profile, host, or owned-window leaks. Loading, Retry,
-/// Close, and error chrome match the WebView branch. Web, macOS, Android,
-/// and iOS never reach this widget (see [mediaEmbedUsesCef]).
+/// Close, and error chrome match the WebView branch. Web (an iframe), macOS,
+/// Android, and iOS never reach this widget (see [mediaEmbedUsesCef]).
 class _CefOfficialVideoEmbed extends StatefulWidget {
   const _CefOfficialVideoEmbed({
     required this.video,

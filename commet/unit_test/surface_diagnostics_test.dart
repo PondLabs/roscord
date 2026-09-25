@@ -13,6 +13,16 @@ void main() {
       expect(first, isNot(other));
     });
 
+    // What the native int version produced (a signed 64-bit FNV-1a), so the
+    // web-compatible one keeps identifiers already in logs.
+    test('profile hashes stay what they were', () {
+      expect(hashProfileKey(''), 'profile--340d631b7bdddcdb');
+      expect(hashProfileKey('account-record-1'), 'profile-4055526e7907c9d4');
+      expect(hashProfileKey('@alice:example.org'), 'profile-0862de498e9b8025');
+      expect(hashProfileKey('a'), 'profile--509c23b379fe1374');
+      expect(hashProfileKey('profile'), 'profile--7522cb619e745ef2');
+    });
+
     test('origins are recorded instead of full URLs', () {
       expect(
         diagnosticOrigin('https://widgets.test/view?x=1#frag'),

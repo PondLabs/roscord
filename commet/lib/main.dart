@@ -40,6 +40,7 @@ import 'package:commet/utils/shortcuts_manager.dart';
 import 'package:commet/utils/system_wide_shortcuts/system_wide_shortcuts.dart';
 import 'package:commet/utils/text_scale_changer.dart';
 import 'package:commet/utils/update_checker.dart';
+import 'package:commet/utils/voice_controls/voice_control_surfaces.dart';
 import 'package:commet/utils/window_management.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
@@ -338,6 +339,7 @@ Future<void> startGui() async {
   WindowManagement.init().then((_) {
     Subplatforms.init();
   });
+  VoiceControlSurfaces.init();
 }
 
 void enableEdgeToEdge() async {
