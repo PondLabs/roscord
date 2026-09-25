@@ -4,6 +4,15 @@ Client-side noise suppression, input gate and far-end ducking for voice
 rooms. Everything runs on the user's own device before audio leaves the
 client. Browser support is a first-class target.
 
+Status (2026-09-25): an audit fixed seventeen ways suppression failed or
+silently was not there (docs/noise-suppression-checklist.md), and noise
+suppression is now measured end to end: a recording of speech in a noisy
+room goes through the DSP inside the real WebRTC on Linux, through the
+browser's DSP, and through the web app's own Dart, and CI fails the release
+when the noise is not at least 20 dB down or the voice more than 4 dB down.
+See "What the tests guard" and "What still needs a person". The notes below
+from 2026-09-14 on are history.
+
 Status (2026-09-14): Phase 0 and Phase 1 code is written on branch
 `feature/voice-dsp`. Verified so far, all inside a Flutter 3.41.9 container
 mirroring CI:
@@ -89,6 +98,33 @@ import (stub / native / web). `CallManager` calls `onSessionStarted` and
 `createTrackProcessor()` (web only) and turns the WebRTC/browser noise
 suppressor off when ours is on.
 
+### Every microphone through one door
+
+Who takes the noise out of a capture (our DSP, or WebRTC's / the browser's
+own suppressor, never both and never neither) is decided in one place,
+`MicrophoneNoiseSuppression` (`audio_processing/microphone_noise_suppression.dart`),
+and every capture is made through it:
+
+- voice rooms: `prepareMicrophoneCaptureOptions` / `microphoneCaptureOptions`
+  (`voip_room/livekit_microphone.dart`), which waits for
+  `AudioProcessingManager.ensureReady` (on the web: audio_dsp.wasm fetched
+  and test-run). During the call `MicrophoneNoiseSuppression.update()`
+  keeps the capture in line (a preference flip, an unmute, once a second;
+  a restart only while the microphone is live) and watches the DSP: fed no
+  audio for 4 s of live microphone, it gives up on it for the call, turns
+  WebRTC's suppressor back on and tells the user. The microphone is found by
+  `TrackSource.microphone`, never as "the first audio track";
+- the microphone test and legacy 1:1 calls: `microphoneConstraints`, built
+  from LiveKit's own `AudioCaptureOptions` so the device is named the way
+  desktop WebRTC reads it; legacy calls get it through
+  `NoiseSuppressedMediaDevices`, the MediaDevices matrix-dart-sdk captures
+  with, which on the web also runs the stream through the DSP
+  (`processMicrophoneStream`).
+
+The DSP counts the calls it serves itself (`onSessionStarted` /
+`onSessionEnded` per session, compared with `==`) and changes what is
+installed one step at a time.
+
 ### Signal chain
 
 Native (Linux, Windows): mic → WebRTC ADM → APM (AEC3, NS off when ours is
@@ -97,15 +133,31 @@ on, AGC off) → **capture post-processing hook → Rust** → Opus. Playout →
 process-global on the shared APM, so it also covers legacy 1:1 calls.
 While the DSP is installed and "Filter out sound from your speakers" is on,
 the vendored flutter-webrtc also runs its system-audio loopback (WASAPI
-process loopback excluding ourselves on Windows, the default sink's monitor
-on Linux) and hands every packet to `commet_dsp_feed_reference` from its
-capture thread, ahead of the Windows feeder's 160 ms pre-buffer
-(`commet_system_audio_reference.h`, `LoopbackCapturer::SetRawTap`).
+process loopback excluding ourselves on Windows, one monitor stream per
+application except ours on Linux) and hands every packet to
+`commet_dsp_feed_reference` from its capture thread, ahead of the Windows
+feeder's 160 ms pre-buffer (`commet_system_audio_reference.h`,
+`LoopbackCapturer::SetRawTap`).
+
+Two properties of that WebRTC matter here, both found by the native loop:
+
+- The hook runs inside the APM's capture processing, which WebRTC skips
+  while every sender of a peer connection is muted (`capture_output_used`,
+  set by `WebRtcVoiceSendChannel::MuteStream` on the one APM the whole
+  process shares). A disabled local audio track anywhere stops the DSP.
+- flutter-webrtc on desktop picks the input device only from
+  `optional: [{sourceId}]` and records from its device 0 for anything else,
+  and resolves track ids among local tracks first (a received track that
+  shares a local track's id is looked up as the local one).
 
 Web: `getUserMedia` (browser AEC on, NS off, AGC on) →
 `MediaStreamAudioSourceNode` → **`commet-dsp` AudioWorklet (wasm)** →
 `MediaStreamAudioDestinationNode` → published track. Every remote audio
 track is also connected to the worklet's second input for far-end level.
+`commetAudioDsp.probe()` (worklet module, wasm, exports, ABI) decides
+whether the DSP can run before a call turns the browser's suppressor off,
+and `create()` only hands out a graph whose worklet has started: until
+then a worklet passes the microphone through untouched.
 
 Frame format everywhere: one 10 ms block, mono, float. Native hands
 int16-scale floats (480 samples at 48 kHz, or 160/320 at 16/32 kHz which the
@@ -146,8 +198,10 @@ stops the test; leaving the settings page stops it too.
 - Native: WebRTC only records while a sending audio stream exists, so the
   test builds two local peer connections (`_MicLoopback`) and sends the
   microphone from one to the other. That drives the ADM → APM → hook path
-  identically to a call. The received track is `enabled` only while
-  monitoring, otherwise it is silent.
+  identically to a call. The playback is silenced by volume while not
+  monitoring (`Helper.setVolume`), never by disabling the received track:
+  it has the microphone track's id, so that disabled the microphone and
+  the DSP got nothing (see "Signal chain").
 - Web: `getUserMedia` → the same worklet graph; monitoring connects the
   worklet node to `ctx.destination` (`graph.setMonitor`).
 - Both capture with the same constraints as a call (browser/WebRTC
@@ -174,8 +228,16 @@ receiving no frames. That is the first thing to read when the meter is dead.
 | `third_party/livekit-client-sdk-flutter/lib/src/track/remote/audio.dart`, `track/web/_audio_{html,api}.dart` | `RemoteAudioTrack.setVolume`: per-track playback volume on web (audio element, 0..1) |
 | `commet/lib/client/components/voip/audio_processing/` | manager (stub, native, web), settings and report models |
 | `commet/lib/ui/pages/settings/categories/app/voip_settings/voip_audio_processing_settings.dart` | toggles and level meter |
+| `commet/lib/client/components/voip/audio_processing/microphone_noise_suppression.dart` | who suppresses, the watchdog, `microphoneConstraints` |
+| `commet/lib/client/components/voip/audio_processing/noise_suppressed_media_devices.dart` | legacy 1:1 calls' MediaDevices |
+| `commet/lib/client/components/voip/audio_processing/noise_suppression_notice.dart` | what the user is told when suppression falls back |
+| `commet/lib/client/matrix/components/voip_room/livekit_microphone.dart` | a voice room's microphone: created, found, toggled |
 | `commet/web/audio_dsp.js`, `commet/web/audio_dsp.worklet.js` | browser glue |
-| `commet/scripts/prepare-web.sh` | builds `audio_dsp.wasm` |
+| `commet/scripts/build-audio-dsp-wasm.sh` | builds `audio_dsp.wasm` (called by `prepare-web.sh` and CI) |
+| `commet/unit_test/noise_suppression/` | the Dart tests below |
+| `commet/integration_test/voice_dsp/` | entry points of the native and web app loops |
+| `rust/audio_dsp/examples/noisy_speech.rs` | the fixture every loop plays |
+| `tools/voice_dsp/` | the loops and the contracts check |
 
 Preferences: `voipNoiseSuppression`, `voipInputSensitivityAuto`,
 `voipInputSensitivityDb`, `voipFarEndDucking`, `voipSpeakerBleed`.
@@ -202,33 +264,72 @@ cargo run -p audio_dsp --release --example diag
 After changing `pubspec.yaml` (LiveKit is now a path dependency) run
 `flutter pub get` in `commet/`.
 
-## What to verify first
+The loops, from the repository root (each builds the fixture with cargo
+when it is missing):
+
+```sh
+# seconds: names, ABI and vendored changes the chain depends on
+python3 tools/voice_dsp/check_contracts.py
+# Dart: the FFI loop, the decisions, the vendored LiveKit track
+(cd commet && flutter test unit_test/noise_suppression)
+# browser: the glue alone (commet/web needs audio_dsp.wasm)
+node tools/voice_dsp/web_noise_loop.mjs
+# browser: everything CI's voice-dsp job does (about 4 min)
+tools/voice_dsp/web_loops.sh
+# Linux: inside the real WebRTC (about a minute after the first build)
+tools/voice_dsp/native_noise_loop.sh
+```
+
+## What the tests guard
+
+| Invariant | Guarded by | In CI |
+|-----------|------------|-------|
+| The DSP takes room noise out (≥ 20 dB) and keeps the voice (≥ -4 dB) | `cargo test -p audio_dsp` | ci `test` |
+| The same through the callback addresses and struct layouts the native plugin gets, and a preference change reaches a running DSP | `native_dsp_test.dart` | ci `test` |
+| A library missing any entry point is unsupported from the start | `native_dsp_test.dart` | ci `test` |
+| A leave and a join fired together leave the DSP on the hook; one call ending leaves another's DSP | `native_dsp_test.dart` | ci `test` |
+| `isProcessing` only with audio | `native_dsp_test.dart` | ci `test` |
+| Ours or WebRTC's, never both or neither: at creation, on a flip while live, muted, or before publishing; the watchdog; the microphone found by source; a first unmute creates a room microphone | `microphone_noise_suppression_test.dart` | ci `test` |
+| A call waits for `ensureReady` before choosing | `microphone_noise_suppression_test.dart` | ci `test` |
+| Legacy calls: the preference and the device reach the capture; a failed web DSP recaptures with the browser's suppressor | `legacy_call_microphone_test.dart` | ci `test` |
+| The web processor survives restart, device switch and mute; `copyWith` keeps it | `livekit_processor_restart_test.dart` | ci `test` |
+| Legacy sessions leave CallManager; #48 stays fixed | `call_manager_dsp_test.dart` | ci `test` |
+| Names, ABI, method channels, vendored changes, overrides, `// COMMET` count | `check_contracts.py` | ci `voice-dsp` |
+| The web build carries `audio_dsp.js`, the worklet and a real wasm | `check_contracts.py --web-build` | ci `voice-dsp`, build, release |
+| The browser DSP suppresses; a missing or broken wasm or worklet is caught by `probe()` and `create()` | `web_noise_loop.mjs` | ci `voice-dsp` |
+| What a room's RTCRtpSender carries in the browser is suppressed, before and after a restart; a legacy call's too; no wasm keeps the browser's suppressor | `web_noise_loop.mjs --app` | ci `voice-dsp` |
+| Inside the real WebRTC (Linux): the microphone test on the picked device, "Hear myself" off, noise ≥ 20 dB down in what is encoded | `native_noise_loop.sh` | integration-test |
+
+`publish` in ci.yml waits for `voice-dsp`: a release does not go out with
+browser suppression broken. The Rust and Dart tests run in `test`, which
+`publish` waits for too.
+
+## What still needs a person
 
 Ordered by how badly it hurts if wrong.
 
-1. **Hook receives frames (Linux and Windows).** Open Settings → VoIP and
-   press "Test microphone": the meter must move and the status line must
-   read "Processing 48 kHz audio" (or 16/32 kHz). "attached but no
-   microphone audio is reaching it" means the APM hook is not being called.
-   Then toggle noise suppression with "Hear myself" on and listen.
-2. **Web mic switch keeps the filter.** `setProcessor` now calls
-   `replaceTrack(processedTrack)`; switch microphones mid-call and record the
-   remote side.
-3. **Web AudioContext is running.** `audio_dsp.js` resumes the context in
-   `create`; if the join did not come from a user gesture the log says so.
-4. **Screen-share system audio on Linux and Windows.** Comes from the
-   vendored flutter-webrtc 1.6.2 (`third_party/flutter-webrtc`), which feeds
-   a loopback capture into a `kCustom` audio source. Custom sources bypass
-   the ADM, so they should not pass the capture APM (and our gate); check by
-   sharing music with suppression on. If it is denoised or gated, gate the
-   processor on the mic source.
+1. **Windows.** The native loop runs on Linux. Windows shares the C++ hook
+   (`commet_external_audio_processing.h`, checked by the contracts), the
+   Dart manager and the Rust library, and CI compiles it, but nothing plays
+   audio through it. In Settings → VoIP, "Test microphone" with "Hear
+   myself" off: the status line must read "Processing 48 kHz audio".
+2. **A real microphone in a real room, and a second person listening.** The
+   loops play a recording into a virtual device; a real room has
+   reverberation, a real microphone its own noise, and WASAPI/PulseAudio
+   their own timing. Speakers, a fan, "Test microphone" with "Hear myself"
+   and headphones, then a call with someone else.
+3. **A call through a LiveKit server.** The loops cover the microphone as a
+   call makes it and puts it on a sender, and the SFU does not touch audio,
+   but no loop joins a room: a native test against a local `livekit-server
+   --dev` would close that.
+4. **Screen-share system audio and DJ music with suppression on.** Custom
+   sources bypass the capture APM, so they are not gated; their options
+   still switch WebRTC's own NS and AEC off for the microphone (see "Known
+   gaps").
 5. **Encrypted rooms on web** still decrypt with the processed track, before
    and after a mic switch.
-6. ~~libwebrtc exports the hook~~ Done: the methods are virtual (not in
-   `nm -D`), but `strings libwebrtc.so` shows `RTCAudioProcessingImpl` and
-   `CustomProcessingAdapter`, so the implementation is in the 1.4.0 binary.
-7. **Packaged builds** (flatpak, .deb, MSIX, web bundle with
-   `application/wasm` MIME type), not only `flutter run`.
+6. **Packaged builds** (flatpak, .deb, MSIX, a web server serving
+   `application/wasm`), not only `flutter run` / `flutter build`.
 
 ## Loudspeaker bleed
 
@@ -351,8 +452,18 @@ your speakers." within two seconds of the video starting.
   JNI once the library builds.
 - macOS/iOS: `AudioProcessingAdapter.addProcessing` exists in flutter-webrtc,
   glue not written.
-- Web legacy 1:1 calls (matrix-dart-sdk) bypass the worklet. Wrap the
-  `MediaDevices` handed to the SDK in `MatrixVoipComponent.mediaDevices`.
+- Desktop: every audio sender's AudioOptions are merged into its channel's
+  and applied to the one APM the process shares
+  (`WebRtcVoiceSendChannel::SetOptions`, `ApplyAudioProcessingOptions`).
+  Screen-share system audio and the DJ booth's music are custom sources
+  created with echo cancellation, noise suppression and gain control off, so
+  publishing either switches those off for the microphone until it is
+  re-enabled. With our DSP on, WebRTC's NS is off anyway and our hook keeps
+  running; what is lost is echo cancellation, and noise suppression where
+  WebRTC's is the one meant to run (preference off, DSP unavailable, the
+  watchdog's fallback). Not fixed: it needs a decision on what options a
+  custom source should carry (the microphone's, or none), in
+  `flutter_screen_capture.cc` and `commet_music_source.h`.
 - Web per-user volume goes through a `volume` constraint browsers ignore;
   fix with the LiveKit audio element's `volume` and a GainNode for boost.
 - Only channel 0 reaches the native hook; a stereo mic's second channel is
