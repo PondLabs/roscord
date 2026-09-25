@@ -4185,7 +4185,9 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
       SendError(request_id, "invalid_command", "script envelope is malformed");
       return false;
     }
-    script_envelope = command_payload->GetDictionary("envelope");    if (script_envelope->GetType("source") != VTYPE_STRING ||
+    // Copied for the UI thread task, like the input below.
+    script_envelope = command_payload->GetDictionary("envelope")->Copy(false);
+    if (script_envelope->GetType("source") != VTYPE_STRING ||
         script_envelope->GetType("origin") != VTYPE_STRING ||
         script_envelope->GetType("channel") != VTYPE_STRING ||
         script_envelope->GetType("request_id") != VTYPE_STRING ||
@@ -4224,7 +4226,10 @@ bool HostController::HandleCommand(CefRefPtr<CefDictionaryValue> payload) {
       SendError(request_id, "invalid_command", "input command is malformed");
       return false;
     }
-    input_value = command_payload->GetDictionary("input");
+    // Copied: GetDictionary returns a reference into the parsed message,
+    // which CEF invalidates once the message is released, before the UI
+    // thread task that applies the input runs.
+    input_value = command_payload->GetDictionary("input")->Copy(false);
     if (input_value->GetType("type") != VTYPE_STRING ||
         input_value->GetType("payload") != VTYPE_DICTIONARY) {
       SendError(request_id, "invalid_command", "input event is malformed");

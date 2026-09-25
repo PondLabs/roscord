@@ -48,6 +48,7 @@ FIXTURE_HTML = """<!DOCTYPE html>
 <html><body style="margin:0;background:#1e6fd9;color:#fff;font:48px sans-serif">
 <div style="padding:40px">roscord cef_host smoke test</div>
 <input id="field" style="margin:0 40px;font:48px monospace;width:80%">
+<div id="log" style="padding:16px 40px;font:20px monospace;white-space:pre"></div>
 <script>
 const field = document.getElementById("field");
 const paint = () => {{
@@ -56,6 +57,17 @@ const paint = () => {{
 field.addEventListener("focus", paint);
 field.addEventListener("input", paint);
 field.focus();
+// The key events the page received, for reading a failed run's frame.
+const log = document.getElementById("log");
+const seen = [];
+for (const type of ["keydown", "keypress", "beforeinput", "keyup"]) {{
+  document.addEventListener(type, (event) => {{
+    seen.push(event.type + " " + (event.key || event.data || "") + " " +
+              (event.code || "") + (event.ctrlKey ? " ctrl" : "") +
+              (event.altKey ? " alt" : ""));
+    log.textContent = seen.slice(-12).join("\\n");
+  }}, true);
+}}
 </script>
 </body></html>"""
 FOCUSED_PURPLE = (0x6F, 0x3F, 0xD9)
