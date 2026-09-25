@@ -54,25 +54,10 @@
     if (scenario === "toggle") graph.setParams(appDefaults);
     result.contextState = graph.state;
 
-    const rec = new AudioContext({ sampleRate: 48000 });
-    await rec.audioWorklet.addModule("/__harness/recorder.worklet.js");
-    const node = new AudioWorkletNode(rec, "level-recorder", { numberOfInputs: 2, numberOfOutputs: 1 });
-    rec.createMediaStreamSource(new MediaStream([track])).connect(node, 0, 0);
-    rec.createMediaStreamSource(new MediaStream([graph.processedTrack])).connect(node, 0, 1);
-    const mute = rec.createGain();
-    mute.gain.value = 0;
-    node.connect(mute).connect(rec.destination);
-    await rec.resume();
-
-    await new Promise((r) => setTimeout(r, seconds * 1000));
-    const levels = await new Promise((resolve) => {
-      node.port.onmessage = (e) => resolve(e.data);
-      node.port.postMessage("flush");
-    });
+    const levels = await window.__voiceLoopRecord(track, graph.processedTrack, seconds);
     result.raw = levels.raw;
     result.processed = levels.processed;
     await graph.destroy();
-    await rec.close();
   } catch (e) {
     result.errors.push(String(e && e.stack ? e.stack : e));
   }
