@@ -427,7 +427,9 @@ class OwnerOnlySecurityDescriptor {
   OwnerOnlySecurityDescriptor(const OwnerOnlySecurityDescriptor&) = delete;
   OwnerOnlySecurityDescriptor& operator=(const OwnerOnlySecurityDescriptor&) = delete;
 
-  bool Create() {
+  // `inheritable` marks the ACE for inheritance, so files and directories
+  // later created inside a directory stay owner-only too.
+  bool Create(bool inheritable = false) {
     HANDLE token = nullptr;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
       return false;
@@ -451,7 +453,13 @@ class OwnerOnlySecurityDescriptor {
     if (!ConvertSidToStringSidW(token_user->User.Sid, &sid_string)) {
       return false;
     }
-    const std::wstring sddl = L"D:P(A;;GA;;;" + std::wstring(sid_string) + L")";
+    // The user is named as owner: an elevated administrator's new files would
+    // otherwise belong to the Administrators group, which IsOwnerControlled
+    // rejects.
+    const std::wstring sid(sid_string);
+    const std::wstring sddl = L"O:" + sid + L"D:P(A;" +
+                              (inheritable ? L"OICI" : L"") + L";GA;;;" + sid +
+                              L")";
     LocalFree(sid_string);
     return ConvertStringSecurityDescriptorToSecurityDescriptorW(
                sddl.c_str(), SDDL_REVISION_1, &descriptor_, nullptr) != FALSE;
@@ -592,8 +600,13 @@ bool FlushAndCloseContext(const CefRefPtr<CefRequestContext>& context,
 
 bool WriteOwnerManifest(const std::filesystem::path& path,
                         std::string_view contents) {
+  // Created owner-only: the token's default DACL would also grant SYSTEM (and
+  // Administrators when elevated), which IsOwnerControlled rejects.
+  OwnerOnlySecurityDescriptor security;
+  if (!security.Create()) return false;
+  SECURITY_ATTRIBUTES attributes{sizeof(attributes), security.get(), FALSE};
   HANDLE file = CreateFileW(
-      path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+      path.c_str(), GENERIC_WRITE, 0, &attributes, CREATE_NEW,
       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT |
           FILE_FLAG_WRITE_THROUGH,
       nullptr);
@@ -637,19 +650,24 @@ bool MakeOwnerOnlyDirectory(const std::filesystem::path& path) {
   std::filesystem::create_directories(path, error);
   if (error) return false;
   OwnerOnlySecurityDescriptor security;
-  if (!security.Create()) return false;
+  if (!security.Create(/*inheritable=*/true)) return false;
   PACL dacl = nullptr;
   BOOL present = FALSE;
   BOOL defaulted = FALSE;
+  PSID owner = nullptr;
+  BOOL owner_defaulted = FALSE;
   if (!GetSecurityDescriptorDacl(security.get(), &present, &dacl,
                                  &defaulted) ||
-      !present || dacl == nullptr) {
+      !present || dacl == nullptr ||
+      !GetSecurityDescriptorOwner(security.get(), &owner, &owner_defaulted) ||
+      owner == nullptr) {
     return false;
   }
   return SetNamedSecurityInfoW(
              const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
-             DACL_SECURITY_INFORMATION, nullptr, nullptr, dacl, nullptr) ==
-         ERROR_SUCCESS;
+             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
+                 PROTECTED_DACL_SECURITY_INFORMATION,
+             owner, nullptr, dacl, nullptr) == ERROR_SUCCESS;
 }
 
 bool ValidateProfileRoot(const std::filesystem::path& path) {
