@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:commet/client/components/video_embed/composite_video_provider.dart';
 import 'package:commet/client/components/video_embed/providers/generic_video_provider.dart';
 import 'package:commet/client/components/video_embed/providers/instagram_provider.dart';
@@ -221,9 +224,30 @@ void main() {
   });
 
   group('InstagramProvider', () {
-    final provider = InstagramProvider();
+    // Trimmed from the real /embed/captioned/ page of a public reel, with the
+    // post data double-encoded exactly as Instagram serves it.
+    final reelEmbedPage =
+        File('unit_test/fixtures/instagram_reel_embed.html').readAsStringSync();
+
+    // Wraps [context] the way the embed page does: a JSON string inside the
+    // PolarisEmbedSimple init arguments.
+    String embedPage(Map<String, Object?> context) =>
+        '<html><script>{"require":[["PolarisEmbedSimple","init",[],'
+        '[{"isRichEmbed":true,"contextJSON":${jsonEncode(jsonEncode(context))}}]]]}'
+        '</script></html>';
+
+    final requests = <http.Request>[];
+    MockClient serving(String body, {int status = 200}) =>
+        MockClient((request) async {
+          requests.add(request);
+          return http.Response(body, status,
+              headers: {'content-type': 'text/html; charset=utf-8'});
+        });
+
+    setUp(requests.clear);
 
     test('canHandle detects Instagram reels and posts', () {
+      final provider = InstagramProvider();
       expect(
           provider.canHandle(
               Uri.parse('https://www.instagram.com/reel/C3bV8Uyrk8q/')),
@@ -237,7 +261,44 @@ void main() {
           isTrue);
     });
 
+    test('canHandle detects /reels/ links and links under a profile', () {
+      final provider = InstagramProvider();
+      expect(
+          provider.extractPostInfo(
+              Uri.parse('https://www.instagram.com/reels/C2X_BmsPg5d/')),
+          isA<InstagramPostInfo>()
+              .having((i) => i.shortcode, 'shortcode', 'C2X_BmsPg5d')
+              .having((i) => i.isReel, 'isReel', isTrue));
+      expect(
+          provider.extractPostInfo(Uri.parse(
+              'https://www.instagram.com/nasaglenn/reel/C2X_BmsPg5d/')),
+          isA<InstagramPostInfo>()
+              .having((i) => i.shortcode, 'shortcode', 'C2X_BmsPg5d')
+              .having((i) => i.isReel, 'isReel', isTrue));
+      expect(
+          provider.extractPostInfo(
+              Uri.parse('https://www.instagram.com/nasa/p/DXdMrMbjcmA/')),
+          isA<InstagramPostInfo>()
+              .having((i) => i.shortcode, 'shortcode', 'DXdMrMbjcmA')
+              .having((i) => i.isReel, 'isReel', isFalse));
+    });
+
+    test('canHandle accepts the embed-fixing mirrors people paste', () {
+      final provider = InstagramProvider();
+      for (final host in [
+        'ddinstagram.com',
+        'www.ddinstagram.com',
+        'kkinstagram.com',
+        'instagramez.com',
+      ]) {
+        expect(provider.canHandle(Uri.parse('https://$host/reel/C2X_BmsPg5d/')),
+            isTrue,
+            reason: host);
+      }
+    });
+
     test('canHandle rejects profile and general pages', () {
+      final provider = InstagramProvider();
       expect(
           provider.canHandle(Uri.parse('https://www.instagram.com/explore/')),
           isFalse);
@@ -245,21 +306,117 @@ void main() {
           provider
               .canHandle(Uri.parse('https://instagram.com/accounts/login/')),
           isFalse);
+      expect(provider.canHandle(Uri.parse('https://instagram.com/nasaglenn/')),
+          isFalse);
+      expect(
+          provider.canHandle(Uri.parse(
+              'https://instagram.com.attacker.org/reel/C2X_BmsPg5d/')),
+          isFalse);
     });
 
-    test('extracts shortcode and marks Reel as 9:16 aspect ratio', () async {
-      final reelUri =
-          Uri.parse('https://www.instagram.com/reel/C3bV8Uyrk8q/?igsh=abc==');
-      final result = await provider.resolve(reelUri, fetchPlayback: true);
+    test('plays a reel natively from the video in its embed page', () async {
+      final provider = InstagramProvider(canFetchEmbedData: true);
+      final result = await provider.resolve(
+        Uri.parse('https://www.instagram.com/reel/C2X_BmsPg5d/?igsh=abc=='),
+        fetchPlayback: true,
+        client: serving(reelEmbedPage),
+      );
+
+      expect(requests.single.url.toString(),
+          'https://www.instagram.com/reel/C2X_BmsPg5d/embed/captioned/');
+      expect(requests.single.headers['Sec-Fetch-Mode'], 'navigate');
+
+      final videoUrl = Uri.parse(
+          'https://scontent-gru1-2.cdninstagram.com/o1/v/t2/f2/m82/AQO6b5hr3gGy.mp4'
+          '?_nc_cat=108&_nc_sid=5e9851&oe=6AB88D09');
+      expect(result, isNotNull);
+      expect(result!.playbackSource, isA<NativeVideoSource>());
+      expect((result.playbackSource! as NativeVideoSource).uri, videoUrl);
+      expect(result.streamUrl, videoUrl);
+      expect(result.effectiveCapabilities.supportsSeeking, isTrue);
+      expect(result.aspectRatio, 720 / 1280);
+      expect(result.duration, const Duration(milliseconds: 28094));
+      expect(result.author, '@nasaglenn');
+      expect(result.title,
+          'We’re NASA Glenn… of course we hopped on this trend. ✨🚀✈️');
+      expect(result.thumbnailUrl, startsWith('https://scontent-gru2-1.'));
+      expect(result.thumbnail, isNotNull);
+      expect(result.platformName, 'Instagram Reels');
+      expect(result.isShortForm, isTrue);
+    });
+
+    test('previews without a stream: the signed video URL expires', () async {
+      final provider = InstagramProvider(canFetchEmbedData: true);
+      final result = await provider.resolve(
+        Uri.parse('https://www.instagram.com/reel/C2X_BmsPg5d/'),
+        client: serving(reelEmbedPage),
+      );
 
       expect(result, isNotNull);
-      expect(result!.isShortForm, isTrue);
-      expect(result.aspectRatio, 9.0 / 16.0);
-      expect(result.platformName, 'Instagram Reels');
+      expect(result!.playbackSource, isNull);
+      expect(result.streamUrl, isNull);
+      expect(result.thumbnailUrl, isNotNull);
+      expect(result.duration, const Duration(milliseconds: 28094));
+      expect(result.effectiveCapabilities.supportsSeeking, isTrue);
+    });
 
-      final source = result.playbackSource as OfficialVideoEmbedSource?;
-      expect(source?.provider, OfficialVideoProvider.instagram);
-      expect(source?.uri.path, '/reel/C3bV8Uyrk8q/embed/');
+    test('a photo post is not a video', () async {
+      final provider = InstagramProvider(canFetchEmbedData: true);
+      final result = await provider.resolve(
+        Uri.parse('https://www.instagram.com/p/DW1xjVPCXJ0/'),
+        fetchPlayback: true,
+        client: serving(embedPage({
+          'context': {'type': 'GraphSidecar', 'shortcode': 'DW1xjVPCXJ0'},
+          'gql_data': {
+            'shortcode_media': {
+              '__typename': 'GraphSidecar',
+              'shortcode': 'DW1xjVPCXJ0',
+              'is_video': false,
+              'display_url': 'https://scontent.cdninstagram.com/photo.jpg',
+              'dimensions': {'width': 1080, 'height': 1350},
+            },
+          },
+        })),
+      );
+
+      expect(result, isNull);
+    });
+
+    test('falls back to the official embed when the page has no post data',
+        () async {
+      final provider = InstagramProvider(canFetchEmbedData: true);
+      for (final client in [
+        serving('<html><div class="EmbedBrokenMedia"></div></html>'),
+        serving('', status: 429),
+        MockClient((_) async => throw const SocketException('offline')),
+      ]) {
+        final result = await provider.resolve(
+          Uri.parse('https://www.instagram.com/reel/C3bV8Uyrk8q/?igsh=abc=='),
+          fetchPlayback: true,
+          client: client,
+        );
+
+        expect(result, isNotNull);
+        expect(result!.isShortForm, isTrue);
+        expect(result.aspectRatio, 9.0 / 16.0);
+        expect(result.platformName, 'Instagram Reels');
+
+        final source = result.playbackSource as OfficialVideoEmbedSource?;
+        expect(source?.provider, OfficialVideoProvider.instagram);
+        expect(source?.uri.path, '/reel/C3bV8Uyrk8q/embed/');
+      }
+    });
+
+    test('does not fetch where the page cannot be read (web)', () async {
+      final provider = InstagramProvider(canFetchEmbedData: false);
+      final result = await provider.resolve(
+        Uri.parse('https://www.instagram.com/reel/C3bV8Uyrk8q/'),
+        fetchPlayback: true,
+        client: serving(reelEmbedPage),
+      );
+
+      expect(requests, isEmpty);
+      expect(result?.playbackSource, isA<OfficialVideoEmbedSource>());
     });
   });
 
