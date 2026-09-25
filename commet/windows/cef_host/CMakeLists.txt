@@ -107,8 +107,8 @@ add_custom_command(TARGET cef_host_client POST_BUILD
   VERBATIM
 )
 
-# CEF's standard distribution keeps the Release/Resources split.  Copying the
-# runtime at install time preserves that layout and prevents a system CEF lookup.
+# Copying the locked runtime next to the host at install time prevents a
+# system CEF lookup.
 #
 # The Flutter runner's install prefix is $<TARGET_FILE_DIR:commet>, so, like
 # the runner's own rules, destinations are absolute paths under it; relative
@@ -127,8 +127,11 @@ install(DIRECTORY "${CEF_RELEASE_DIR}/" DESTINATION "${CEF_HOST_INSTALL_DIR}"
   PATTERN "*.pak"
   PATTERN "bootstrap.exe" EXCLUDE
 )
+# CEF loads icudtl.dat, the .pak files and locales/ from the directory that
+# holds libcef.dll (without ICU data it dies in InitializeICU), so the
+# archive's Resources/ lands next to it.
 install(DIRECTORY "${CEF_RESOURCES_DIR}/"
-  DESTINATION "${CEF_HOST_INSTALL_DIR}/Resources")
+  DESTINATION "${CEF_HOST_INSTALL_DIR}")
 install(FILES
   "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
   "${CMAKE_CURRENT_SOURCE_DIR}/fixture.html"

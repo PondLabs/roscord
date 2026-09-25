@@ -11,11 +11,15 @@ The Windows `Release` directory next to `commet.exe` carries the CEF payload
 in `cef_host/` (installed by `commet/windows/cef_host/CMakeLists.txt` when
 `ROSCORD_BUILD_CEF_HOST=ON`); this nested layout is also what
 `WindowsBrowserRuntime._resolveHostExecutable` prefers.  The CMake install
-flattens the archive's `Release/` contents into the payload root, renames the
-locked `Release/bootstrap.exe` to `cef_host.exe`, keeps `Resources/` as a
-subdirectory, and adds the project-built `cef_host.dll` plus the smoke-test
-fixtures. A renamed bootstrap loads the DLL named after itself from its own
-directory; `--module` only applies while it keeps the name `bootstrap.exe`:
+flattens the archive's `Release/` and `Resources/` contents into the payload
+root, renames the locked `Release/bootstrap.exe` to `cef_host.exe`, and adds
+the project-built `cef_host.dll` plus the smoke-test fixtures.
+
+- CEF loads `icudtl.dat`, the `.pak` files and `locales/` from the directory
+  that holds `libcef.dll`, whatever `CefSettings` says. Without ICU data
+  there, the host dies in `InitializeICU`.
+- A renamed bootstrap loads the DLL named after itself from its own
+  directory. `--module` only applies while it keeps the name `bootstrap.exe`.
 
 ```text
 <Release>/cef_host/cef_host.exe        # renamed locked bootstrap.exe
@@ -31,11 +35,11 @@ directory; `--module` only applies while it keeps the name `bootstrap.exe`:
 <Release>/cef_host/vk_swiftshader.dll
 <Release>/cef_host/vk_swiftshader_icd.json
 <Release>/cef_host/vulkan-1.dll
-<Release>/cef_host/Resources/chrome_100_percent.pak
-<Release>/cef_host/Resources/chrome_200_percent.pak
-<Release>/cef_host/Resources/icudtl.dat
-<Release>/cef_host/Resources/resources.pak
-<Release>/cef_host/Resources/locales/en-US.pak (+ further staged locales)
+<Release>/cef_host/chrome_100_percent.pak
+<Release>/cef_host/chrome_200_percent.pak
+<Release>/cef_host/icudtl.dat
+<Release>/cef_host/resources.pak
+<Release>/cef_host/locales/en-US.pak   (+ further staged locales)
 <Release>/cef_host/fixtures/fixture.html
 ```
 

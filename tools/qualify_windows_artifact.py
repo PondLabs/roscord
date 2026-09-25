@@ -17,15 +17,17 @@ smoke-tested without the Flutter shell).  Production ZIP and portable
 artifacts always use the nested layout, which is also what the Dart
 ``WindowsBrowserRuntime`` resolver prefers; a flat directory passed as
 ``--bundle`` must contain only the payload.  The CMake install flattens the archive's ``Release/``
-contents into the payload root and keeps ``Resources/`` as a subdirectory::
+and ``Resources/`` contents into the payload root, because CEF loads ICU data,
+``.pak`` resources and locales from the directory holding ``libcef.dll``
+(``cef_runtime.staged_path``)::
 
     <payload>/cef_host.exe        # renamed copy of Release/bootstrap.exe
     <payload>/cef_host.dll        # project-built bootstrap client
     <payload>/libcef.dll
     <payload>/chrome_elf.dll
     <payload>/...
-    <payload>/Resources/icudtl.dat
-    <payload>/Resources/locales/en-US.pak
+    <payload>/icudtl.dat
+    <payload>/locales/en-US.pak
 
 ``LICENSE.txt`` and ``CREDITS.html`` are archive-root files and are not
 installed into the payload; they are covered through the generated
@@ -183,12 +185,14 @@ def _payload_relative(payload: Path, path: Path) -> str:
 
 
 def _lock_to_payload_name(archive_name: str) -> str:
-    """Map a lock ``Release/...``/``Resources/...`` name to payload layout."""
+    """Map a lock or staged ``Release/...``/``Resources/...`` name to payload
+    layout."""
     if archive_name in BOOTSTRAP_RENAME:
         return BOOTSTRAP_RENAME[archive_name]
-    if archive_name.startswith("Release/"):
-        return archive_name[len("Release/") :]
-    return archive_name
+    staged = cef_runtime.staged_path(PLATFORM, archive_name)
+    if staged.startswith("Release/"):
+        return staged[len("Release/") :]
+    return staged
 
 
 def find_cef_payload(bundle: Path) -> Path:
@@ -244,8 +248,8 @@ def check_staged(lock: Mapping[str, Any], payload: Path) -> dict[str, Any]:
         payload_pattern = _lock_to_payload_name(pattern)
         if not any(_match_lock_pattern(name, payload_pattern) for name in files):
             missing.append(pattern)
-    if "Resources/locales/en-US.pak" not in files:
-        missing.append("Resources/locales/en-US.pak(en-US locale)")
+    if "locales/en-US.pak" not in files:
+        missing.append("locales/en-US.pak(en-US locale)")
     if PROJECT_BOOTSTRAP not in files:
         missing.append(f"{PROJECT_BOOTSTRAP}(project bootstrap)")
     if missing:
@@ -339,13 +343,16 @@ def check_hashes(
     allowed = set(expected) | set(project_digests) | {"cef_host.exe"} | set(FIXTURE_ALLOWLIST)
     # Any staged locale beyond en-US is allowed when it matches the lock's
     # locales pattern; extras outside the allow-list fail.
-    allowlist: list[str] = lock["platforms"][PLATFORM]["runtime"]["allowlist"]
+    allowlist = [
+        cef_runtime.staged_path(PLATFORM, pattern)
+        for pattern in lock["platforms"][PLATFORM]["runtime"]["allowlist"]
+    ]
     unexpected = sorted(
         name
         for name in files
         if name not in allowed
         and not any(
-            _match_lock_pattern(_payload_to_archive_name(name), pattern)
+            _match_lock_pattern(_payload_to_staged_name(name), pattern)
             for pattern in allowlist
         )
     )
@@ -354,11 +361,11 @@ def check_hashes(
     return {"checked_files": len(expected) + len(project_digests)}
 
 
-def _payload_to_archive_name(payload_name: str) -> str:
+def _payload_to_staged_name(payload_name: str) -> str:
     for archive_name, renamed in BOOTSTRAP_RENAME.items():
         if payload_name == renamed:
             return archive_name
-    if "/" not in payload_name and payload_name not in NOTICE_INPUTS:
+    if payload_name not in NOTICE_INPUTS:
         return f"Release/{payload_name}"
     return payload_name
 

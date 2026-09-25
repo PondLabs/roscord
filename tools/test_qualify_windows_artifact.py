@@ -45,7 +45,9 @@ def _build_qualified_fixture(directory: Path):
             # Archive-root notice inputs ship as generated notices, mirroring
             # the CMake install layout.
             continue
-        source = staged.joinpath(*PurePosixPath(relative).parts)
+        source = staged.joinpath(
+            *PurePosixPath(cef_runtime.staged_path("windows-x64", relative)).parts
+        )
         target = payload.joinpath(*PurePosixPath(_payload_name(relative)).parts)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
@@ -114,7 +116,7 @@ class QualifyWindowsArtifactTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             directory = Path(temporary)
             lock, bundle, metadata = _build_qualified_fixture(directory)
-            (bundle / "cef_host" / "Resources" / "locales" / "en-US.pak").unlink()
+            (bundle / "cef_host" / "locales" / "en-US.pak").unlink()
             with self.assertRaises(QualificationError):
                 qualify_windows_artifact.qualify(bundle, metadata, lock)
 

@@ -89,12 +89,13 @@ BOOTSTRAP_PATTERNS = {
     "windows-x64": {"archive": ["Release/bootstrap.exe"], "project": ["cef_host.dll"]},
     "linux-x64": {"archive": [], "project": []},
 }
-# Where archive paths land in a staged runtime.  On Linux CEF loads ICU data,
-# the .pak resources and locales/ from the directory that holds libcef.so,
-# whatever CefSettings says, so the staged Linux runtime moves the archive's
-# Resources/ into Release/.  Windows keeps the archive layout.
+# Where archive paths land in a staged runtime.  CEF loads ICU data, the .pak
+# resources and locales/ from the directory that holds libcef (libcef.so,
+# libcef.dll), whatever CefSettings says, so staged runtimes move the
+# archive's Resources/ into Release/.  The build SDK keeps the archive layout.
 STAGED_PREFIXES: dict[str, tuple[tuple[str, str], ...]] = {
     "linux-x64": (("Resources/", "Release/"),),
+    "windows-x64": (("Resources/", "Release/"),),
 }
 
 

@@ -146,10 +146,11 @@ each private surface's, lives below it.
 
 **Runtime staging.** `tools/cef_runtime.py stage` stages the runtime, and
 `--strip` strips the Linux libraries (`libcef.so` goes from 1.4 GB to
-268 MB). The Linux runtime is flat. CEF loads `icudtl.dat`, the `.pak` files
-and `locales/` from the directory that holds `libcef.so`, whatever
-`CefSettings` says, so staging moves the archive's `Resources/` into
-`Release/` (`STAGED_PREFIXES`). Windows keeps the archive layout.
+268 MB). Staged runtimes are flat on both platforms. CEF loads `icudtl.dat`,
+the `.pak` files and `locales/` from the directory that holds `libcef`,
+whatever `CefSettings` says, so staging moves the archive's `Resources/` into
+`Release/` (`STAGED_PREFIXES`). The Windows install does the same, next to
+`libcef.dll`. Without ICU data there, the host dies in `InitializeICU`.
 
 **Build SDK.** `stage-sdk` stages the build SDK for both platforms: the
 lock's `build_sdk` record (`cmake/`, `include/`, `libcef_dll/` on Linux).

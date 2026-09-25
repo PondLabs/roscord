@@ -185,7 +185,9 @@ class CEFRuntimeToolTests(unittest.TestCase):
             self.assertIn("Release/libcef.dll", result["files"])
             self.assertFalse((staged / "Release/bootstrapc.exe").exists())
             self.assertFalse((staged / "include/not-staged.h").exists())
-            self.assertTrue((staged / "Resources/locales/en-US.pak").exists())
+            self.assertTrue((staged / "Release/locales/en-US.pak").exists())
+            self.assertTrue((staged / "Release/icudtl.dat").exists())
+            self.assertFalse((staged / "Resources").exists())
             self.assertEqual(result["bootstrap_project"][0]["path"], "cef_host.dll")
 
             metadata = directory / "metadata"
@@ -229,18 +231,22 @@ class CEFRuntimeToolTests(unittest.TestCase):
             with self.assertRaises(cef_runtime.LockError):
                 cef_runtime.generate_metadata("linux-x64", staged, directory / "again", lock)
 
-    def test_staged_paths_only_move_linux_resources(self) -> None:
+    def test_staged_paths_move_resources_next_to_libcef(self) -> None:
+        # CEF loads ICU data, .pak files and locales from libcef's directory on
+        # both platforms (a Windows host without icudtl.dat there dies in
+        # InitializeICU).
         self.assertEqual(
             cef_runtime.staged_path("linux-x64", "Resources/locales/*.pak"),
             "Release/locales/*.pak",
         )
         self.assertEqual(
-            cef_runtime.staged_path("linux-x64", "Release/libcef.so"), "Release/libcef.so"
+            cef_runtime.staged_path("windows-x64", "Resources/icudtl.dat"),
+            "Release/icudtl.dat",
         )
         self.assertEqual(
-            cef_runtime.staged_path("windows-x64", "Resources/icudtl.dat"),
-            "Resources/icudtl.dat",
+            cef_runtime.staged_path("linux-x64", "Release/libcef.so"), "Release/libcef.so"
         )
+        self.assertEqual(cef_runtime.staged_path("windows-x64", "LICENSE.txt"), "LICENSE.txt")
 
     def test_stage_sdk_includes_build_inputs_without_accepting_unlisted_files(self) -> None:
         with TemporaryDirectory() as temporary:

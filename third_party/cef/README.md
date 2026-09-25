@@ -23,9 +23,9 @@ python tools/cef_runtime.py stage --platform linux-x64 --strip <archive> <runtim
 python tools/cef_runtime.py stage-sdk --platform linux-x64 <archive> <sdk-dir>
 ```
 
-The staged Linux runtime is flat: the archive's `Resources/` lands in
-`Release/`, next to `libcef.so`, because that is where CEF on Linux loads ICU
-data, `.pak` resources and locales from. `--strip` strips the Linux libraries
+Staged runtimes are flat: the archive's `Resources/` lands in `Release/`, next
+to `libcef.so`/`libcef.dll`, because that is where CEF loads ICU data, `.pak`
+resources and locales from, whatever `CefSettings` says. `--strip` strips the Linux libraries
 (`libcef.so` goes from 1.4 GB to 268 MB). `stage-sdk` stages the lock's
 `build_sdk` record, the headers, CMake files and wrapper sources the hosts
 compile against.

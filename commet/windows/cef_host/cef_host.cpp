@@ -374,8 +374,9 @@ bool VerifyBundledRuntime(std::wstring& error) {
   // The M138+ bootstrap checks the signed bootstrap/client pair.  These
   // additional checks make a partial or host-installed CEF impossible to use.
   // The list mirrors the windows-x64 runtime allow-list in
-  // third_party/cef/cef.lock.json (flattened from Release/ into this
-  // directory, with bootstrap.exe renamed to cef_host.exe by CMake) and is
+  // third_party/cef/cef.lock.json (Release/ and Resources/ flattened into
+  // this directory, where CEF looks for ICU data, .pak files and locales, with
+  // bootstrap.exe renamed to cef_host.exe by CMake) and is
   // cross-checked offline by tools/qualify_windows_artifact.py.  Only the
   // en-US locale is required for startup; further locales are verified by the
   // qualification gate against the staged manifest.
@@ -387,11 +388,11 @@ bool VerifyBundledRuntime(std::wstring& error) {
       root / L"libGLESv2.dll",      root / L"v8_context_snapshot.bin",
       root / L"vk_swiftshader.dll", root / L"vk_swiftshader_icd.json",
       root / L"vulkan-1.dll",
-      root / L"Resources" / L"chrome_100_percent.pak",
-      root / L"Resources" / L"chrome_200_percent.pak",
-      root / L"Resources" / L"icudtl.dat",
-      root / L"Resources" / L"resources.pak",
-      root / L"Resources" / L"locales" / L"en-US.pak",
+      root / L"chrome_100_percent.pak",
+      root / L"chrome_200_percent.pak",
+      root / L"icudtl.dat",
+      root / L"resources.pak",
+      root / L"locales" / L"en-US.pak",
   };
   for (const auto& path : required) {
     if (!IsRegularFile(path)) {
@@ -1043,6 +1044,16 @@ class HostApp final : public CefApp,
     // Chrome's first-run flow has no place in an embedded host.
     command_line->AppendSwitch("no-first-run");
     command_line->AppendSwitch("no-default-browser-check");
+    if (software_rendering_) {
+      command_line->AppendSwitch("disable-gpu");
+      command_line->AppendSwitch("disable-gpu-compositing");
+    }
+  }
+
+  // Set before CefInitialize, which is when the browser process's command
+  // line is processed.
+  void SetSoftwareRendering(bool software_rendering) {
+    software_rendering_ = software_rendering;
   }
 
   void OnRegisterCustomSchemes(CefRawPtr<CefSchemeRegistrar> registrar) override {
@@ -1084,6 +1095,7 @@ class HostApp final : public CefApp,
   }
 
  private:
+  bool software_rendering_ = false;
   std::mutex mutex_;
   std::condition_variable condition_;
   bool context_initialized_ = false;
@@ -5049,18 +5061,13 @@ int RunHost(HINSTANCE instance, void* sandbox_info) {
   // and each persistent account profile is a directory of the profile root.
   CefString(&settings.root_cache_path) = args->profile_root.wstring();
 
-  if (args->software_rendering) {
-    // Forced software rendering keeps CPU rendering authoritative when GPU
-    // import is unavailable.  Embedded keeps the same CPU OnPaint frame ring;
-    // standalone windowed browsers render in software with the same
-    // input/resize/focus/close contract.  No alternate engine is selected.
-    CefRefPtr<CefCommandLine> process_command_line =
-        CefCommandLine::GetGlobalCommandLine();
-    if (process_command_line != nullptr) {
-      process_command_line->AppendSwitch("disable-gpu");
-      process_command_line->AppendSwitch("disable-gpu-compositing");
-    }
-  }
+  // Forced software rendering keeps CPU rendering authoritative when GPU
+  // import is unavailable.  Embedded keeps the same CPU OnPaint frame ring;
+  // standalone windowed browsers render in software with the same
+  // input/resize/focus/close contract.  No alternate engine is selected.  The
+  // switches go in through OnBeforeCommandLineProcessing: the global command
+  // line CEF hands out before CefInitialize is read-only.
+  app->SetSoftwareRendering(args->software_rendering);
 
   const bool initialized = CefInitialize(main_args, settings, app, sandbox_info);
   if (!initialized) {
