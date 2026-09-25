@@ -4,9 +4,9 @@ import 'package:commet/client/matrix/components/voip_room/call_membership_writes
 import 'package:commet/client/matrix/components/voip_room/matrix_call_membership.dart';
 import 'package:commet/client/components/voip/voip_session.dart';
 import 'package:commet/client/components/voip/webrtc_default_devices.dart';
-import 'package:commet/client/components/voip/audio_processing/audio_dsp_settings.dart';
 import 'package:commet/client/components/voip/audio_processing/audio_processing_manager.dart';
 import 'package:commet/client/matrix/components/voip_room/matrix_livekit_encryption_key_provider.dart';
+import 'package:commet/client/matrix/components/voip_room/livekit_microphone.dart';
 import 'package:commet/client/matrix/components/voip_room/matrix_livekit_voip_session.dart';
 import 'package:commet/client/matrix/components/voip_room/matrix_voip_room_component.dart';
 import 'package:commet/client/matrix/matrix_room.dart';
@@ -247,20 +247,13 @@ class MatrixLivekitBackend {
 
     print("Using default device: ${device}");
 
-    final dsp = AudioProcessingManager.instance;
-    final dspSettings = AudioDspSettings.fromPreferences();
-
     lkRoom.localParticipant
         ?.setMicrophoneEnabled(true,
-            audioCaptureOptions: lk.AudioCaptureOptions(
+            audioCaptureOptions: microphoneCaptureOptions(
+              dsp: AudioProcessingManager.instance,
+              noiseSuppressionPreference:
+                  preferences.voipNoiseSuppression.value,
               deviceId: device,
-              // Our suppressor replaces the WebRTC / browser one when it is on,
-              // running both makes voices sound hollow.
-              noiseSuppression:
-                  !(dsp.isSupported && dspSettings.noiseSuppression),
-              // Web only: routes the mic through the AudioWorklet. Native
-              // platforms hook into WebRTC's pipeline instead and return null.
-              processor: dsp.createTrackProcessor(),
             ))
         .catchError((Object e, StackTrace s) {
       // Not awaited on purpose (joining muted is still joining), but a
