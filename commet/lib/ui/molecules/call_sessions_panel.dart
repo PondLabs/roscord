@@ -13,7 +13,9 @@ import 'package:commet/ui/organisms/soundboard/soundboard_button.dart';
 import 'package:commet/ui/organisms/soundboard/soundboard_call_controller.dart';
 import 'package:commet/utils/animation/ring_shaker.dart';
 import 'package:commet/utils/event_bus.dart';
+import 'package:commet/utils/voice_controls/browser_call_controls.dart';
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 
 import 'package:tiamat/tiamat.dart' as tiamat;
 
@@ -71,6 +73,12 @@ class _CallSessionPanelState extends State<CallSessionPanel>
   /// The control buttons sit in boxes the height of the whole row, so
   /// tiamat's 15px default left them looking lost in all that space.
   static const double iconSize = 20;
+
+  String get tooltipPopOutControls => Intl.message("Pop out call controls",
+      name: "tooltipPopOutControls",
+      desc: "Tooltip on the call panel button (browser only) that opens the "
+          "mute, deafen and disconnect buttons in a small window that stays "
+          "on top of other windows");
 
   late List<StreamSubscription> subs;
   Timer? statUpdateTimer;
@@ -234,6 +242,21 @@ class _CallSessionPanelState extends State<CallSessionPanel>
                       ),
                     ),
                   ),
+                  // The call controls in a small window of their own that
+                  // floats over other apps: the browser's stand-in for the
+                  // taskbar buttons (issue #146).
+                  if (BrowserCallControls.canPopOut)
+                    SizedBox(
+                      width: widget.height,
+                      height: widget.height,
+                      child: Tooltip(
+                        message: tooltipPopOutControls,
+                        child: tiamat.IconButton(
+                            onPressed: BrowserCallControls.popOut,
+                            size: iconSize,
+                            icon: Icons.picture_in_picture_alt_rounded),
+                      ),
+                    ),
                   SizedBox(
                     width: widget.height,
                     height: widget.height,

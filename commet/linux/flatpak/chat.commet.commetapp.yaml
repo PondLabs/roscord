@@ -24,6 +24,8 @@ finish-args:
 - "--filesystem=xdg-download"
 - "--talk-name=org.freedesktop.Notifications"
 - "--talk-name=org.freedesktop.Flatpak"
+# Hears the dock come up, to hand it the call controls quicklist (#146).
+- "--talk-name=com.canonical.Unity"
 - "--system-talk-name=org.freedesktop.NetworkManager"
 - "--env=LD_LIBRARY_PATH=/app/lib"
 modules:

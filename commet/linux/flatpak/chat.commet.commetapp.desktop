@@ -8,20 +8,25 @@ Icon=chat.commet.commetapp
 Exec=commet
 Terminal=false
 StartupWMClass=chat.commet.commetapp
-Actions=ToggleMute;Mute;Unmute
+Actions=ToggleMute;ToggleDeafen;Disconnect
 X-KDE-StartupNotify=false
 StartupNotify=false
 
 [Desktop Action ToggleMute]
-Name=Toggle Mute
+Name=Mute or Unmute
+Name[pt_BR]=Silenciar ou dessilenciar
+Icon=audio-input-microphone-symbolic
 Exec=commet --shortcut toggle_mute
 X-KDE-Shortcuts=Alt+M
 
-[Desktop Action Mute]
-Name=Mute
-Exec=commet --shortcut mute
+[Desktop Action ToggleDeafen]
+Name=Deafen or Undeafen
+Name[pt_BR]=Desativar ou reativar áudio
+Icon=audio-headphones-symbolic
+Exec=commet --shortcut toggle_deafen
 
-
-[Desktop Action Unmute]
-Name=Unmute
-Exec=commet --shortcut unmute
+[Desktop Action Disconnect]
+Name=Disconnect
+Name[pt_BR]=Desconectar
+Icon=call-stop-symbolic
+Exec=commet --shortcut disconnect

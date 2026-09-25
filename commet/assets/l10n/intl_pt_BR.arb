@@ -1781,5 +1781,41 @@
         "description": "Prompt to change the banner on the user's profile",
         "type": "text",
         "placeholders": {}
+    },
+    "labelVoiceControlMute": "Silenciar",
+    "@labelVoiceControlMute": {
+        "description": "Call control outside the window (taskbar thumbnail, Dock menu, tray) that mutes the microphone",
+        "type": "text",
+        "placeholders": {}
+    },
+    "labelVoiceControlUnmute": "Dessilenciar",
+    "@labelVoiceControlUnmute": {
+        "description": "Call control outside the window that unmutes the microphone, and undeafens when deafened",
+        "type": "text",
+        "placeholders": {}
+    },
+    "labelVoiceControlDeafen": "Desativar áudio",
+    "@labelVoiceControlDeafen": {
+        "description": "Call control outside the window that stops the user hearing the call",
+        "type": "text",
+        "placeholders": {}
+    },
+    "labelVoiceControlUndeafen": "Reativar áudio",
+    "@labelVoiceControlUndeafen": {
+        "description": "Call control outside the window that lets the user hear the call again",
+        "type": "text",
+        "placeholders": {}
+    },
+    "labelVoiceControlDisconnect": "Desconectar",
+    "@labelVoiceControlDisconnect": {
+        "description": "Call control outside the window that leaves the call",
+        "type": "text",
+        "placeholders": {}
+    },
+    "tooltipPopOutControls": "Destacar controles da chamada",
+    "@tooltipPopOutControls": {
+        "description": "Tooltip on the call panel button (browser only) that opens the mute, deafen and disconnect buttons in a small window that stays on top of other windows",
+        "type": "text",
+        "placeholders": {}
     }
 }
