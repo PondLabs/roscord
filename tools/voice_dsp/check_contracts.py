@@ -123,7 +123,7 @@ def check_restart_keeps_processor(problems):
     if take < 0 or stop < 0 or take > stop:
         problems.append(
             f"{LK}/lib/src/track/local/local.dart: restartTrack must take the processor "
-            "before stop(), which drops it (3bb94af6): every restart would send the raw "
+            "before stop(), which drops it (8b225926): every restart would send the raw "
             "microphone on the web")
 
 
