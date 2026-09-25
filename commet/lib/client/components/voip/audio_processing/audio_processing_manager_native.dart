@@ -71,86 +71,107 @@ typedef _ResetNative = Void Function(Pointer<Void>, Int32);
 typedef _FeedReferenceNative = Void Function(
     Pointer<Void>, Pointer<Int16>, Size, Size, Int32);
 
-class _Bindings {
-  final DynamicLibrary lib;
-  _Bindings(this.lib);
+/// Looks a symbol up in the DSP library. Tests stand in for a library that
+/// lacks some.
+typedef DspSymbolLookup = Pointer<T> Function<T extends NativeType>(
+    DynamicLibrary library, String name);
 
+Pointer<T> _lookup<T extends NativeType>(DynamicLibrary library, String name) =>
+    library.lookup<T>(name);
+
+/// The DSP's C ABI. Every entry point is resolved here, when the library
+/// loads: a missing one found only when a call installs the DSP used to leave
+/// the call with WebRTC's suppressor already off and nothing of ours on the
+/// hook.
+class _Bindings {
   static const expectedAbi = 2;
 
-  late final int Function() abiVersion =
-      lib.lookupFunction<Uint32 Function(), int Function()>(
-          'commet_dsp_abi_version');
-
-  late final int Function() paramsSize =
-      lib.lookupFunction<UintPtr Function(), int Function()>(
-          'commet_dsp_params_size');
-
-  late final int Function() reportSize =
-      lib.lookupFunction<UintPtr Function(), int Function()>(
-          'commet_dsp_report_size');
-
-  late final Pointer<Void> Function(Pointer<DspParams>) create =
-      lib.lookupFunction<Pointer<Void> Function(Pointer<DspParams>),
-          Pointer<Void> Function(Pointer<DspParams>)>('commet_dsp_create');
-
-  late final void Function(Pointer<Void>) destroy = lib.lookupFunction<
-      Void Function(Pointer<Void>),
-      void Function(Pointer<Void>)>('commet_dsp_destroy');
-
-  late final void Function(Pointer<Void>, Pointer<DspParams>) setParams =
-      lib.lookupFunction<
-          Void Function(Pointer<Void>, Pointer<DspParams>),
-          void Function(
-              Pointer<Void>, Pointer<DspParams>)>('commet_dsp_set_params');
-
-  late final void Function(Pointer<Void>, Pointer<DspReport>) getReport =
-      lib.lookupFunction<
-          Void Function(Pointer<Void>, Pointer<DspReport>),
-          void Function(
-              Pointer<Void>, Pointer<DspReport>)>('commet_dsp_get_report');
-
-  late final Pointer<DspParams> Function() paramsAlloc = lib.lookupFunction<
-      Pointer<DspParams> Function(),
-      Pointer<DspParams> Function()>('commet_dsp_params_alloc');
-
-  late final void Function(Pointer<DspParams>) paramsFree = lib.lookupFunction<
-      Void Function(Pointer<DspParams>),
-      void Function(Pointer<DspParams>)>('commet_dsp_params_free');
-
-  late final Pointer<DspReport> Function() reportAlloc = lib.lookupFunction<
-      Pointer<DspReport> Function(),
-      Pointer<DspReport> Function()>('commet_dsp_report_alloc');
-
-  late final void Function(Pointer<DspReport>) reportFree = lib.lookupFunction<
-      Void Function(Pointer<DspReport>),
-      void Function(Pointer<DspReport>)>('commet_dsp_report_free');
+  final int Function() abiVersion;
+  final int Function() paramsSize;
+  final int Function() reportSize;
+  final Pointer<Void> Function(Pointer<DspParams>) create;
+  final void Function(Pointer<Void>) destroy;
+  final void Function(Pointer<Void>, Pointer<DspParams>) setParams;
+  final void Function(Pointer<Void>, Pointer<DspReport>) getReport;
+  final Pointer<DspParams> Function() paramsAlloc;
+  final void Function(Pointer<DspParams>) paramsFree;
+  final Pointer<DspReport> Function() reportAlloc;
+  final void Function(Pointer<DspReport>) reportFree;
 
   // Addresses of the CustomProcessing shaped callbacks, handed to the
   // LiveKit plugin which calls them from WebRTC's audio thread.
-  late final int captureInit = lib
-      .lookup<NativeFunction<_InitNative>>('commet_dsp_capture_init')
-      .address;
-  late final int captureProcess = lib
-      .lookup<NativeFunction<_ProcessNative>>('commet_dsp_capture_process')
-      .address;
-  late final int captureReset = lib
-      .lookup<NativeFunction<_ResetNative>>('commet_dsp_capture_reset')
-      .address;
-  late final int renderInit =
-      lib.lookup<NativeFunction<_InitNative>>('commet_dsp_render_init').address;
-  late final int renderProcess = lib
-      .lookup<NativeFunction<_ProcessNative>>('commet_dsp_render_process')
-      .address;
-  late final int renderReset = lib
-      .lookup<NativeFunction<_ResetNative>>('commet_dsp_render_reset')
-      .address;
+  final int captureInit;
+  final int captureProcess;
+  final int captureReset;
+  final int renderInit;
+  final int renderProcess;
+  final int renderReset;
 
   // Handed to the vendored flutter-webrtc plugin, which calls it from its
   // loopback capture thread with the system mix (see
   // third_party/flutter-webrtc/common/cpp/include/commet_system_audio_reference.h).
-  late final int feedReference = lib
-      .lookup<NativeFunction<_FeedReferenceNative>>('commet_dsp_feed_reference')
-      .address;
+  final int feedReference;
+
+  _Bindings(DynamicLibrary lib, DspSymbolLookup find)
+      : abiVersion = find<NativeFunction<Uint32 Function()>>(
+                lib, 'commet_dsp_abi_version')
+            .asFunction<int Function()>(),
+        paramsSize = find<NativeFunction<UintPtr Function()>>(
+                lib, 'commet_dsp_params_size')
+            .asFunction<int Function()>(),
+        reportSize = find<NativeFunction<UintPtr Function()>>(
+                lib, 'commet_dsp_report_size')
+            .asFunction<int Function()>(),
+        create =
+            find<NativeFunction<Pointer<Void> Function(Pointer<DspParams>)>>(
+                    lib, 'commet_dsp_create')
+                .asFunction<Pointer<Void> Function(Pointer<DspParams>)>(),
+        destroy = find<NativeFunction<Void Function(Pointer<Void>)>>(
+                lib, 'commet_dsp_destroy')
+            .asFunction<void Function(Pointer<Void>)>(),
+        setParams = find<
+                    NativeFunction<
+                        Void Function(Pointer<Void>, Pointer<DspParams>)>>(
+                lib, 'commet_dsp_set_params')
+            .asFunction<void Function(Pointer<Void>, Pointer<DspParams>)>(),
+        getReport = find<
+                    NativeFunction<
+                        Void Function(Pointer<Void>, Pointer<DspReport>)>>(
+                lib, 'commet_dsp_get_report')
+            .asFunction<void Function(Pointer<Void>, Pointer<DspReport>)>(),
+        paramsAlloc = find<NativeFunction<Pointer<DspParams> Function()>>(
+                lib, 'commet_dsp_params_alloc')
+            .asFunction<Pointer<DspParams> Function()>(),
+        paramsFree = find<NativeFunction<Void Function(Pointer<DspParams>)>>(
+                lib, 'commet_dsp_params_free')
+            .asFunction<void Function(Pointer<DspParams>)>(),
+        reportAlloc = find<NativeFunction<Pointer<DspReport> Function()>>(
+                lib, 'commet_dsp_report_alloc')
+            .asFunction<Pointer<DspReport> Function()>(),
+        reportFree = find<NativeFunction<Void Function(Pointer<DspReport>)>>(
+                lib, 'commet_dsp_report_free')
+            .asFunction<void Function(Pointer<DspReport>)>(),
+        captureInit =
+            find<NativeFunction<_InitNative>>(lib, 'commet_dsp_capture_init')
+                .address,
+        captureProcess = find<NativeFunction<_ProcessNative>>(
+                lib, 'commet_dsp_capture_process')
+            .address,
+        captureReset =
+            find<NativeFunction<_ResetNative>>(lib, 'commet_dsp_capture_reset')
+                .address,
+        renderInit =
+            find<NativeFunction<_InitNative>>(lib, 'commet_dsp_render_init')
+                .address,
+        renderProcess = find<NativeFunction<_ProcessNative>>(
+                lib, 'commet_dsp_render_process')
+            .address,
+        renderReset =
+            find<NativeFunction<_ResetNative>>(lib, 'commet_dsp_render_reset')
+                .address,
+        feedReference = find<NativeFunction<_FeedReferenceNative>>(
+                lib, 'commet_dsp_feed_reference')
+            .address;
 }
 
 /// Linux and Windows: hooks rust/audio_dsp (shipped inside
@@ -166,9 +187,12 @@ class NativeAudioProcessingManager extends AudioProcessingManager {
   /// Where the DSP's C ABI comes from: librust_lib_commet in the app, the
   /// crate's own cdylib in tests.
   final DynamicLibrary? Function() _openLibrary;
+  final DspSymbolLookup _symbols;
 
-  NativeAudioProcessingManager({DynamicLibrary? Function()? openLibrary})
-      : _openLibrary = openLibrary ?? openRustLibrary;
+  NativeAudioProcessingManager(
+      {DynamicLibrary? Function()? openLibrary, DspSymbolLookup? symbols})
+      : _openLibrary = openLibrary ?? openRustLibrary,
+        _symbols = symbols ?? _lookup;
 
   _Bindings? _bindings;
   bool _loadAttempted = false;
@@ -198,7 +222,7 @@ class NativeAudioProcessingManager extends AudioProcessingManager {
     final lib = _openLibrary();
     if (lib == null) return null;
     try {
-      final b = _Bindings(lib);
+      final b = _Bindings(lib, _symbols);
       final abi = b.abiVersion();
       if (abi != _Bindings.expectedAbi) {
         Log.w("Voice DSP: ABI $abi, expected ${_Bindings.expectedAbi}");

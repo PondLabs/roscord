@@ -125,4 +125,23 @@ void main() {
     expect(other.isSupported, isFalse);
     other.dispose();
   }, skip: voiceDspSkip);
+
+  // Every entry point is looked up when the library loads: a missing one
+  // found only at install time left WebRTC's suppressor off (the join had
+  // already asked for that) with nothing of ours on the hook.
+  test('a library missing a callback is not taken for the DSP', () {
+    Pointer<T> withoutCapture<T extends NativeType>(
+        DynamicLibrary library, String name) {
+      if (name == 'commet_dsp_capture_process') {
+        throw ArgumentError('undefined symbol: $name');
+      }
+      return library.lookup<T>(name);
+    }
+
+    final partial = NativeAudioProcessingManager(
+        openLibrary: () => DynamicLibrary.open(dspLibraryPath),
+        symbols: withoutCapture);
+    expect(partial.isSupported, isFalse);
+    partial.dispose();
+  }, skip: voiceDspSkip);
 }
