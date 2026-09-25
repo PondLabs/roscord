@@ -571,7 +571,7 @@ class _MicLoopback {
         final track = event.track;
         if (track.kind != 'audio') return;
         lb._remote = track;
-        track.enabled = lb._monitor;
+        lb._applyMonitor();
       };
 
       for (final track in mic.getAudioTracks()) {
@@ -601,8 +601,22 @@ class _MicLoopback {
 
   void setMonitor(bool enabled) {
     _monitor = enabled;
+    _applyMonitor();
+  }
+
+  /// By playout volume, not by disabling the received track: it carries the
+  /// id of the microphone track it was sent from (both ends are in this
+  /// process), and flutter-webrtc resolves ids among local tracks first. So
+  /// "disabling the playback" disabled the microphone: WebRTC stopped
+  /// processing the capture, the DSP got no audio and the meter stayed dead
+  /// whenever "Hear myself" was off. setVolume finds the received track
+  /// through its peer connection.
+  void _applyMonitor() {
     final remote = _remote;
-    if (remote != null) remote.enabled = enabled;
+    if (remote == null) return;
+    webrtc.Helper.setVolume(_monitor ? 1.0 : 0.0, remote).catchError(
+        (Object e, StackTrace s) =>
+            Log.onError(e, s, content: "Voice DSP: microphone test playback"));
   }
 
   Future<void> dispose() => _closeAll(send, recv, mic);
