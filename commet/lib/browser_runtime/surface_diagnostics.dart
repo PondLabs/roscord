@@ -33,14 +33,26 @@ enum DiagnosticConsent { granted, denied }
 ///
 /// Uses FNV-1a 64-bit and renders as `profile-<16 hex>` so logs never carry
 /// the raw stable local account-record identity.
+///
+/// In [BigInt]: on the web an `int` is a JavaScript number with 53 bits, and
+/// the 64-bit literals this used to have stopped the whole web app from
+/// compiling. The result is the one the native `int` version gave, a signed
+/// 64-bit value, so identifiers already in logs keep matching.
 String hashProfileKey(String profileKey) {
-  var hash = 0xcbf29ce484222325;
+  var hash = _fnvOffset;
   for (final unit in profileKey.codeUnits) {
-    hash ^= unit;
-    hash = (hash * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF;
+    hash ^= BigInt.from(unit);
+    hash = (hash * _fnvPrime) & _mask64;
   }
-  return 'profile-${hash.toRadixString(16).padLeft(16, '0')}';
+  final signed = hash >= _signBit64 ? hash - _two64 : hash;
+  return 'profile-${signed.toRadixString(16).padLeft(16, '0')}';
 }
+
+final _fnvOffset = BigInt.parse('cbf29ce484222325', radix: 16);
+final _fnvPrime = BigInt.parse('100000001b3', radix: 16);
+final _two64 = BigInt.one << 64;
+final _signBit64 = BigInt.one << 63;
+final _mask64 = _two64 - BigInt.one;
 
 /// Records only the origin (scheme + host) of a URL, never the full URL,
 /// path, query, or fragment. Controlled fixture URLs map to their origin;
