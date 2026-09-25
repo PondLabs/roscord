@@ -3019,6 +3019,15 @@ void HostController::ApplyInputOnUi(
     if (pressed) {
       event.type = KEYEVENT_RAWKEYDOWN;
       host->SendKeyEvent(event);
+      // Text typed with Ctrl+Alt held came from AltGr (the text proves the
+      // layout produced it).  Chromium only inserts it flagged that way, so
+      // its characters carry AltGr instead of Ctrl+Alt, as in cefclient.
+      if ((modifiers & browser_surface::kWireModifierControl) != 0 &&
+          (modifiers & browser_surface::kWireModifierAlt) != 0) {
+        event.modifiers &= ~static_cast<uint32_t>(EVENTFLAG_CONTROL_DOWN |
+                                                  EVENTFLAG_ALT_DOWN);
+        event.modifiers |= EVENTFLAG_ALTGR_DOWN;
+      }
       for (const char16_t unit : typed) {
         // WM_CHAR carries the character itself as the key code.
         event.type = KEYEVENT_CHAR;

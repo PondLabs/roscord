@@ -247,13 +247,22 @@ def serve(html: bytes) -> tuple[http.server.HTTPServer, int]:
         def do_GET(self) -> None:  # noqa: N802 (http.server API)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(html)))
             self.end_headers()
             self.wfile.write(html)
 
         def log_message(self, *args: Any) -> None:
             pass
 
-    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    class Server(http.server.ThreadingHTTPServer):
+        # Chromium opens speculative connections it may never use, or drops;
+        # one thread per connection keeps an idle one from stalling the page.
+        daemon_threads = True
+
+        def handle_error(self, request: Any, client_address: Any) -> None:
+            pass
+
+    server = Server(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, server.server_address[1]
 
