@@ -34,7 +34,14 @@ jobs:
         run: |
           cd $PROJECT_PATH
           flutter doctor
-          flutter pub get
+          # pub clones the git dependencies from GitHub, and a runner that
+          # briefly cannot reach it should not fail the check.
+          for attempt in 1 2 3; do
+            flutter pub get && break
+            if [ "$attempt" = 3 ]; then exit 1; fi
+            echo "flutter pub get failed (attempt $attempt of 3), retrying in 30 s"
+            sleep 30
+          done
           rm -r lib/generated
           dart format -o none --show all --set-exit-if-changed .
         
