@@ -10,9 +10,10 @@ runtime download, no foreign engine, and no partially staged bundle may ship.
 
 The Flatpak files root (`build-dir/files` at build time, `/app` at runtime)
 carries the CEF payload in `cef/` (installed from the locked `linux-x64`
-runtime). The install flattens the archive's `Release/` contents into the
-payload root and keeps `Resources/` as a subdirectory; the Flutter bundle
-stays at `commet/bundle`:
+runtime). The payload is the staged runtime's `Release/` directory, which
+also holds the archive's `Resources/` (CEF on Linux loads ICU data, `.pak`
+resources and locales from the directory holding `libcef.so`). The Flutter
+bundle stays at `commet/bundle`:
 
 ```text
 <files>/cef/libcef.so
@@ -23,11 +24,11 @@ stays at `commet/bundle`:
 <files>/cef/libvulkan.so.1
 <files>/cef/v8_context_snapshot.bin
 <files>/cef/vk_swiftshader_icd.json
-<files>/cef/Resources/chrome_100_percent.pak
-<files>/cef/Resources/chrome_200_percent.pak
-<files>/cef/Resources/icudtl.dat
-<files>/cef/Resources/resources.pak
-<files>/cef/Resources/locales/en-US.pak (+ further staged locales)
+<files>/cef/chrome_100_percent.pak
+<files>/cef/chrome_200_percent.pak
+<files>/cef/icudtl.dat
+<files>/cef/resources.pak
+<files>/cef/locales/en-US.pak        (+ further staged locales)
 <files>/cef/fixtures/fixture.html
 <files>/commet/bundle/commet         # Flutter shell
 ```

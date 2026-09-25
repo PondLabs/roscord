@@ -3,6 +3,7 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  browser_surface
   connectivity_plus
   dart_ipc
   desktop_drop

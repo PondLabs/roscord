@@ -60,6 +60,9 @@ LINUX_FILES = {
     "LICENSE.txt": b"BSD license\n",
     "CREDITS.html": b"<html>credits</html>\n",
     "include/not-staged.h": b"not staged",
+    "include/cef_app.h": b"// app",
+    "cmake/cef_variables.cmake": b"# variables",
+    "libcef_dll/CMakeLists.txt": b"# wrapper",
 }
 
 
@@ -171,7 +174,7 @@ class CEFRuntimeToolTests(unittest.TestCase):
             staged = directory / "staged"
             project_root = directory / "project"
             project_root.mkdir()
-            (project_root / "client.dll").write_bytes(b"client")
+            (project_root / "cef_host.dll").write_bytes(b"client")
             result = cef_runtime.stage_runtime(
                 "windows-x64",
                 archives["windows-x64"],
@@ -182,8 +185,10 @@ class CEFRuntimeToolTests(unittest.TestCase):
             self.assertIn("Release/libcef.dll", result["files"])
             self.assertFalse((staged / "Release/bootstrapc.exe").exists())
             self.assertFalse((staged / "include/not-staged.h").exists())
-            self.assertTrue((staged / "Resources/locales/en-US.pak").exists())
-            self.assertEqual(result["bootstrap_project"][0]["path"], "client.dll")
+            self.assertTrue((staged / "Release/locales/en-US.pak").exists())
+            self.assertTrue((staged / "Release/icudtl.dat").exists())
+            self.assertFalse((staged / "Resources").exists())
+            self.assertEqual(result["bootstrap_project"][0]["path"], "cef_host.dll")
 
             metadata = directory / "metadata"
             unexpected = staged / "Release/unknown.dll"
@@ -200,6 +205,49 @@ class CEFRuntimeToolTests(unittest.TestCase):
             self.assertEqual(sbom["specVersion"], "1.5")
             self.assertTrue(any(component["name"] == "Chromium" for component in sbom["components"]))
 
+    def test_linux_stage_keeps_every_cef_input_next_to_libcef(self) -> None:
+        # On Linux CEF reads ICU data, the .pak files and locales/ from the
+        # directory holding libcef.so, so Resources/ is staged into Release/.
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            lock, archives = _fixture_lock(directory)
+            staged = directory / "staged"
+            result = cef_runtime.stage_runtime("linux-x64", archives["linux-x64"], staged, lock)
+            self.assertIn("Resources/icudtl.dat", result["files"])
+            for relative in (
+                "Release/libcef.so",
+                "Release/icudtl.dat",
+                "Release/resources.pak",
+                "Release/chrome_100_percent.pak",
+                "Release/locales/en-US.pak",
+                "LICENSE.txt",
+            ):
+                self.assertTrue((staged / relative).is_file(), relative)
+            self.assertFalse((staged / "Resources").exists())
+            metadata = directory / "metadata"
+            generated = cef_runtime.generate_metadata("linux-x64", staged, metadata, lock)
+            self.assertEqual(generated["manifest_sha256"], result["manifest_sha256"])
+            (staged / "Release/unknown.so").write_bytes(b"unexpected")
+            with self.assertRaises(cef_runtime.LockError):
+                cef_runtime.generate_metadata("linux-x64", staged, directory / "again", lock)
+
+    def test_staged_paths_move_resources_next_to_libcef(self) -> None:
+        # CEF loads ICU data, .pak files and locales from libcef's directory on
+        # both platforms (a Windows host without icudtl.dat there dies in
+        # InitializeICU).
+        self.assertEqual(
+            cef_runtime.staged_path("linux-x64", "Resources/locales/*.pak"),
+            "Release/locales/*.pak",
+        )
+        self.assertEqual(
+            cef_runtime.staged_path("windows-x64", "Resources/icudtl.dat"),
+            "Release/icudtl.dat",
+        )
+        self.assertEqual(
+            cef_runtime.staged_path("linux-x64", "Release/libcef.so"), "Release/libcef.so"
+        )
+        self.assertEqual(cef_runtime.staged_path("windows-x64", "LICENSE.txt"), "LICENSE.txt")
+
     def test_stage_sdk_includes_build_inputs_without_accepting_unlisted_files(self) -> None:
         with TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -211,6 +259,22 @@ class CEFRuntimeToolTests(unittest.TestCase):
             self.assertIn("Release/libcef.lib", result["files"])
             self.assertTrue((sdk / "Release/libcef.dll").exists())
             self.assertFalse((sdk / "Release/bootstrapc.exe").exists())
+
+    def test_linux_stage_sdk_holds_the_engine_build_inputs(self) -> None:
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            lock, archives = _fixture_lock(directory)
+            sdk = directory / "sdk"
+            result = cef_runtime.stage_sdk("linux-x64", archives["linux-x64"], sdk, lock)
+            for relative in (
+                "include/cef_app.h",
+                "cmake/cef_variables.cmake",
+                "libcef_dll/CMakeLists.txt",
+                "Release/libcef.so",
+                "Resources/icudtl.dat",
+            ):
+                self.assertIn(relative, result["files"])
+                self.assertTrue((sdk / relative).is_file(), relative)
 
     def test_archive_hash_and_raw_manifest_are_verified_independently(self) -> None:
         with TemporaryDirectory() as temporary:

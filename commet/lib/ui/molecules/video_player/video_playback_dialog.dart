@@ -10,7 +10,6 @@ import 'package:commet/debug/log.dart';
 import 'package:commet/main.dart' show browserRuntime;
 import 'package:commet/utils/links/link_utils.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -30,17 +29,23 @@ class VideoPlaybackDialog extends StatefulWidget {
   final bool autoplay;
 
   /// Whether this platform can render an [OfficialVideoEmbedSource] in the
-  /// dialog. Windows plays official embeds unconditionally through the CEF
-  /// [MediaEmbedAdapter] after the cutover; macOS, Android, and iOS keep
-  /// their existing web view. Linux has no web view for the official player
-  /// and the web build has no iframe path yet, so those open the link in
-  /// the browser.
-  static bool get supportsOfficialEmbeds =>
-      !kIsWeb && !Platform.isLinux && !Platform.isWindows;
+  /// dialog. Windows and Linux play official embeds through the bundled CEF
+  /// host and the [MediaEmbedAdapter] (a build without one, such as a
+  /// development build, cannot); macOS, Android, and iOS keep their web
+  /// view. The web build has no iframe path yet, so it opens the link in the
+  /// browser.
+  static bool get supportsOfficialEmbeds {
+    if (kIsWeb) return false;
+    if (Platform.isWindows || Platform.isLinux) return _cefBundled;
+    return true;
+  }
+
+  /// Looked up once: the bundle does not change while the app runs.
+  static final bool _cefBundled = isBundledBrowserRuntimeAvailable();
 
   /// Whether YouTube can play in the native player instead: mpv hands a
-  /// YouTube page to yt-dlp itself, when it is installed. This is the in-app
-  /// path on Linux, which has no web view for the official player.
+  /// YouTube page to yt-dlp itself, when it is installed. This is the Linux
+  /// fallback when the build bundles no CEF host.
   static bool get canPlayYouTubeNatively =>
       !kIsWeb && Platform.isLinux && _ytDlpInstalled;
 
@@ -419,9 +424,14 @@ class _OfficialVideoEmbedState extends State<_OfficialVideoEmbed> {
 
   @override
   Widget build(BuildContext context) {
-    // Windows official-video playback runs through the CEF MediaEmbedAdapter;
-    // every other platform keeps its existing web-view/external path.
-    if (mediaEmbedUsesCef(isWeb: kIsWeb, isWindows: Platform.isWindows)) {
+    // Windows and Linux official-video playback runs through the CEF
+    // MediaEmbedAdapter; every other platform keeps its web-view/external
+    // path.
+    if (mediaEmbedUsesCef(
+      isWeb: kIsWeb,
+      isWindows: Platform.isWindows,
+      isLinux: Platform.isLinux,
+    )) {
       return _CefOfficialVideoEmbed(
         video: widget.video,
         source: widget.source,
@@ -463,7 +473,7 @@ class _OfficialVideoEmbedState extends State<_OfficialVideoEmbed> {
     }
 
     // The remaining InAppWebView branch serves macOS, Android, and iOS only:
-    // Windows runs through CEF above, Linux and web fall into the external
+    // Windows and Linux run through CEF above and web falls into the external
     // path. The legacy Windows loopback workaround is gone with the old
     // Windows web view.
     return Stack(
@@ -592,16 +602,16 @@ class _EmbedErrorView extends StatelessWidget {
   }
 }
 
-/// Windows official-video playback through the CEF [MediaEmbedAdapter].
+/// Windows and Linux official-video playback through the CEF
+/// [MediaEmbedAdapter].
 ///
-/// Replaces the legacy Windows web-view branch: the same loopback-hosted
-/// wrapper page (origin and Referer preserved) opens as an embedded
-/// BrowserRuntime surface, the provider allowlist and navigation policy
-/// travel in the [SurfaceSpec], disallowed links become explicit external
-/// actions via `LinkUtils`, and closing the dialog closes the surface so no
-/// profile, host, or owned-window leaks. Loading, Retry, Close, and error
-/// chrome match the WebView branch. Linux, web, macOS, Android, and iOS
-/// never reach this widget (see [mediaEmbedUsesCef]).
+/// The loopback-hosted wrapper page (origin and Referer preserved) opens as
+/// an embedded BrowserRuntime surface, the provider allowlist and navigation
+/// policy travel in the [SurfaceSpec], disallowed links become explicit
+/// external actions via `LinkUtils`, and closing the dialog closes the
+/// surface so no profile, host, or owned-window leaks. Loading, Retry,
+/// Close, and error chrome match the WebView branch. Web, macOS, Android,
+/// and iOS never reach this widget (see [mediaEmbedUsesCef]).
 class _CefOfficialVideoEmbed extends StatefulWidget {
   const _CefOfficialVideoEmbed({
     required this.video,
@@ -626,9 +636,8 @@ class _CefOfficialVideoEmbedState extends State<_CefOfficialVideoEmbed> {
   StreamSubscription<SurfaceEvent>? _eventSubscription;
   Object? _error;
   int _revision = 0;
-  Size? _lastSize;
 
-  /// Shared Windows runtime from `main.dart`; null until the app initializes
+  /// Shared desktop runtime from `main.dart`; null until the app initializes
   /// it (or in tests), in which case playback degrades to the retryable
   /// error view with an explicit external-browser action instead of
   /// crashing.
@@ -764,29 +773,6 @@ class _CefOfficialVideoEmbedState extends State<_CefOfficialVideoEmbed> {
     super.dispose();
   }
 
-  void _forwardResize(Size size) {
-    final session = _session;
-    if (session == null || !session.isReady) return;
-    if (_lastSize == size) return;
-    _lastSize = size;
-    final dpr = MediaQuery.devicePixelRatioOf(context);
-    unawaited(
-      session.surface
-          .resize(size.width.round(), size.height.round(), dpr)
-          .then<void>((_) {}, onError: (Object _, StackTrace __) {}),
-    );
-  }
-
-  Future<void> _forwardPointer(
-    Future<void> Function() send,
-  ) async {
-    try {
-      await send();
-    } catch (_) {
-      // Input after close is a cancellation, not an error.
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final error = _error;
@@ -808,80 +794,13 @@ class _CefOfficialVideoEmbedState extends State<_CefOfficialVideoEmbed> {
       return const Center(child: CircularProgressIndicator());
     }
 
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        if (constraints.maxWidth > 0 && constraints.maxHeight > 0) {
-          _forwardResize(
-            Size(constraints.maxWidth, constraints.maxHeight),
-          );
-        }
-        // Pointer, wheel, and focus stay ordered through the surface so the
-        // provider player keeps its click-to-play contract.
-        return Listener(
-          behavior: HitTestBehavior.opaque,
-          onPointerDown: (event) {
-            final current = _session;
-            if (current == null) return;
-            unawaited(_forwardPointer(() => current.surface.setFocus(true)));
-            unawaited(
-              _forwardPointer(
-                () => current.surface.pointer(
-                  PointerKind.down,
-                  event.localPosition.dx,
-                  event.localPosition.dy,
-                  buttons: event.buttons,
-                ),
-              ),
-            );
-          },
-          onPointerMove: (event) {
-            final current = _session;
-            if (current == null) return;
-            unawaited(
-              _forwardPointer(
-                () => current.surface.pointer(
-                  PointerKind.move,
-                  event.localPosition.dx,
-                  event.localPosition.dy,
-                  buttons: event.buttons,
-                ),
-              ),
-            );
-          },
-          onPointerUp: (event) {
-            final current = _session;
-            if (current == null) return;
-            unawaited(
-              _forwardPointer(
-                () => current.surface.pointer(
-                  PointerKind.up,
-                  event.localPosition.dx,
-                  event.localPosition.dy,
-                ),
-              ),
-            );
-          },
-          onPointerSignal: (signal) {
-            if (signal is! PointerScrollEvent) return;
-            final current = _session;
-            if (current == null) return;
-            unawaited(
-              _forwardPointer(
-                () => current.surface.wheel(
-                  signal.localPosition.dx,
-                  signal.localPosition.dy,
-                  signal.scrollDelta.dx,
-                  signal.scrollDelta.dy,
-                ),
-              ),
-            );
-          },
-          child: EmbeddedBrowserView(
-            key: ValueKey(_revision),
-            surface: session.surface,
-          ),
-        );
-      },
+    // The view reports its size, forwards pointer, wheel and keyboard input
+    // in order (so the provider player keeps its click-to-play contract),
+    // and shows the page's cursor.
+    return EmbeddedBrowserView(
+      key: ValueKey(_revision),
+      surface: session.surface,
+      autofocus: true,
     );
   }
 }

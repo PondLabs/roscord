@@ -11,6 +11,8 @@ pub mod browser_profile;
 pub mod browser_runtime;
 pub mod browser_runtime_lifecycle;
 #[cfg(target_os = "linux")]
+pub mod cef_engine;
+#[cfg(target_os = "linux")]
 pub mod cef_host;
 #[cfg(target_os = "linux")]
 pub mod linux_browser_runtime;

@@ -37,16 +37,19 @@ const List<String> mediaEmbedInstagramOrigins = [
   'https://www.instagram.com',
 ];
 
-/// Whether Windows official-video playback routes through the CEF
-/// [MediaEmbedAdapter] instead of the platform web view.
+/// Whether official-video playback routes through the CEF
+/// [MediaEmbedAdapter] instead of a platform web view.
 ///
-/// Pure predicate over platform flags so it is unit-testable: only Windows
-/// uses CEF. Linux keeps its native yt-dlp/mpv path or a deliberate external
-/// browser, web keeps its iframe/external path, and macOS/Android/iOS keep
-/// their existing web-view paths. There is intentionally no Linux CEF branch
-/// and no standalone official-video presentation.
-bool mediaEmbedUsesCef({required bool isWeb, required bool isWindows}) =>
-    !isWeb && isWindows;
+/// Pure predicate over platform flags so it is unit-testable: the desktop
+/// platforms with a bundled CEF host (Windows and Linux) use CEF; web keeps
+/// its external path and macOS/Android/iOS keep their web views. There is
+/// no standalone official-video presentation.
+bool mediaEmbedUsesCef({
+  required bool isWeb,
+  required bool isWindows,
+  bool isLinux = false,
+}) =>
+    !isWeb && (isWindows || isLinux);
 
 /// Playback URL for an official embed, preserving the existing autoplay rule:
 /// YouTube forces `autoplay=1` when the dialog requested autoplay, every
@@ -342,6 +345,19 @@ class MediaEmbedSession {
         event.navigation.outcome == NavigationOutcome.external) {
       final uri = Uri.tryParse(event.navigation.url);
       if (uri != null && !_external.isClosed) _external.add(uri);
+    }
+    if (event is PopupRequestEvent) {
+      // "Watch on YouTube", channel links and the like open a new window.
+      // A click hands them to the browser (the host answers with an external
+      // navigation); anything the page opens on its own is refused.
+      unawaited(
+        surface
+            .resolvePopup(
+              event.requestId,
+              event.userGesture ? PopupAction.openExternal : PopupAction.deny,
+            )
+            .catchError((Object _) {}),
+      );
     }
     // Allowed navigations stay in-process; blocked/cancelled outcomes are
     // cancellations and deliberately produce no callback.

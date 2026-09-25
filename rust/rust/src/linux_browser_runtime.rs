@@ -1123,6 +1123,13 @@ fn remap_surface_event(
             sequence,
             change,
         },
+        SurfaceEvent::CursorChanged {
+            sequence, cursor, ..
+        } => SurfaceEvent::CursorChanged {
+            surface_id: logical_surface_id,
+            sequence,
+            cursor,
+        },
     }
 }
 

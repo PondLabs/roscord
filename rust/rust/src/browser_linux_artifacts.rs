@@ -8,9 +8,9 @@
 //! embedded as a Flutter texture and standalone in a roscord-owned window —
 //! through CEF windowless/off-screen rendering with CPU `OnPaint` copied
 //! into client-owned memory. Clean environments without WebKitGTK or host
-//! CEF still pass, and Linux official video remains the preserved
-//! native/external path (yt-dlp/mpv or a deliberate external browser), never
-//! a CEF surface.
+//! CEF still pass, and Linux official video plays the provider's own embed
+//! through the bundled CEF host, like Windows; only a build without CEF
+//! falls back to yt-dlp/mpv or a deliberate external browser.
 //!
 //! This module owns the pure qualification policy; the Linux `cef_host`
 //! enforces the staged-payload and sandbox rules at launch (`validate_cef_root`
@@ -125,9 +125,11 @@ pub const SANDBOX_BYPASS_FLAGS: &[&str] = &[
     "--disable-namespace-sandbox",
 ];
 
-/// Linux official video remains the preserved native/external path, never a
-/// CEF surface.
-pub const LINUX_OFFICIAL_VIDEO_PATH: &str = "native-yt-dlp-mpv-or-deliberate-external";
+/// Linux official video plays the provider's embed in a CEF surface.
+pub const LINUX_OFFICIAL_VIDEO_PATH: &str = "cef-official-embed";
+
+/// What a build without a bundled CEF host does with official video instead.
+pub const LINUX_OFFICIAL_VIDEO_FALLBACK: &str = "native-yt-dlp-mpv-or-deliberate-external";
 
 /// Parses a released native package id. Matching is exact and lowercase so
 /// an unknown package cannot silently qualify as a released artifact.
@@ -350,16 +352,16 @@ pub fn assert_clean_environment(
     Ok(())
 }
 
-/// Linux official video never routes through CEF.
+/// Linux official video routes through CEF when the build bundles it.
 pub fn linux_official_video_uses_cef() -> bool {
-    false
+    true
 }
 
-/// Proves the preserved native/external official-video path.
-pub fn assert_linux_video_preserved(uses_cef: bool) -> Result<(), RuntimeError> {
-    if uses_cef {
+/// Proves Linux official video plays through the bundled CEF host.
+pub fn assert_linux_video_uses_cef(uses_cef: bool) -> Result<(), RuntimeError> {
+    if !uses_cef {
         return Err(RuntimeError::InvalidCommand(
-            "Linux official video remains the preserved native/external path".into(),
+            "Linux official video plays through the bundled CEF host".into(),
         ));
     }
     Ok(())
@@ -526,13 +528,14 @@ mod tests {
     }
 
     #[test]
-    fn linux_official_video_remains_the_preserved_native_external_path() {
+    fn linux_official_video_plays_through_the_bundled_cef_host() {
+        assert_eq!(LINUX_OFFICIAL_VIDEO_PATH, "cef-official-embed");
         assert_eq!(
-            LINUX_OFFICIAL_VIDEO_PATH,
+            LINUX_OFFICIAL_VIDEO_FALLBACK,
             "native-yt-dlp-mpv-or-deliberate-external"
         );
-        assert!(!linux_official_video_uses_cef());
-        assert!(assert_linux_video_preserved(false).is_ok());
-        assert!(assert_linux_video_preserved(true).is_err());
+        assert!(linux_official_video_uses_cef());
+        assert!(assert_linux_video_uses_cef(true).is_ok());
+        assert!(assert_linux_video_uses_cef(false).is_err());
     }
 }

@@ -1,9 +1,11 @@
 # Native Linux embedded Matrix surfaces
 
-Native Linux Matrix widgets render inside Flutter on both required compositor
-cells (native X11 and native Wayland) through one shared presenter: CEF
-windowless/off-screen rendering with CPU `OnPaint` copied into client-owned
-memory and presented as a Flutter texture.
+Native Linux Matrix widgets and official videos render inside Flutter on
+both required compositor cells (native X11 and native Wayland) through one
+shared presenter: CEF windowless/off-screen rendering, with CPU `OnPaint`
+frames published through a shared-memory frame ring and presented as a
+Flutter texture. `docs/cef-browser-runtime-hosts.md` describes the host and
+the ring.
 
 ## Compositor cells
 
@@ -40,10 +42,11 @@ Command behavior matches Windows command for command:
 - navigation policy (allowed origins, loopback, external routing) is shared,
   so undeclared URLs stay blocked on both platforms.
 
-Frame-ready events coalesce to the newest client-owned reference while every
-other control event is preserved in order, matching the Windows texture
-adapter. Frames carry size, stride, format, and sequence and are never CEF
-pointers or borrowed CEF buffers.
+Frame-ready events coalesce to the newest frame reference while every other
+control event is preserved in order, matching the Windows texture adapter.
+Frames carry the ring name, slot, size, stride, format, and sequence, and are
+never CEF pointers or borrowed CEF buffers. The host runs Chromium with the
+headless Ozone platform, so rendering needs neither X11 nor Wayland.
 
 ## Forced CPU rendering
 

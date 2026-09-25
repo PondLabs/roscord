@@ -18,8 +18,8 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "PondLabs"
       VALUE "FileDescription", "roscord CEF browser host client"
-      VALUE "InternalName", "client.dll"
-      VALUE "OriginalFilename", "client.dll"
+      VALUE "InternalName", "cef_host.dll"
+      VALUE "OriginalFilename", "cef_host.dll"
       VALUE "ProductName", "roscord"
       VALUE "ProductVersion", "1.0.0.0"
     END

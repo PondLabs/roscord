@@ -45,7 +45,9 @@ def _build_qualified_fixture(directory: Path):
             # Archive-root notice inputs ship as generated notices, mirroring
             # the Flatpak /app install layout.
             continue
-        source = staged.joinpath(*PurePosixPath(relative).parts)
+        source = staged.joinpath(
+            *PurePosixPath(cef_runtime.staged_path("linux-x64", relative)).parts
+        )
         target = payload.joinpath(*PurePosixPath(_payload_name(relative)).parts)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
@@ -110,7 +112,7 @@ class QualifyFlatpakArtifactTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             directory = Path(temporary)
             lock, bundle, metadata, manifest = _build_qualified_fixture(directory)
-            (bundle / "cef" / "Resources" / "locales" / "en-US.pak").unlink()
+            (bundle / "cef" / "locales" / "en-US.pak").unlink()
             with self.assertRaises(QualificationError):
                 qualify_flatpak_artifact.qualify(bundle, metadata, lock, manifest)
 

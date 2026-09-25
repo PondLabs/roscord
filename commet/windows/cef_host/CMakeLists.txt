@@ -21,10 +21,10 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CEF_ROOT}/cmake")
 # CEF builds libcef_dll_wrapper against the static CRT (/MT) by default, but
-# client.dll uses the dynamic CRT like the rest of the Flutter build, and the
-# two cannot be linked together.
+# cef_host.dll uses the dynamic CRT like the rest of the Flutter build, and
+# the two cannot be linked together.
 set(CEF_RUNTIME_LIBRARY_FLAG "/MD" CACHE STRING
-  "CRT flag for the CEF wrapper, matching client.dll" FORCE)
+  "CRT flag for the CEF wrapper, matching cef_host.dll" FORCE)
 find_package(CEF REQUIRED)
 
 # libcef_dll_wrapper is the only CEF library linked by the client DLL.  The
@@ -48,8 +48,11 @@ add_library(cef_host_client SHARED
   cef_host.rc
 )
 
+# A renamed bootstrap.exe loads the DLL named after itself from its own
+# directory (cef_host.exe -> cef_host.dll); `--module` only applies while the
+# executable keeps the name bootstrap.exe.
 set_target_properties(cef_host_client PROPERTIES
-  OUTPUT_NAME "client"
+  OUTPUT_NAME "cef_host"
   PREFIX ""
   SUFFIX ".dll"
 )
@@ -72,6 +75,9 @@ target_compile_options(cef_host_client PRIVATE /W4 /WX /EHsc /wd4100
 target_include_directories(cef_host_client PRIVATE
   "${CEF_ROOT}"
   "${CEF_ROOT}/include"
+  # Frame ring, input and cursor helpers shared with the Linux engine and the
+  # app's browser_surface plugin.
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../../browser_surface/native"
 )
 # libcef.lib is the import library for libcef.dll, which implements the C API
 # the wrapper calls.
@@ -84,7 +90,7 @@ target_link_libraries(cef_host_client PRIVATE
 )
 
 # Keep a stable logical target name for release scripts and CI.  The output is
-# client.dll because bootstrap.exe loads that exact module name.
+# cef_host.dll because the bootstrap, renamed cef_host.exe, loads that name.
 add_custom_target(cef_host DEPENDS cef_host_client)
 
 set(CEF_RELEASE_DIR "${CEF_ROOT}/Release")
@@ -97,19 +103,16 @@ add_custom_command(TARGET cef_host_client POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${CEF_RELEASE_DIR}/bootstrap.exe"
     "$<TARGET_FILE_DIR:cef_host_client>/cef_host.exe"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "$<TARGET_FILE:cef_host_client>"
-    "$<TARGET_FILE_DIR:cef_host_client>/client.dll"
-  COMMENT "Staging the signed CEF bootstrap and roscord client DLL"
+  COMMENT "Staging the CEF bootstrap next to the roscord client DLL"
   VERBATIM
 )
 
-# CEF's standard distribution keeps the Release/Resources split.  Copying the
-# runtime at install time preserves that layout and prevents a system CEF lookup.
+# Copying the locked runtime next to the host at install time prevents a
+# system CEF lookup.
 #
 # The Flutter runner's install prefix is $<TARGET_FILE_DIR:commet>, so, like
 # the runner's own rules, destinations are absolute paths under it; relative
-# ones would resolve against the unexpanded expression.  Only client.dll is
+# ones would resolve against the unexpanded expression.  Only cef_host.dll is
 # installed, not its import library, since the payload is allow-listed.
 set(CEF_HOST_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/cef_host")
 install(FILES "$<TARGET_FILE:cef_host_client>" DESTINATION "${CEF_HOST_INSTALL_DIR}")
@@ -124,8 +127,11 @@ install(DIRECTORY "${CEF_RELEASE_DIR}/" DESTINATION "${CEF_HOST_INSTALL_DIR}"
   PATTERN "*.pak"
   PATTERN "bootstrap.exe" EXCLUDE
 )
+# CEF loads icudtl.dat, the .pak files and locales/ from the directory that
+# holds libcef.dll (without ICU data it dies in InitializeICU), so the
+# archive's Resources/ lands next to it.
 install(DIRECTORY "${CEF_RESOURCES_DIR}/"
-  DESTINATION "${CEF_HOST_INSTALL_DIR}/Resources")
+  DESTINATION "${CEF_HOST_INSTALL_DIR}")
 install(FILES
   "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
   "${CMAKE_CURRENT_SOURCE_DIR}/fixture.html"

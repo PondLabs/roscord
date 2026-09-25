@@ -419,15 +419,29 @@ pub enum InputEvent {
         kind: PointerKind,
         x: f64,
         y: f64,
+        /// Flutter button bitmask (1 primary, 2 secondary, 4 middle).  For
+        /// `down` and `up` it names the button that changed; for moves it is
+        /// the set held right now.
         buttons: u32,
         delta_x: f64,
         delta_y: f64,
+        /// Keyboard modifiers held during the event; same bits as
+        /// [`InputEvent::Keyboard`].
+        #[serde(default)]
+        modifiers: u32,
     },
+    /// A key press or release.  `key` and `code` are W3C KeyboardEvent
+    /// values; `modifiers` bits are 1 shift, 2 control, 4 alt, 8 meta.
+    /// `text` is what the press typed, as the platform's keyboard layout
+    /// produced it; absent for releases, shortcuts and keys that type
+    /// nothing.
     Keyboard {
         key: String,
         code: String,
         modifiers: u32,
         pressed: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
     },
     Ime {
         phase: ImePhase,
@@ -693,6 +707,11 @@ pub struct FrameReference {
     stride: u32,
     format: PixelFormat,
     sequence: u64,
+    /// Name of the shared-memory frame ring holding `slot`: a POSIX shm name
+    /// on Linux, a file-mapping name on Windows.  Absent for fixture frames
+    /// that have no pixels behind them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    buffer: Option<String>,
 }
 
 impl FrameReference {
@@ -724,7 +743,29 @@ impl FrameReference {
             stride,
             format,
             sequence,
+            buffer: None,
         })
+    }
+
+    /// Names the shared-memory ring that holds this frame's pixels.
+    pub fn with_buffer(mut self, buffer: impl Into<String>) -> Result<Self, RuntimeError> {
+        let buffer = buffer.into();
+        if buffer.is_empty()
+            || buffer.len() > 255
+            || buffer
+                .chars()
+                .any(|character| character.is_control() || character.is_whitespace())
+        {
+            return Err(RuntimeError::InvalidCommand(
+                "frame buffer name is invalid".into(),
+            ));
+        }
+        self.buffer = Some(buffer);
+        Ok(self)
+    }
+
+    pub fn buffer(&self) -> Option<&str> {
+        self.buffer.as_deref()
     }
 
     pub fn slot(&self) -> u32 {
@@ -935,6 +976,12 @@ pub enum SurfaceEvent {
         sequence: u64,
         change: WindowChange,
     },
+    /// The page's mouse cursor changed; `cursor` is a CSS cursor keyword.
+    CursorChanged {
+        surface_id: SurfaceId,
+        sequence: u64,
+        cursor: String,
+    },
 }
 
 impl SurfaceEvent {
@@ -951,7 +998,8 @@ impl SurfaceEvent {
             | Self::DownloadRequest { surface_id, .. }
             | Self::ClipboardRequest { surface_id, .. }
             | Self::UploadRequest { surface_id, .. }
-            | Self::WindowChanged { surface_id, .. } => *surface_id,
+            | Self::WindowChanged { surface_id, .. }
+            | Self::CursorChanged { surface_id, .. } => *surface_id,
         }
     }
 
@@ -968,7 +1016,8 @@ impl SurfaceEvent {
             | Self::DownloadRequest { sequence, .. }
             | Self::ClipboardRequest { sequence, .. }
             | Self::UploadRequest { sequence, .. }
-            | Self::WindowChanged { sequence, .. } => *sequence,
+            | Self::WindowChanged { sequence, .. }
+            | Self::CursorChanged { sequence, .. } => *sequence,
         }
     }
 
@@ -1493,7 +1542,7 @@ fn validate_url(url: &str) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-fn url_origin(url: &str) -> Option<String> {
+pub(crate) fn url_origin(url: &str) -> Option<String> {
     let (raw_scheme, rest) = url.split_once("://")?;
     let scheme = raw_scheme.to_ascii_lowercase();
     if !matches!(scheme.as_str(), "http" | "https" | "commet") {
@@ -1642,6 +1691,23 @@ mod tests {
             SurfacePolicy::new(["https://widget.test".to_owned()], std::iter::empty()).unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn key_presses_carry_typed_text_only_when_something_was_typed() {
+        let typed: InputEvent = serde_json::from_value(json!({
+            "type": "keyboard",
+            "payload": {"key": "@", "code": "KeyQ", "modifiers": 6, "pressed": true, "text": "@"},
+        }))
+        .unwrap();
+        assert!(matches!(&typed, InputEvent::Keyboard { text: Some(text), .. } if text == "@"));
+        let release: InputEvent = serde_json::from_value(json!({
+            "type": "keyboard",
+            "payload": {"key": "q", "code": "KeyQ", "modifiers": 0, "pressed": false},
+        }))
+        .unwrap();
+        assert!(matches!(release, InputEvent::Keyboard { text: None, .. }));
+        assert!(serde_json::to_value(&release).unwrap()["payload"].get("text").is_none());
     }
 
     #[test]
