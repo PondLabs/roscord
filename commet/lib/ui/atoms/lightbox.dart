@@ -86,6 +86,11 @@ class Lightbox extends StatefulWidget {
 
 class _LightboxState extends State<Lightbox> with TickerProviderStateMixin {
   double aspectRatio = 1;
+
+  /// False for an image the browser draws as an <img> element (a host that
+  /// sends no CORS headers): its size can't be read, so it is fitted whole
+  /// into the default square instead of cropped to it.
+  bool knowsImageSize = true;
   bool dismissing = false;
   final controller = TransformationController();
   bool loadingHighQuality = false;
@@ -190,7 +195,8 @@ class _LightboxState extends State<Lightbox> with TickerProviderStateMixin {
   void getImageInfo() async {
     var image = await getImage();
     setState(() {
-      aspectRatio = image.width / image.height;
+      knowsImageSize = image != null;
+      if (image != null) aspectRatio = image.width / image.height;
     });
 
     shouldRotate();
@@ -245,14 +251,18 @@ class _LightboxState extends State<Lightbox> with TickerProviderStateMixin {
     }
   }
 
-  Future<ui.Image> getImage() {
-    Completer<ui.Image> completer = Completer<ui.Image>();
+  Future<ui.Image?> getImage() {
+    Completer<ui.Image?> completer = Completer<ui.Image?>();
 
     displayImage!
         .resolve(const ImageConfiguration())
         .addListener(ImageStreamListener((info, synchronousCall) {
-      if (!completer.isCompleted) {
+      if (completer.isCompleted) return;
+      try {
         completer.complete(info.image);
+      } on UnsupportedError {
+        // An <img> element on web has no pixels to hand over.
+        completer.complete(null);
       }
     }));
     return completer.future;
@@ -305,7 +315,9 @@ class _LightboxState extends State<Lightbox> with TickerProviderStateMixin {
                                                   fit: StackFit.expand,
                                                   children: [
                                                     Image(
-                                                      fit: BoxFit.cover,
+                                                      fit: knowsImageSize
+                                                          ? BoxFit.cover
+                                                          : BoxFit.contain,
                                                       image: displayImage!,
                                                       isAntiAlias: true,
                                                       filterQuality:
