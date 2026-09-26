@@ -1,6 +1,6 @@
-# Instagram reels in the chat
+# Instagram reels and posts in the chat
 
-A reel link (`instagram.com/reel/<code>`, `/reels/<code>`, `/<user>/reel/<code>`, `/p/<code>`, or the ddinstagram, kkinstagram and instagramez mirrors) previews as a video card. The card plays in the video dialog. `InstagramProvider` (`commet/lib/client/components/video_embed/providers/instagram_provider.dart`) resolves it.
+A reel link (`instagram.com/reel/<code>`, `/reels/<code>`, `/<user>/reel/<code>`, `/p/<code>`, or the ddinstagram, kkinstagram and instagramez mirrors) previews as a video card. The card plays in the video dialog. A photo or carousel post previews as its photos. `InstagramProvider` (`commet/lib/client/components/video_embed/providers/instagram_provider.dart`) resolves it.
 
 ## Native: play the MP4 ourselves
 
@@ -20,8 +20,24 @@ The MP4 plays without cookies or a Referer. It answers range requests and sends 
 Outcomes:
 
 - **Video post:** a `NativeVideoSource`, played by media_kit with seeking, volume and fullscreen.
-- **Photo or carousel post** (`is_video: false`): no video. The link previews as a page from the homeserver's og: tags.
-- **No post data** (private, removed, rate-limited, offline, or Instagram changed the page): the official embed below.
+- **Photo or carousel post:** no video. The link previews as its photos (see below).
+- **No post (private, removed, rate-limited, offline, or Instagram changed the page):** the official embed below.
+
+## Photo posts
+
+A single photo's embed page carries no post data. It sends `"contextJSON":null` and draws the post as plain markup instead:
+
+- `.Embed[data-media-type="GraphImage"]`
+- the photo: `img.EmbeddedMediaImage`, whose `srcset` also lists square crops after the copies that keep the photo's shape
+- the frame: `.EmbedFrame`, whose `padding-bottom` is the photo's height over its width
+- `.UsernameText`
+- `.Caption`: the author's name, then the text, with `<br>` line breaks and hashtags as links
+
+`InstagramMedia.fromEmbedPage` reads that markup when the JSON is missing. It takes the widest `srcset` copy up to 1080 pixels wide, because `src` is the original and can be 4000 pixels across. A carousel (`GraphSidecar`) does carry the JSON. Its photos are the `display_url` of each `edge_sidecar_to_children` node, and a video slide shows as its cover.
+
+`InstagramProvider.resolvePost` turns either form into a `PhotoPost`, the same shape an X status with photos has. The preview shows the photo, or a grid of the first four photos with every photo in the lightbox. The title is `@username` and the text is the caption. The photo URLs are signed like the video's (`oe=`), but a preview loads them once, and they load without cookies or a Referer.
+
+On web, where the page cannot be read, a `/p/` link stays an official embed card titled "Instagram Post", because it may hold photos or a video.
 
 ## Web and fallback: Instagram's own embed
 
@@ -35,11 +51,13 @@ On web the card's thumbnail and title come from the homeserver's URL preview, wh
 
 ## When it breaks
 
-The embed page's JSON is not an API, and Instagram can change it. When it does, reels fall back to the official embed rather than failing. The fixture in `commet/unit_test/fixtures/instagram_reel_embed.html` is trimmed from a real page, so compare it against a fresh one:
+The embed page's JSON and markup are not an API, and Instagram can change them. When it does, posts fall back to the official embed rather than failing. The fixtures in `commet/unit_test/fixtures/` (`instagram_reel_embed.html`, `instagram_photo_embed.html`) are trimmed from real pages, so compare them against fresh ones:
 
 ```sh
 curl -s -H 'Sec-Fetch-Mode: navigate' \
   https://www.instagram.com/reel/C2X_BmsPg5d/embed/captioned/ | grep -c contextJSON
+curl -s -H 'Sec-Fetch-Mode: navigate' \
+  https://www.instagram.com/p/BsOGulcndj-/embed/captioned/ | grep -c EmbeddedMediaImage
 ```
 
 yt-dlp's Instagram extractor reads the same page as its fallback, so its changelog is a good early warning.
