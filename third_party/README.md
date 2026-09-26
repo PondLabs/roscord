@@ -72,7 +72,11 @@ Two upstream flutter-webrtc behaviours on desktop that bit us (see
 `docs/voice-audio-processing.md`, "Signal chain"): `getUserMedia` selects
 the input only from `optional: [{sourceId}]` and records from device 0
 otherwise, and `MediaTrackForId` finds local tracks before received ones
-with the same id.
+with the same id. A third comes from libwebrtc underneath: its audio device
+module keeps the microphone as a position in the device list and looks it
+up again whenever recording starts, which it does on every unmute. The
+`// COMMET` change in `common/cpp` (`ReselectRecordingDevice`) selects the
+microphone again by id before a local audio track is enabled.
 The iOS and macOS podspecs pin `WebRTC-SDK` to `150.7871.01`, the version the
 vendored `flutter-webrtc` pins (upstream livekit_client made the same move in
 2.13.0). CocoaPods installs a single copy of the pod, so if the two pins

@@ -223,7 +223,7 @@ void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
           sourceId ==
               SanitizeDeviceIdFromAudioBuffers(strRecordingName,
                                                strRecordingGuid)) {
-        base_->audio_device_->SetRecordingDevice(i);
+        SelectRecordingDevice(i, sourceId);  // COMMET
       }
     }
 
@@ -232,7 +232,7 @@ void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
                                                 strRecordingGuid);
       sourceId = SanitizeDeviceIdFromAudioBuffers(strRecordingName,
                                                   strRecordingGuid);
-      base_->audio_device_->SetRecordingDevice(0);
+      SelectRecordingDevice(0, sourceId);  // COMMET
     }
 
     char strPlayoutName[256];
@@ -513,7 +513,7 @@ void FlutterMediaStream::SelectAudioInput(
     std::string cur_device_id =
         SanitizeDeviceIdFromAudioBuffers(deviceName, deviceGuid);
     if (device_id != "" && device_id == cur_device_id) {
-      base_->audio_device_->SetRecordingDevice(i);
+      SelectRecordingDevice(i, cur_device_id);  // COMMET
       found = true;
       break;
     }
@@ -524,6 +524,43 @@ void FlutterMediaStream::SelectAudioInput(
     return;
   }
   result->Success();
+}
+
+// COMMET: desktop WebRTC stops recording while every sender is muted and
+// starts again on the unmute (MuteStream, stop-on-mute mode). Its audio
+// device module keeps the microphone as a position in the device list and
+// looks that position up again whenever it starts recording, so a device
+// added or removed during a mute (a webcam, a headset, a virtual device)
+// moved it onto another device, often a silent one, until the call ended.
+// SetRecordingDevice is queued on WebRTC's worker thread ahead of what
+// enabling the track queues there, so the unmute starts on the right one.
+void FlutterMediaStream::SelectRecordingDevice(uint16_t index,
+                                               const std::string& device_id) {
+  base_->recording_device_id_ = device_id;
+  base_->recording_device_index_ = index;
+  base_->audio_device_->SetRecordingDevice(index);
+}
+
+void FlutterMediaStream::ReselectRecordingDevice() {
+  const std::string device_id = base_->recording_device_id_;
+  if (device_id.empty()) {
+    return;
+  }
+  char name[256];
+  char guid[256];
+  const int count = base_->audio_device_->RecordingDevices();
+  for (uint16_t i = 0; i < count; i++) {
+    base_->audio_device_->RecordingDeviceName(i, name, guid);
+    if (SanitizeDeviceIdFromAudioBuffers(name, guid) != device_id) {
+      continue;
+    }
+    // Still where it was: nothing to do. Selecting it again while WebRTC
+    // records would restart the capture.
+    if (i != base_->recording_device_index_) {
+      SelectRecordingDevice(i, device_id);
+    }
+    return;
+  }
 }
 
 void FlutterMediaStream::MediaStreamGetTracks(

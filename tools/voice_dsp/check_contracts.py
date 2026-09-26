@@ -27,7 +27,7 @@ DF = "third_party/deep_filter"
 
 # `// COMMET` markers must never go down: a merge that loses one loses a
 # change. Raise these when you add markers.
-MARKER_FLOOR = {LK: 60, FW: 23, DF: 13}
+MARKER_FLOOR = {LK: 60, FW: 31, DF: 13}
 
 # Local changes noise suppression depends on, each as (file, pattern, why).
 MUST_CONTAIN = [
@@ -65,6 +65,8 @@ MUST_CONTAIN = [
      "the system mix reaches the speaker bleed filter"),
     (f"{FW}/common/cpp/include/flutter_webrtc.h", r"CommetSystemAudioReference commet_reference_;",
      "flutter-webrtc owns the system audio reference"),
+    (f"{FW}/common/cpp/src/flutter_webrtc.cc", r"ReselectRecordingDevice\(\);",
+     "an unmute records from the selected microphone, not from whatever took its place in the device list"),
     ("rust/rust/src/lib.rs", r"^pub use audio_dsp;",
      "the commet_dsp_* symbols ship inside librust_lib_commet"),
     ("rust/rust/Cargo.toml", r'^audio_dsp = \{ path = "\.\./audio_dsp" \}',

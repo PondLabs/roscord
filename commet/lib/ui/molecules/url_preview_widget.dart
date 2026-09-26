@@ -93,6 +93,15 @@ class _UrlPreviewWidgetState extends State<UrlPreviewWidget> {
 
   bool get isGallery => (widget.data?.images.length ?? 0) > 1;
 
+  // A link straight to an image has nothing to say besides the image, so it
+  // shows the image alone, like an image attachment, with no card around it.
+  bool get isBareImage =>
+      !hasBody &&
+      !isVideo &&
+      !isGallery &&
+      widget.data?.image != null &&
+      widget.data?.video == null;
+
   // Discord-style link embeds put a page's og:image on the right as a small
   // thumbnail, and reserve full media below the text for videos and photos.
   bool get isPageThumbnail =>
@@ -186,6 +195,8 @@ class _UrlPreviewWidgetState extends State<UrlPreviewWidget> {
 
   @override
   Widget build(BuildContext context) {
+    if (isBareImage) return _buildBareImage();
+
     final double maxWidth;
     final double maxHeight;
     if (isVideo) {
@@ -523,6 +534,31 @@ class _UrlPreviewWidgetState extends State<UrlPreviewWidget> {
     return AspectRatio(aspectRatio: aspectRatio, child: picture);
   }
 
+  /// Media-card scale, like photo posts. Small images keep their own size.
+  Widget _buildBareImage() {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          key: const ValueKey('url-preview-image'),
+          onTap: () => Lightbox.show(context, image: widget.data!.image),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 480, maxHeight: 480),
+            child: Image(
+              image: widget.data!.image!,
+              filterQuality: FilterQuality.medium,
+              fit: BoxFit.contain,
+              // The link led somewhere that isn't an image after all (a 403
+              // page, a dead link): show nothing rather than a broken image.
+              errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   /// A page's og:image, right-aligned and small, the way Discord frames
   /// link embeds with a thumbnail instead of a hero image.
   Widget _buildPageThumbnail() {
@@ -546,10 +582,12 @@ class _UrlPreviewWidgetState extends State<UrlPreviewWidget> {
 
   /// X's layout: 2 photos side by side, 3 as one large photo next to two
   /// stacked ones, 4 as a 2x2. Cells are cropped squares; each opens in the
-  /// lightbox on tap, like multi-image room messages.
+  /// lightbox on tap, like multi-image room messages. The lightbox pages
+  /// through every photo, including those an Instagram carousel has past
+  /// the fourth.
   Widget _buildPhotoGrid() {
     final photos = widget.data!.images.take(4).toList();
-    final gallery = [for (final photo in photos) photo.image];
+    final gallery = [for (final photo in widget.data!.images) photo.image];
 
     return LayoutBuilder(builder: (context, constraints) {
       const gap = _photoGridGap;

@@ -441,7 +441,14 @@ void FlutterWebRTC::HandleMethodCall(
     const EncodableValue enable = findEncodableValue(params, "enabled");
     RTCMediaTrack* track = MediaTrackForId(track_id);
     if (track != nullptr) {
-      track->set_enabled(GetValue<bool>(enable));
+      const bool enabled = GetValue<bool>(enable);
+      // COMMET: an unmute makes WebRTC start recording again; make sure it
+      // is from the selected microphone (ReselectRecordingDevice).
+      if (enabled && track->kind().std_string() == "audio" &&
+          local_tracks_.find(track_id) != local_tracks_.end()) {
+        ReselectRecordingDevice();
+      }
+      track->set_enabled(enabled);
     }
     result->Success();
   } else if (method_call.method_name().compare("trackDispose") == 0) {
