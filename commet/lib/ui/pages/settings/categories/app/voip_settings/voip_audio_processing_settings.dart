@@ -161,9 +161,16 @@ class _VoipAudioProcessingSettingsState
           desc:
               "Diagnostic line under the level meter: sample rate, whether noise suppression is running, gate state");
 
-  String get labelVoipDspOn => Intl.message("on",
-      name: "labelVoipDspOn",
-      desc: "Noise suppression state in the status line");
+  String get labelVoipDspOnDeepFilter => Intl.message("on (DeepFilterNet)",
+      name: "labelVoipDspOnDeepFilter",
+      desc:
+          "Noise suppression state in the status line when the DeepFilterNet model is running; DeepFilterNet is a name");
+
+  String get labelVoipDspOnBasic => Intl.message(
+      "on (RNNoise only, knocks and typing get through)",
+      name: "labelVoipDspOnBasic",
+      desc:
+          "Noise suppression state in the status line when only the simpler RNNoise suppressor runs; RNNoise is a name");
 
   String get labelVoipDspOff => Intl.message("off",
       name: "labelVoipDspOff",
@@ -329,7 +336,11 @@ class _VoipAudioProcessingSettingsState
     final rate = "${(report.sampleRate / 1000).toStringAsFixed(0)} kHz";
     final status = labelVoipDspStatus(
       rate,
-      report.noiseSuppressionActive ? labelVoipDspOn : labelVoipDspOff,
+      !report.noiseSuppressionActive
+          ? labelVoipDspOff
+          : report.deepFilterActive
+              ? labelVoipDspOnDeepFilter
+              : labelVoipDspOnBasic,
       report.speakerBleed
           ? labelVoipDspSpeakerBleed
           : report.gateOpen

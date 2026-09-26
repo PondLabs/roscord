@@ -370,15 +370,22 @@ fn a_remote_stream_bleeding_back_is_removed() {
 /// the VAD gate passes a video playing next to the microphone almost
 /// untouched. If this starts failing because the attenuation went up,
 /// something new is doing the job and the docs need updating.
+///
+/// Only speech is recorded. DeepFilterNet takes instrumental music for
+/// noise and removes some of it, between 5 and 17 dB of this fixture
+/// depending on what it heard before, so music is printed, not asserted
+/// (RNNoise alone: 2.6 dB, gate open 76 %).
 #[test]
 fn without_a_reference_loudspeaker_bleed_leaks() {
-    for (name, clean) in [("video dialogue", media_dialogue()), ("music", music(48_000 * 8))] {
-        let bleed = speaker_bleed(&clean, -34.0);
-        let capture = mix(&bleed, &floor_noise(bleed.len()));
-        let m = measure(&format!("{name} at -34 dBFS, no reference"), shipping_defaults(), &capture, Feeds::default());
-        assert!(m.attenuation_db() < 10.0, "{name}: {:.1} dB, better than recorded", m.attenuation_db());
-        assert!(m.gate_open > 0.5, "{name}: gate open {:.0}%, better than recorded", m.gate_open * 100.0);
-    }
+    let bleed = speaker_bleed(&media_dialogue(), -34.0);
+    let capture = mix(&bleed, &floor_noise(bleed.len()));
+    let m = measure("video dialogue at -34 dBFS, no reference", shipping_defaults(), &capture, Feeds::default());
+    assert!(m.attenuation_db() < 10.0, "{:.1} dB, better than recorded", m.attenuation_db());
+    assert!(m.gate_open > 0.5, "gate open {:.0}%, better than recorded", m.gate_open * 100.0);
+
+    let bleed = speaker_bleed(&music(48_000 * 8), -34.0);
+    let capture = mix(&bleed, &floor_noise(bleed.len()));
+    measure("music at -34 dBFS, no reference", shipping_defaults(), &capture, Feeds::default());
 }
 
 /// The tool there is without a reference: raise the input sensitivity

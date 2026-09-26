@@ -3,8 +3,11 @@
 //! One `Dsp` instance processes the local microphone in 10 ms blocks:
 //!
 //! 1. optional resample to 48 kHz (WebRTC may run its pipeline at 16 or 32 kHz),
-//! 2. RNNoise noise suppression (nnnoiseless), which also yields a speech
-//!    probability,
+//! 2. noise suppression by DeepFilterNet3 (`dfn`) and a 70 Hz high-pass
+//!    (`highpass`), with RNNoise (nnnoiseless) judging speech probability on
+//!    what they leave and, for opening the gate, on the microphone too;
+//!    RNNoise alone suppresses while the model is loading or when it cannot
+//!    run,
 //! 3. an input gate (manual threshold or VAD driven) plus a far-end ducker,
 //!    both told by `bleed` when the microphone holds nothing but what the
 //!    loudspeakers are playing,
@@ -21,25 +24,33 @@
 //! audio (the browser AudioWorklet) set `Params::input_scale` to 32768.
 //!
 //! The audio-thread entry points (`process_block`, `process_stream`,
-//! `feed_render`, `feed_reference`) never allocate after construction.
+//! `feed_render`, `feed_reference`) never allocate after construction,
+//! except inside DeepFilterNet's inference (see `dfn`).
 //! Parameters and the report are exchanged through atomics so the UI thread
 //! can poke at a running instance.
 
 pub mod bleed;
+pub mod dfn;
 pub mod ffi;
 pub mod gate;
+pub mod highpass;
 pub mod resample;
 
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use bleed::{BandLevel, BleedEstimator, Verdict};
+use dfn::DeepFilter;
 use gate::{BleedState, Gate, GateConfig, GateMode};
+use highpass::HighPass;
 use nnnoiseless::DenoiseState;
 use resample::Resampler;
 
 pub const FRAME_SIZE: usize = DenoiseState::FRAME_SIZE; // 480 samples = 10 ms at 48 kHz
 pub const NATIVE_RATE: usize = 48_000;
+/// The gate opens only when DeepFilterNet estimated speech this far above
+/// the noise in one of its last four blocks (`Dsp::gate_vad`).
+const OPEN_SNR_DB: f32 = 0.0;
 /// Rates WebRTC's APM can run at. Anything else is passed through untouched.
 pub const SUPPORTED_RATES: [usize; 3] = [16_000, 32_000, 48_000];
 /// Maximum number of samples a single `process_stream` call may pass.
@@ -94,6 +105,9 @@ pub const REPORT_FLAG_DUCKING: u32 = 1 << 3;
 pub const REPORT_FLAG_SPEAKER_BLEED: u32 = 1 << 4;
 /// System audio (`feed_reference`) arrived during the last block.
 pub const REPORT_FLAG_REFERENCE: u32 = 1 << 5;
+/// DeepFilterNet suppressed noise in the last block. Noise suppression
+/// without it is RNNoise alone.
+pub const REPORT_FLAG_DEEP_FILTER: u32 = 1 << 6;
 
 /// Snapshot for meters and debugging. Written by the audio thread, read by
 /// anyone.
@@ -126,6 +140,8 @@ struct Shared {
     gate_floor_db: AtomicU32,
     duck_depth_db: AtomicU32,
     duck_far_threshold_db: AtomicU32,
+    /// 0 once DeepFilterNet has been given up on (`Dsp::disable_deep_filter`).
+    deep_filter_allowed: AtomicU32,
 
     /// Loudest render / reference block since the capture side last looked,
     /// as `level_mailbox_encode`; 0 when nothing arrived.
@@ -175,6 +191,7 @@ impl Shared {
             gate_floor_db: AtomicU32::new(0),
             duck_depth_db: AtomicU32::new(0),
             duck_far_threshold_db: AtomicU32::new(0),
+            deep_filter_allowed: AtomicU32::new(1),
             render_mailbox: AtomicU32::new(0),
             render_band_mailbox: AtomicU32::new(0),
             reference_mailbox: AtomicU32::new(0),
@@ -313,9 +330,54 @@ fn scaled_level_dbfs(buf: &[f32], scale: f32) -> f32 {
     }
 }
 
+/// When DeepFilterNet's model is built. Building takes about half a second
+/// natively and allocates a lot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelLoad {
+    /// In the constructor.
+    Now,
+    /// On a thread of its own; RNNoise suppresses until the model is there.
+    /// For callers on a UI thread. The same as `Now` where there are no
+    /// threads (wasm).
+    Background,
+    /// Never: RNNoise alone.
+    Never,
+}
+
+/// A model built off the audio thread, or why it could not be.
+struct LoadedModel(Result<Box<DeepFilter>, String>);
+// SAFETY: tract's tensors are reference counted with `Rc`. The loading
+// thread builds the model, moves all of it into the slot and keeps no
+// reference; from then on one thread at a time owns it.
+unsafe impl Send for LoadedModel {}
+
 pub struct Dsp {
     shared: Shared,
+    /// Suppresses noise when the model is not running, and judges speech on
+    /// the model's output when it is.
     denoise: Box<DenoiseState<'static>>,
+    /// Judges speech on the microphone itself while the model suppresses:
+    /// the gate opens only when both instances hear speech.
+    denoise_raw: Box<DenoiseState<'static>>,
+    /// What noise suppression leaves below the voice (`highpass`).
+    highpass: HighPass,
+    deep_filter: Option<Box<DeepFilter>>,
+    /// The model's estimate of the speech-to-noise ratio of its last four
+    /// blocks, oldest first (`dfn::DeepFilter::process`).
+    recent_snr_db: [f32; 4],
+    /// Where a model loading in the background arrives.
+    pending_model: Option<Arc<Mutex<Option<LoadedModel>>>>,
+    /// Blocks the model still runs beside RNNoise before its output is used.
+    /// Its lookahead and overlap hold the last audio it heard: a model that
+    /// arrives mid-stream, is switched back on, or follows the capture to
+    /// another device would play that first.
+    deep_filter_warmup: u32,
+    /// Noise suppression was on for the last block.
+    suppressing: bool,
+    /// How long the model takes per block, to give way to RNNoise on a
+    /// machine too slow for it (`watch_deep_filter_cost`).
+    #[cfg(not(target_arch = "wasm32"))]
+    deep_filter_cost: Option<dfn::CostMeter>,
     gate: Gate,
     /// Bleed against WebRTC's playout and against the system mix.
     bleed_render: BleedEstimator,
@@ -336,6 +398,9 @@ pub struct Dsp {
     /// Scratch buffers at 48 kHz.
     scratch_in: Vec<f32>,
     scratch_out: Vec<f32>,
+    /// RNNoise's output while it only judges speech.
+    scratch_vad: Vec<f32>,
+    scratch_discard: Vec<f32>,
     /// Scratch at capture rate for the resampled-back result.
     scratch_back: Vec<f32>,
     // Streaming FIFO (used by `process_stream`).
@@ -348,10 +413,47 @@ pub struct Dsp {
 }
 
 impl Dsp {
+    /// A DSP with DeepFilterNet built in the constructor.
     pub fn new(params: Params) -> Box<Dsp> {
+        Dsp::with_model(params, ModelLoad::Now)
+    }
+
+    pub fn with_model(params: Params, load: ModelLoad) -> Box<Dsp> {
+        let (deep_filter, pending_model) = match load {
+            ModelLoad::Never => (None, None),
+            ModelLoad::Now => (DeepFilter::new().ok().map(Box::new), None),
+            ModelLoad::Background if cfg!(target_arch = "wasm32") => {
+                (DeepFilter::new().ok().map(Box::new), None)
+            }
+            ModelLoad::Background => {
+                let slot = Arc::new(Mutex::new(None));
+                let loaded = Arc::clone(&slot);
+                let spawned = std::thread::Builder::new()
+                    .name("commet-dsp-model".into())
+                    .spawn(move || {
+                        let model = LoadedModel(DeepFilter::new().map(Box::new));
+                        if let Ok(mut s) = loaded.lock() {
+                            *s = Some(model);
+                        }
+                    });
+                match spawned {
+                    Ok(_) => (None, Some(slot)),
+                    Err(_) => (DeepFilter::new().ok().map(Box::new), None),
+                }
+            }
+        };
         let mut dsp = Box::new(Dsp {
             shared: Shared::new(&params),
             denoise: DenoiseState::new(),
+            denoise_raw: DenoiseState::new(),
+            highpass: HighPass::new(highpass::CUTOFF_HZ, NATIVE_RATE as f32),
+            deep_filter,
+            recent_snr_db: [f32::NEG_INFINITY; 4],
+            pending_model,
+            deep_filter_warmup: 0,
+            suppressing: true,
+            #[cfg(not(target_arch = "wasm32"))]
+            deep_filter_cost: None,
             gate: Gate::new(NATIVE_RATE),
             bleed_render: BleedEstimator::new(),
             bleed_reference: BleedEstimator::new(),
@@ -366,6 +468,8 @@ impl Dsp {
             down: None,
             scratch_in: vec![0.0; FRAME_SIZE],
             scratch_out: vec![0.0; FRAME_SIZE],
+            scratch_vad: vec![0.0; FRAME_SIZE],
+            scratch_discard: vec![0.0; FRAME_SIZE],
             scratch_back: vec![0.0; FRAME_SIZE],
             stream_in: vec![0.0; FRAME_SIZE],
             stream_in_len: 0,
@@ -380,6 +484,7 @@ impl Dsp {
         let warm_in = [0.0f32; FRAME_SIZE];
         for _ in 0..3 {
             dsp.denoise.process_frame(&mut warm, &warm_in);
+            dsp.denoise_raw.process_frame(&mut warm, &warm_in);
         }
         dsp.shared.sample_rate.store(NATIVE_RATE as u32, Ordering::Relaxed);
         dsp
@@ -397,8 +502,113 @@ impl Dsp {
         self.shared.report()
     }
 
+    /// Whether DeepFilterNet is built and allowed to run (it suppresses
+    /// whenever noise suppression is on).
+    pub fn has_deep_filter(&self) -> bool {
+        self.deep_filter.is_some() && self.shared.deep_filter_allowed.load(Ordering::Relaxed) != 0
+    }
+
+    /// Times DeepFilterNet from now on and hands noise suppression to
+    /// RNNoise for good if it takes more than `dfn::BUDGET` per block on
+    /// average: the capture thread would miss its deadlines. For real-time
+    /// callers (the app); a test or a tool on a busy machine would only lose
+    /// the model it means to measure.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn watch_deep_filter_cost(&mut self) {
+        self.deep_filter_cost = Some(dfn::CostMeter::new());
+    }
+
+    /// Hands noise suppression to RNNoise alone for good, for a caller that
+    /// finds the model too slow (the browser worker times it). Any thread.
+    pub fn disable_deep_filter(&self) {
+        self.shared.deep_filter_allowed.store(0, Ordering::Relaxed);
+    }
+
+    /// Picks up a model that finished loading in the background. Never
+    /// waits: if the loading thread holds the slot, next block.
+    fn collect_model(&mut self) {
+        let Some(slot) = self.pending_model.as_ref() else { return };
+        let loaded = match slot.try_lock() {
+            Ok(mut s) => s.take(),
+            Err(_) => None,
+        };
+        if let Some(LoadedModel(result)) = loaded {
+            self.deep_filter = result.ok();
+            self.pending_model = None;
+            if self.shared.frames.load(Ordering::Relaxed) > 0 {
+                self.deep_filter_warmup = dfn::WARMUP_BLOCKS;
+            }
+        }
+    }
+
+    /// DeepFilterNet on `scratch_in`, into `scratch_out` once warmed up (or
+    /// `scratch_vad` while warming up). Whether `scratch_out` holds its
+    /// output.
+    fn run_deep_filter(&mut self) -> bool {
+        if self.shared.deep_filter_allowed.load(Ordering::Relaxed) == 0 {
+            return false;
+        }
+        let Some(model) = self.deep_filter.as_mut() else { return false };
+        #[cfg(not(target_arch = "wasm32"))]
+        let started = std::time::Instant::now();
+        let warming = self.deep_filter_warmup > 0;
+        let out = if warming { &mut self.scratch_vad } else { &mut self.scratch_out };
+        let snr_db = model.process(&self.scratch_in, out);
+        let ok = snr_db.is_some();
+        self.recent_snr_db.rotate_left(1);
+        self.recent_snr_db[3] = snr_db.unwrap_or(f32::NEG_INFINITY);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(cost) = self.deep_filter_cost.as_mut() {
+            if cost.too_slow(started.elapsed()) {
+                self.disable_deep_filter();
+            }
+        }
+        if !ok {
+            self.disable_deep_filter();
+            return false;
+        }
+        if warming {
+            self.deep_filter_warmup -= 1;
+            return false;
+        }
+        true
+    }
+
+    /// The model's speech-to-noise estimate of the last block, in dB; `None`
+    /// when it did not run. For tools and tests: the report has no room.
+    pub fn speech_to_noise_db(&self) -> Option<f32> {
+        Some(self.recent_snr_db[3]).filter(|v| v.is_finite())
+    }
+
+    /// The speech probability the gate goes by while the model suppresses.
+    ///
+    /// Staying open takes RNNoise's probability on what the model left:
+    /// on the raw microphone RNNoise calls a knock on the table speech.
+    /// Opening takes more, because what the model leaves of some noises
+    /// sounds like speech to RNNoise too (other people's chatter made
+    /// cleaner, the flicker left of a loud fan): RNNoise on the microphone
+    /// has to hear speech as well, and the model has to have estimated
+    /// speech above the noise in one of its last four blocks (its estimate
+    /// runs 30 ms ahead of its output, which covers an onset). Measured
+    /// against 18 noises (`tests/background_noise.rs`).
+    fn gate_vad(&self, clean: f32, raw: Option<f32>) -> f32 {
+        let Some(raw) = raw else { return clean };
+        if self.gate.is_open() {
+            return clean;
+        }
+        let speech_ahead = self.recent_snr_db.iter().any(|&db| db > OPEN_SNR_DB);
+        if speech_ahead {
+            clean.min(raw)
+        } else {
+            0.0
+        }
+    }
+
     /// Called when the capture side (re)starts at `sample_rate`.
     pub fn reset(&mut self, sample_rate: usize) {
+        if self.shared.frames.load(Ordering::Relaxed) > 0 {
+            self.deep_filter_warmup = dfn::WARMUP_BLOCKS;
+        }
         self.capture_rate = sample_rate;
         self.shared.sample_rate.store(sample_rate as u32, Ordering::Relaxed);
         if sample_rate != NATIVE_RATE && SUPPORTED_RATES.contains(&sample_rate) {
@@ -412,6 +622,7 @@ impl Dsp {
         }
         self.gate.reset();
         self.gate.set_rate(NATIVE_RATE);
+        self.highpass.reset();
         // A capture restart is usually a device change: a different
         // microphone hears the loudspeakers differently.
         self.bleed_render.reset();
@@ -535,9 +746,30 @@ impl Dsp {
         };
 
         // 3. noise suppression
+        self.collect_model();
+        if p.noise_suppression != 0 && !self.suppressing {
+            self.deep_filter_warmup = dfn::WARMUP_BLOCKS;
+        }
+        self.suppressing = p.noise_suppression != 0;
         let (vad, have_vad) = if p.noise_suppression != 0 {
             flags |= REPORT_FLAG_NS_ACTIVE;
-            let v = self.denoise.process_frame(&mut self.scratch_out, &self.scratch_in);
+            // Heard beside the model from the moment there is one, so that
+            // its state is current when it counts.
+            let raw_vad = if self.has_deep_filter() {
+                Some(self.denoise_raw.process_frame(&mut self.scratch_discard, &self.scratch_in))
+            } else {
+                None
+            };
+            let v = if self.run_deep_filter() {
+                flags |= REPORT_FLAG_DEEP_FILTER;
+                self.highpass.process(&mut self.scratch_out);
+                let clean = self.denoise.process_frame(&mut self.scratch_vad, &self.scratch_out);
+                self.gate_vad(clean, raw_vad)
+            } else {
+                let v = self.denoise.process_frame(&mut self.scratch_out, &self.scratch_in);
+                self.highpass.process(&mut self.scratch_out);
+                v
+            };
             (v, true)
         } else {
             self.scratch_out.copy_from_slice(&self.scratch_in);
@@ -815,7 +1047,8 @@ mod tests {
 
     #[test]
     fn hot_path_does_not_allocate() {
-        let mut dsp = Dsp::new(Params::default());
+        // Everything but DeepFilterNet's inference, which allocates (tract).
+        let mut dsp = Dsp::with_model(Params::default(), ModelLoad::Never);
         let mut sig = white_noise(FRAME_SIZE * 10, 1000.0, 3);
         let mut render = white_noise(FRAME_SIZE, 1000.0, 4);
         let mut stream = white_noise(128 * 40, 0.01, 5);
@@ -836,6 +1069,68 @@ mod tests {
         ARMED.with(|a| a.set(false));
         render.clear();
         assert_eq!(COUNT.with(|c| c.get()), 0, "allocations on the hot path");
+    }
+
+    #[test]
+    fn a_model_loading_in_the_background_takes_over_after_warming_up() {
+        let mut dsp = Dsp::with_model(Params::default(), ModelLoad::Background);
+        let noise = coloured_noise(FRAME_SIZE * 1000, 300.0, 23);
+        let mut blocks = noise.chunks(FRAME_SIZE);
+        let mut block = || {
+            let mut b = blocks.next().expect("the model never arrived").to_vec();
+            dsp.process_block(&mut b);
+            dsp.report().flags
+        };
+        // RNNoise from the first block: nobody waits for the model.
+        let first = block();
+        assert_eq!(first & REPORT_FLAG_NS_ACTIVE, REPORT_FLAG_NS_ACTIVE);
+        assert_eq!(first & REPORT_FLAG_DEEP_FILTER, 0);
+        let mut rnnoise_blocks = 1;
+        while block() & REPORT_FLAG_DEEP_FILTER == 0 {
+            rnnoise_blocks += 1;
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(rnnoise_blocks > dfn::WARMUP_BLOCKS as usize, "took over after {rnnoise_blocks} blocks");
+        for _ in 0..50 {
+            assert_ne!(block() & REPORT_FLAG_DEEP_FILTER, 0);
+        }
+    }
+
+    #[test]
+    fn switched_back_on_the_model_warms_up_before_it_is_heard() {
+        let mut dsp = Dsp::new(Params::default());
+        let noise = coloured_noise(FRAME_SIZE * 100, 300.0, 31);
+        let mut blocks = noise.chunks(FRAME_SIZE).map(|b| b.to_vec());
+        let mut block = |dsp: &mut Dsp| {
+            let mut b = blocks.next().unwrap();
+            dsp.process_block(&mut b);
+            dsp.report().flags & REPORT_FLAG_DEEP_FILTER != 0
+        };
+        assert!(block(&mut dsp), "a new DSP starts on the model");
+        dsp.set_params(&Params { noise_suppression: 0, ..Default::default() });
+        for _ in 0..10 {
+            assert!(!block(&mut dsp));
+        }
+        dsp.set_params(&Params::default());
+        for i in 0..dfn::WARMUP_BLOCKS {
+            assert!(!block(&mut dsp), "the model was heard after {i} blocks back on");
+        }
+        assert!(block(&mut dsp));
+    }
+
+    #[test]
+    fn a_disabled_model_leaves_rnnoise_suppressing() {
+        let mut dsp = Dsp::new(Params { gate_mode: 0, far_end_ducking: 0, ..Default::default() });
+        assert!(dsp.has_deep_filter());
+        dsp.disable_deep_filter();
+        assert!(!dsp.has_deep_filter());
+        let noise = coloured_noise(FRAME_SIZE * 100, 300.0, 29);
+        let mut out = noise.clone();
+        for block in out.chunks_mut(FRAME_SIZE) {
+            dsp.process_block(block);
+            assert_eq!(dsp.report().flags & REPORT_FLAG_DEEP_FILTER, 0);
+        }
+        assert!(rms_db(&noise) - rms_db(&out[FRAME_SIZE * 50..]) > 15.0);
     }
 
     #[test]

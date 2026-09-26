@@ -79,11 +79,13 @@ class AudioDspReport {
   static const int flagDucking = 1 << 3;
   static const int flagSpeakerBleed = 1 << 4;
   static const int flagReference = 1 << 5;
+  static const int flagDeepFilter = 1 << 6;
 
   /// Microphone level after noise suppression, before the gate, in dBFS.
   final double levelDb;
 
-  /// Speech probability from RNNoise, 0..1 (0 when suppression is off).
+  /// Speech probability from RNNoise, 0..1 (0 when suppression is off). With
+  /// DeepFilterNet suppressing, judged on what it left.
   final double vad;
 
   /// Level of the other participants' audio, dBFS, with a short peak hold.
@@ -116,6 +118,12 @@ class AudioDspReport {
 
   /// System audio (loopback) is reaching the DSP.
   bool get referenceActive => flags & flagReference != 0;
+
+  /// DeepFilterNet suppressed the noise, knocks and typing included. When
+  /// suppression is active without it, RNNoise did it alone: the model is
+  /// still loading (the first half second natively), or the machine was too
+  /// slow for it.
+  bool get deepFilterActive => flags & flagDeepFilter != 0;
 
   @override
   String toString() =>

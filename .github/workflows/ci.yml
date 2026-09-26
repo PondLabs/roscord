@@ -83,12 +83,14 @@ jobs:
 
       # The noise suppression tests put a recording through the voice DSP's
       # own library (commet/unit_test/noise_suppression/voice_dsp_fixture.dart);
-      # without these they fail rather than skip in CI.
+      # without these they fail rather than skip in CI. The fixture is built
+      # with the debug build's dependencies: a release build would compile
+      # DeepFilterNet's tract a second time for nothing.
       - name: Build the voice DSP for its tests
         if: steps.find.outputs.dart == 'true'
         run: |
           cargo build -p audio_dsp
-          cargo run -q -p audio_dsp --release --example noisy_speech -- target/voice-fixtures
+          cargo run -q -p audio_dsp --example noisy_speech -- target/voice-fixtures
 
       - name: Dart unit tests
         if: steps.find.outputs.dart == 'true'

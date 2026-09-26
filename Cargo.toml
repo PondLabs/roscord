@@ -1,3 +1,17 @@
 [workspace]
 resolver = "3"
 members = ["rust/rust", "rust/audio_dsp", "rust/audio_decode"]
+
+# DeepFilterNet's inference (tract, in rust/audio_dsp) runs about thirty times
+# slower unoptimised: too slow for real time in a debug build of the app,
+# and for the tests. Dependencies are optimised in debug builds too, and
+# carry no debug info (with it, tract made a 375 MB library); the
+# workspace's own crates stay quick to rebuild and to step through.
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+
+# A path dependency inside the workspace, so "*" does not cover it.
+[profile.dev.package.deep_filter]
+opt-level = 3
+debug = false

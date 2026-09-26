@@ -14,7 +14,7 @@
 
 use std::ffi::c_void;
 
-use crate::{Dsp, Params, Report};
+use crate::{Dsp, ModelLoad, Params, Report};
 
 /// Bump when the struct layouts, their meaning or the callback signatures
 /// change. 2: `Params::speaker_bleed` (was padding), `commet_dsp_feed_reference`.
@@ -33,10 +33,30 @@ pub extern "C" fn commet_dsp_default_params(out: *mut Params) {
     unsafe { *out = Params::default() };
 }
 
+/// Returns at once: natively DeepFilterNet's model is built on a thread of
+/// its own (about half a second) and RNNoise suppresses until it is there,
+/// or for good if the model turns out too slow for the machine. In wasm,
+/// where there are no threads, it is built here: call this from a worker,
+/// not from the audio thread.
 #[no_mangle]
 pub extern "C" fn commet_dsp_create(params: *const Params) -> *mut Dsp {
     let p = if params.is_null() { Params::default() } else { unsafe { *params } };
-    Box::into_raw(Dsp::new(p))
+    #[allow(unused_mut)]
+    let mut dsp = Dsp::with_model(p, ModelLoad::Background);
+    #[cfg(not(target_arch = "wasm32"))]
+    dsp.watch_deep_filter_cost();
+    Box::into_raw(dsp)
+}
+
+/// Hands noise suppression to RNNoise alone for the rest of this handle's
+/// life (`Dsp::disable_deep_filter`). For callers that find DeepFilterNet
+/// too slow. Any thread.
+#[no_mangle]
+pub extern "C" fn commet_dsp_disable_deep_filter(h: *mut Dsp) {
+    if h.is_null() {
+        return;
+    }
+    unsafe { &*h }.disable_deep_filter();
 }
 
 #[no_mangle]
