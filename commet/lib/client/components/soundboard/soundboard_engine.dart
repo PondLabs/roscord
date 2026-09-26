@@ -2,9 +2,12 @@
 // so unit tests run with `dart test`. The real audio sink is injected via
 // [SoundboardPlayer]; UI subscribes to [activeSounds] snapshots.
 //
-// Semantics (spec, Discord-like):
-// - Every trigger is an independent instance keyed by its eventId, so the
-//   same sound from one or several users overlaps; nothing is interrupted.
+// Semantics (spec):
+// - Every trigger is an instance keyed by its eventId. Different sounds, and
+//   the same sound from different users, overlap.
+// - A user re-triggering a sound of theirs that is still playing restarts it
+//   from the start (no spamming a stack of copies). Only that user's copy
+//   restarts; every listener applies this to the authenticated sender.
 // - Local optimistic play: caller plays immediately, then sends; echo of own
 //   eventId is ignored via [ownEventIds] (no double-play).
 // - No global `currentSound`; [active] is a Map keyed by eventId.
@@ -151,6 +154,13 @@ class SoundboardEngine {
     required int now,
     int? soundDurationMs,
   }) {
+    // One copy per sender and sound: re-triggering restarts it from the
+    // start, so nobody can stack a sound; other senders' copies play on.
+    for (final previous in active.values.toList()) {
+      if (previous.senderId == senderId && previous.soundId == soundId) {
+        markFinished(previous.eventId, stopAudio: true);
+      }
+    }
     while (active.length >= SoundboardConstraints.maxConcurrentInstances) {
       markFinished(active.keys.first, stopAudio: true);
     }

@@ -1,9 +1,10 @@
 // media_kit-backed SoundboardPlayer: one media_kit Player per trigger.
 //
 // Every instance (keyed by the trigger's eventId) gets its own Player, so the
-// same sound triggered twice overlaps instead of restarting (Discord
-// behavior). On web each Player owns its own media element, so this holds
-// there too. An instance is disposed when it completes or errors, and
+// same sound triggered by two users overlaps (SoundboardEngine stops a
+// user's earlier copy when they re-trigger it). On web each Player owns its
+// own media element, so this holds there too. An instance is disposed when
+// it completes or errors, and
 // [MediaKitSoundboardPlayer.onInstanceFinished] reports it so the engine can
 // drop it. An instance that never reports an end (stalled stream) is
 // released after [MediaKitSoundboardPlayer.maxInstanceLifetime]. Volume per
