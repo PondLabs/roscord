@@ -1,0 +1,47 @@
+# COMMET: libDF from DeepFilterNet, trimmed to the real-time inference path
+# (see third_party/README.md). Features and dependencies for datasets,
+# training, the C API, wasm-bindgen and the CLI were dropped.
+[package]
+name = "deep_filter"
+version = "0.5.7-pre"
+authors = ["Hendrik Schröter"]
+edition = "2021"
+description = "Noise supression using deep filtering"
+repository = "https://github.com/Rikorose/DeepFilterNet"
+license = "MIT/Apache-2.0"
+publish = false
+
+[lib]
+name = "df"
+path = "src/lib.rs"
+
+[features]
+default = ["tract", "default-model"]
+tract = []
+# Include the DeepFilterNet3 model (models/DeepFilterNet3_onnx.tar.gz).
+default-model = []
+timings = []
+capi = []
+
+[dependencies]
+rustfft = "^6.1.0"
+realfft = "^3.1.0"
+itertools = "0.12"
+num-complex = "^0.4"
+log = { version = "0.4", features = ["std"] }
+rust-ini = "^0.21"
+anyhow = "1.0"
+flate2 = "1.0.24"
+tar = "0.4.38"
+# COMMET: 0.21.13 rather than libDF's 0.21.4, for its wasm SIMD kernels.
+tract-core = "=0.21.13"
+tract-onnx = "=0.21.13"
+tract-pulse = "=0.21.13"
+tract-hir = "=0.21.13"
+
+# COMMET: tract-onnx's random operators pull getrandom 0.2, which does not
+# build for wasm32-unknown-unknown without a backend. "custom" builds it with
+# none: the model has no random operators, and the AudioWorklet instantiates
+# the wasm without imports (no wasm-bindgen).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["custom"] }
