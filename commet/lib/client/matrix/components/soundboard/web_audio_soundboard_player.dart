@@ -2,7 +2,7 @@
 // AudioBuffer and every instance plays through its own
 // AudioBufferSourceNode -> GainNode, so the gain can exceed 1.0 (normalization
 // boosts) unlike <audio>.volume. Same semantics as MediaKitSoundboardPlayer:
-// one voice per trigger (instances of the same sound overlap), an instance
+// one voice per trigger (two users' instances of a sound overlap), an instance
 // that ends on its own is reported through [onInstanceFinished], errors are
 // logged and swallowed. Sounds come from room state that any Space moderator
 // can set, so decoded buffers are bounded in number and length (see

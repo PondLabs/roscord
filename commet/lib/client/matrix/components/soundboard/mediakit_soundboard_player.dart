@@ -1,9 +1,10 @@
 // media_kit-backed SoundboardPlayer: one media_kit Player per trigger.
 //
 // Every instance (keyed by the trigger's eventId) gets its own Player, so the
-// same sound triggered twice overlaps instead of restarting (Discord
-// behavior). On web each Player owns its own media element, so this holds
-// there too. An instance is disposed when it completes or errors, and
+// same sound triggered by two users overlaps (SoundboardEngine stops a
+// user's earlier copy when they re-trigger it). On web each Player owns its
+// own media element, so this holds there too. An instance is disposed when
+// it completes or errors, and
 // [MediaKitSoundboardPlayer.onInstanceFinished] reports it so the engine can
 // drop it. An instance that never reports an end (stalled stream) is
 // released after [MediaKitSoundboardPlayer.maxInstanceLifetime]. Volume per
@@ -160,8 +161,17 @@ class _MediaKitAudioInstance implements SoundboardAudioInstance {
   /// mpv clamps `volume` to `volume-max` (default 130), so raise it before
   /// the first setVolume: normalization boosts go past 100 — user 1.5 * gain
   /// +18 dB is about 229 on mpv's cubic scale.
-  Future<void> _configure() => setMpvProperty(
-      _player, 'volume-max', MediaKitSoundboardPlayer.mpvVolumeMax.toString());
+  ///
+  /// With mpv's default `gapless-audio=weak`, `eof-reached` (media_kit's
+  /// `completed`) fires once the last samples are queued for the audio
+  /// output, 0.2 to 0.3 s before they are heard, and disposing then cut off
+  /// the end of every sound. `no` makes it wait until the output has played
+  /// them.
+  Future<void> _configure() async {
+    await setMpvProperty(_player, 'volume-max',
+        MediaKitSoundboardPlayer.mpvVolumeMax.toString());
+    await setMpvProperty(_player, 'gapless-audio', 'no');
+  }
 
   @override
   late final Stream<void> finished = _finishedStream();
