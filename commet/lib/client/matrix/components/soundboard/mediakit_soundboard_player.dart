@@ -160,8 +160,17 @@ class _MediaKitAudioInstance implements SoundboardAudioInstance {
   /// mpv clamps `volume` to `volume-max` (default 130), so raise it before
   /// the first setVolume: normalization boosts go past 100 — user 1.5 * gain
   /// +18 dB is about 229 on mpv's cubic scale.
-  Future<void> _configure() => setMpvProperty(
-      _player, 'volume-max', MediaKitSoundboardPlayer.mpvVolumeMax.toString());
+  ///
+  /// With mpv's default `gapless-audio=weak`, `eof-reached` (media_kit's
+  /// `completed`) fires once the last samples are queued for the audio
+  /// output, 0.2 to 0.3 s before they are heard, and disposing then cut off
+  /// the end of every sound. `no` makes it wait until the output has played
+  /// them.
+  Future<void> _configure() async {
+    await setMpvProperty(_player, 'volume-max',
+        MediaKitSoundboardPlayer.mpvVolumeMax.toString());
+    await setMpvProperty(_player, 'gapless-audio', 'no');
+  }
 
   @override
   late final Stream<void> finished = _finishedStream();
