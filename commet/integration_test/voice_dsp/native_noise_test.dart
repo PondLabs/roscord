@@ -130,6 +130,11 @@ void main() {
       expect(report!.frames, greaterThan(500),
           reason: 'the hook in WebRTC got no microphone audio');
       expect(report.noiseSuppressionActive, isTrue);
+      // The model is built in the background in half a second or so; by the
+      // end of the fixture it has to be the one suppressing (the native cost
+      // guard would only hand over to RNNoise on a machine far too slow).
+      expect(report.deepFilterActive, isTrue,
+          reason: 'RNNoise suppressed alone: DeepFilterNet did not take over');
 
       await dsp.stopMicTest();
     });

@@ -8,7 +8,8 @@
 
 use audio_dsp::resample::Resampler;
 use audio_dsp::{
-    Dsp, Report, FRAME_SIZE, REPORT_FLAG_DUCKING, REPORT_FLAG_GATE_OPEN, REPORT_FLAG_SPEAKER_BLEED,
+    Dsp, Report, FRAME_SIZE, REPORT_FLAG_DEEP_FILTER, REPORT_FLAG_DUCKING, REPORT_FLAG_GATE_OPEN,
+    REPORT_FLAG_SPEAKER_BLEED,
 };
 
 pub const RATE: usize = 48_000;
@@ -67,6 +68,32 @@ pub fn far_end_voice() -> Vec<f32> {
     fixture_48k(include_bytes!("../../testdata/far_end_voice_16k.wav"))
 }
 
+/// Knuckles knocking on a wooden table (a cut of "Bulerías con nudillos",
+/// CC0), peaking 1 dB under full scale.
+pub fn knuckles_on_table() -> Vec<f32> {
+    fixture_48k(include_bytes!("../../testdata/knuckles_on_table_16k.wav"))
+}
+
+/// One of the background noise recordings (`testdata/background_*`,
+/// see its README), at 48 kHz, -20 dBFS RMS.
+pub fn background(name: &str) -> Vec<f32> {
+    let bytes: &[u8] = match name {
+        "applause" => include_bytes!("../../testdata/background_applause_16k.wav"),
+        "hand_claps" => include_bytes!("../../testdata/background_hand_claps_16k.wav"),
+        "keyboard_mechanical" => include_bytes!("../../testdata/background_keyboard_mechanical_16k.wav"),
+        "keyboard_desktop" => include_bytes!("../../testdata/background_keyboard_desktop_16k.wav"),
+        "mouse_click" => include_bytes!("../../testdata/background_mouse_click_16k.wav"),
+        "pen_on_paper" => include_bytes!("../../testdata/background_pen_on_paper_16k.wav"),
+        "crowd_talking" => include_bytes!("../../testdata/background_crowd_talking_16k.wav"),
+        "restaurant" => include_bytes!("../../testdata/background_restaurant_16k.wav"),
+        "piano" => include_bytes!("../../testdata/background_piano_16k.wav"),
+        "electronic_beat" => include_bytes!("../../testdata/background_electronic_beat_16k.wav"),
+        "pop_song" => include_bytes!("../../testdata/background_pop_song_16k.wav"),
+        other => panic!("no background recording {other}"),
+    };
+    fixture_48k(bytes)
+}
+
 // ------------------------------------------------------------------ levels
 
 pub fn rms_dbfs(x: &[f32]) -> f32 {
@@ -85,6 +112,25 @@ pub fn rms_dbfs(x: &[f32]) -> f32 {
 pub fn scale_to(x: &[f32], target_dbfs: f32) -> Vec<f32> {
     let g = 10f32.powf((target_dbfs - rms_dbfs(x)) / 20.0);
     x.iter().map(|s| s * g).collect()
+}
+
+/// Scale-invariant signal-to-distortion ratio of `estimate` against
+/// `reference` (same length, aligned), in dB, and the gain the estimate
+/// carries the reference with, in dB: how much of the voice is left, and
+/// how clean it is.
+pub fn si_sdr(reference: &[f32], estimate: &[f32]) -> (f32, f32) {
+    let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum::<f64>();
+    let alpha = dot(estimate, reference) / dot(reference, reference);
+    let (mut target, mut error) = (0.0f64, 0.0f64);
+    for (r, e) in reference.iter().zip(estimate) {
+        let t = alpha * *r as f64;
+        target += t * t;
+        error += (*e as f64 - t) * (*e as f64 - t);
+    }
+    (
+        (10.0 * (target / error.max(1e-12)).log10()) as f32,
+        (20.0 * alpha.abs().max(1e-12).log10()) as f32,
+    )
 }
 
 pub fn mix(a: &[f32], b: &[f32]) -> Vec<f32> {
@@ -106,6 +152,54 @@ impl Lcg {
         self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         ((self.0 >> 33) as f32 / (1u64 << 31) as f32) * 2.0 - 1.0
     }
+}
+
+/// Full-band white noise, `n` samples, scaled later.
+pub fn white_noise(n: usize, seed: u64) -> Vec<f32> {
+    let mut r = Lcg(seed);
+    (0..n).map(|_| r.next()).collect()
+}
+
+/// Pink noise (3 dB per octave down), Paul Kellet's economy filter.
+pub fn pink_noise(n: usize, seed: u64) -> Vec<f32> {
+    let mut r = Lcg(seed);
+    let (mut b0, mut b1, mut b2) = (0.0f32, 0.0f32, 0.0f32);
+    (0..n)
+        .map(|_| {
+            let w = r.next();
+            b0 = 0.99765 * b0 + w * 0.099_046;
+            b1 = 0.963 * b1 + w * 0.296_516_4;
+            b2 = 0.57 * b2 + w * 1.052_691_3;
+            b0 + b1 + b2 + w * 0.1848
+        })
+        .collect()
+}
+
+/// Brown noise (6 dB per octave down from about 40 Hz): wind, traffic
+/// through a wall, rumble through the desk.
+pub fn brown_noise(n: usize, seed: u64) -> Vec<f32> {
+    let mut r = Lcg(seed);
+    let mut y = 0.0f32;
+    (0..n)
+        .map(|_| {
+            y = 0.995 * y + r.next();
+            y
+        })
+        .collect()
+}
+
+/// Mains hum: 50 Hz and eleven harmonics, each 2 dB under the last, as a
+/// ground loop or a cheap power supply puts into a microphone.
+pub fn mains_hum(n: usize) -> Vec<f32> {
+    let two_pi = 2.0 * std::f32::consts::PI;
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            (0..12)
+                .map(|k| 0.8f32.powi(k) * (two_pi * 50.0 * (k + 1) as f32 * t + k as f32).sin())
+                .sum()
+        })
+        .collect()
 }
 
 /// Low passed noise: a fan, a PC, the room. RNNoise barely reacts to pure
@@ -156,6 +250,68 @@ pub fn music(n: usize) -> Vec<f32> {
             s
         })
         .collect();
+    out
+}
+
+/// One knock of a knuckle on a wooden table, 150 ms, peaking at 1.0: a
+/// short contact click exciting the board's modes, the low ones ringing
+/// longest. Each seed moves the modes a little, like knocking somewhere
+/// else on the table.
+pub fn knock(seed: u64) -> Vec<f32> {
+    // (Hz, time to decay by 60 dB in s, relative amplitude)
+    const MODES: [(f32, f32, f32); 9] = [
+        (150.0, 0.10, 0.6),
+        (290.0, 0.08, 1.0),
+        (470.0, 0.06, 0.9),
+        (720.0, 0.05, 0.8),
+        (1050.0, 0.04, 0.6),
+        (1500.0, 0.03, 0.45),
+        (2100.0, 0.02, 0.3),
+        (2900.0, 0.015, 0.2),
+        (3800.0, 0.01, 0.12),
+    ];
+    let mut r = Lcg(seed);
+    let two_pi = 2.0 * std::f32::consts::PI;
+    let mut out = vec![0.0f32; RATE * 150 / 1000];
+    for (hz, t60, amp) in MODES {
+        let hz = hz * (1.0 + 0.08 * r.next());
+        let amp = amp * (1.0 + 0.3 * r.next());
+        let phase = r.next() * std::f32::consts::PI;
+        for (i, s) in out.iter_mut().enumerate() {
+            let t = i as f32 / RATE as f32;
+            // the knuckle takes a millisecond to land
+            let onset = if t < 0.001 { 0.5 - 0.5 * (std::f32::consts::PI * t / 0.001).cos() } else { 1.0 };
+            *s += amp * onset * (two_pi * hz * t + phase).sin() * (-6.9 * t / t60).exp();
+        }
+    }
+    for (i, s) in out.iter_mut().enumerate().take(RATE * 3 / 1000) {
+        let t = i as f32 / RATE as f32;
+        *s += 1.5 * r.next() * (-t / 0.0004).exp();
+    }
+    let peak = out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    out.iter().map(|s| s / peak).collect()
+}
+
+/// "Toc toc toc": three knocks 170 ms apart every 1.6 s, `n` samples, each
+/// group peaking somewhere between -20 and -6 dBFS.
+pub fn knocking(n: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; n];
+    let mut r = Lcg(99);
+    let mut seed = 1;
+    let mut group = RATE / 2;
+    while group + RATE < n {
+        let peak = 32768.0 * 10f32.powf((-13.0 + 7.0 * r.next()) / 20.0);
+        for k in 0..3 {
+            let at = group + k * RATE * 170 / 1000 + (r.next().abs() * 400.0) as usize;
+            for (i, s) in knock(seed).iter().enumerate() {
+                if at + i < n {
+                    out[at + i] += s * peak;
+                }
+            }
+            seed += 1;
+        }
+        group += RATE * 16 / 10;
+    }
     out
 }
 
@@ -257,6 +413,8 @@ pub struct Frame {
     pub gate_open: bool,
     pub ducking: bool,
     pub bleed: bool,
+    /// DeepFilterNet suppressed this block (RNNoise otherwise).
+    pub deep_filter: bool,
 }
 
 pub struct Run {
@@ -345,5 +503,6 @@ fn frame(r: Report) -> Frame {
         gate_open: r.flags & REPORT_FLAG_GATE_OPEN != 0,
         ducking: r.flags & REPORT_FLAG_DUCKING != 0,
         bleed: r.flags & REPORT_FLAG_SPEAKER_BLEED != 0,
+        deep_filter: r.flags & REPORT_FLAG_DEEP_FILTER != 0,
     }
 }

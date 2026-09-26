@@ -6,43 +6,30 @@
 //                                            +-> commet-dsp worklet -> MediaStreamAudioDestinationNode -> processedTrack
 //   remote tracks -> MediaStreamAudioSourceNode (input 1, level only)
 //
+// The worklet only moves 10 ms blocks: the DSP (audio_dsp.wasm) runs in
+// audio_dsp.worker.js, which this starts per graph and connects to the
+// worklet with a MessageChannel. Parameters go to the worker, reports come
+// from it.
+//
 // Dart talks to window.commetAudioDsp through dart:js_interop; keeping the
 // Web Audio calls here means the graph can be poked at from devtools.
 (function () {
   const WORKLET_URL = "audio_dsp.worklet.js";
+  const WORKER_URL = "audio_dsp.worker.js";
   const WASM_URL = "audio_dsp.wasm";
   const TARGET_RATE = 48000;
-  const READY_TIMEOUT_MS = 5000;
+  // The worker compiles the wasm and builds DeepFilterNet's model before
+  // the DSP runs: about a second on a 2017 laptop.
+  const READY_TIMEOUT_MS = 10000;
+  const PROBE_TIMEOUT_MS = 10000;
 
   const supported =
     typeof AudioContext !== "undefined" &&
     typeof AudioWorkletNode !== "undefined" &&
     typeof WebAssembly !== "undefined" &&
+    typeof Worker !== "undefined" &&
+    typeof MessageChannel !== "undefined" &&
     typeof MediaStreamAudioDestinationNode !== "undefined";
-
-  // What the worklet (audio_dsp.worklet.js) checks and calls. Mirrors
-  // rust/audio_dsp/src/ffi.rs; tools/voice_dsp/check_contracts.py keeps the
-  // copies in step.
-  const ABI_VERSION = 2;
-  const PARAMS_SIZE = 24;
-  const REPORT_SIZE = 28;
-  const WORKLET_EXPORTS = [
-    "commet_dsp_abi_version",
-    "commet_dsp_params_size",
-    "commet_dsp_report_size",
-    "commet_dsp_create",
-    "commet_dsp_destroy",
-    "commet_dsp_set_params",
-    "commet_dsp_get_report",
-    "commet_dsp_process_stream",
-    "commet_dsp_feed_render",
-    "commet_dsp_alloc_f32",
-    "commet_dsp_free_f32",
-    "commet_dsp_params_alloc",
-    "commet_dsp_params_free",
-    "commet_dsp_report_alloc",
-    "commet_dsp_report_free",
-  ];
 
   let wasmPromise = null;
   function loadWasm() {
@@ -58,11 +45,53 @@
     return wasmPromise;
   }
 
-  // Whether the DSP can run here: audio_dsp.wasm fetched, compiled and
-  // speaking the worklet's ABI. The app asks before a call decides who
-  // suppresses noise, so a missing or broken wasm is known up front, instead
-  // of when the call's worklet fails with the browser's suppressor already
-  // turned off. Only a success is kept: a fetch that failed is tried again.
+  // Starts audio_dsp.worker.js. [onMessage] gets what it posts; [onFail] a
+  // worker script that did not load or threw.
+  function startWorker(onMessage, onFail) {
+    const worker = new Worker(WORKER_URL);
+    worker.onmessage = (e) => onMessage(e.data || {});
+    worker.onerror = (e) => {
+      e.preventDefault();
+      onFail(WORKER_URL + ": " + ((e && e.message) || "did not load"));
+    };
+    return worker;
+  }
+
+  // Asks a worker whether it can run [bytes]: the worker script loads, and
+  // the wasm compiles and speaks its ABI.
+  function probeWorker(bytes) {
+    return new Promise((resolve) => {
+      let worker = null;
+      const done = (r) => {
+        clearTimeout(timer);
+        if (worker) worker.terminate();
+        resolve(r);
+      };
+      const timer = setTimeout(
+        () => done({ ok: false, reason: WORKER_URL + " did not answer in " + PROBE_TIMEOUT_MS + " ms" }),
+        PROBE_TIMEOUT_MS,
+      );
+      try {
+        worker = startWorker(
+          (msg) => {
+            if (msg.type === "probe") done({ ok: !!msg.ok, reason: msg.reason || "" });
+          },
+          (reason) => done({ ok: false, reason: reason }),
+        );
+        const copy = bytes.slice(0);
+        worker.postMessage({ type: "probe", wasm: copy }, [copy]);
+      } catch (e) {
+        done({ ok: false, reason: String((e && e.message) || e) });
+      }
+    });
+  }
+
+  // Whether the DSP can run here: the worklet module loads, and in a worker
+  // audio_dsp.wasm compiles and speaks the ABI the worker expects. The app
+  // asks before a call decides who suppresses noise, so a missing or broken
+  // file is known up front, instead of when the call's graph fails with the
+  // browser's suppressor already turned off. Only a success is kept: a fetch
+  // that failed is tried again.
   let probed = null;
   function probe() {
     if (probed) return probed;
@@ -73,17 +102,7 @@
         // audio_dsp.worklet.js fails every call the same way.
         await new OfflineAudioContext(1, 128, TARGET_RATE).audioWorklet.addModule(WORKLET_URL);
         const bytes = await loadWasm();
-        const { instance } = await WebAssembly.instantiate(bytes.slice(0), {});
-        const ex = instance.exports;
-        for (const name of WORKLET_EXPORTS) {
-          if (typeof ex[name] !== "function") return { ok: false, reason: "audio_dsp.wasm has no " + name };
-        }
-        const abi = ex.commet_dsp_abi_version();
-        if (abi !== ABI_VERSION) return { ok: false, reason: "audio_dsp.wasm is ABI " + abi + ", expected " + ABI_VERSION };
-        if (ex.commet_dsp_params_size() !== PARAMS_SIZE || ex.commet_dsp_report_size() !== REPORT_SIZE) {
-          return { ok: false, reason: "audio_dsp.wasm struct sizes do not match" };
-        }
-        return { ok: true, reason: "" };
+        return await probeWorker(bytes);
       } catch (e) {
         return { ok: false, reason: String((e && e.message) || e) };
       }
@@ -102,12 +121,13 @@
     if (!supported) throw new Error("AudioWorklet or WebAssembly not supported");
     if (!track || track.kind !== "audio") throw new Error("expected an audio MediaStreamTrack");
 
-    // Own context: RNNoise is trained at 48 kHz and LiveKit's context runs at
-    // the device rate.
+    // Own context: the DSP runs at 48 kHz and LiveKit's context runs at the
+    // device rate.
     const ctx = new AudioContext({ sampleRate: TARGET_RATE, latencyHint: "interactive" });
     if (ctx.sampleRate !== TARGET_RATE) {
       console.warn("commetAudioDsp: context runs at " + ctx.sampleRate + " Hz, expected " + TARGET_RATE);
     }
+    let worker = null;
     try {
       await ctx.audioWorklet.addModule(WORKLET_URL);
       const wasm = await loadWasm();
@@ -119,8 +139,6 @@
         channelCount: 1,
         channelCountMode: "explicit",
         channelInterpretation: "speakers",
-        // A copy per node: instantiate() may detach/neuter shared buffers in some engines.
-        processorOptions: { wasm: wasm.slice(0), params: params || {} },
       });
 
       const source = ctx.createMediaStreamSource(new MediaStream([track]));
@@ -143,7 +161,7 @@
         onError: null,
         ready: ready,
         setParams(p) {
-          node.port.postMessage({ type: "params", params: p || {} });
+          worker.postMessage({ type: "params", params: p || {} });
         },
         addFarEnd(t) {
           if (!t || farEnd.has(t.id)) return;
@@ -183,24 +201,36 @@
           }
           farEnd.clear();
           try { node.port.postMessage({ type: "destroy" }); } catch (e) {}
+          worker.terminate();
           try { await ctx.close(); } catch (e) {}
         },
       };
 
-      node.port.onmessage = (e) => {
-        const msg = e.data || {};
-        if (msg.type === "report" && graph.onReport) graph.onReport(msg.report);
-        else if (msg.type === "ready") readyResolve(true);
-        else if (msg.type === "error") {
-          console.error("commetAudioDsp worklet: " + msg.message);
-          failure = msg.message;
-          readyResolve(false);
-          if (graph.onError) graph.onError(msg.message);
-        }
+      const fail = (message) => {
+        console.error("commetAudioDsp: " + message);
+        failure = message;
+        readyResolve(false);
+        if (graph.onError) graph.onError(message);
       };
+      // The worklet says when the DSP's blocks start coming back.
+      node.port.onmessage = (e) => {
+        if ((e.data || {}).type === "ready") readyResolve(true);
+      };
+      worker = startWorker((msg) => {
+        if (msg.type === "report" && graph.onReport) graph.onReport(msg.report);
+        else if (msg.type === "error") fail("worker: " + msg.message);
+        else if (msg.type === "deepFilterOff") {
+          console.warn("commetAudioDsp: DeepFilterNet took " + msg.averageMs.toFixed(1) +
+            " ms a block, noise suppression continues with RNNoise");
+        }
+      }, fail);
+      const channel = new MessageChannel();
+      node.port.postMessage({ type: "worker", port: channel.port1 }, [channel.port1]);
+      const copy = wasm.slice(0);
+      worker.postMessage({ type: "init", wasm: copy, params: params || {}, port: channel.port2 }, [copy, channel.port2]);
 
       await ctx.resume();
-      // Not before the DSP runs in the worklet: until then it passes the
+      // Not before the worker's DSP runs: until then the worklet passes the
       // microphone through untouched, and whoever publishes processedTrack
       // has turned the browser's suppressor off because ours is on.
       const started = await Promise.race([
@@ -209,10 +239,11 @@
       ]);
       if (started !== true) {
         await graph.destroy();
-        throw new Error("audio_dsp worklet did not start: " + (failure || "no answer in " + READY_TIMEOUT_MS + " ms"));
+        throw new Error("audio_dsp did not start: " + (failure || "no answer in " + READY_TIMEOUT_MS + " ms"));
       }
       return graph;
     } catch (err) {
+      if (worker) worker.terminate();
       try { await ctx.close(); } catch (e) {}
       throw err;
     }

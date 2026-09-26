@@ -25,7 +25,7 @@ Status legend: `[ ]` open, `[x]` done.
 
 | Path | Loop | Status |
 |------|------|--------|
-| DSP core | `cargo test -p audio_dsp` (existing, 40 tests) | [x] |
+| DSP core | `cargo test -p audio_dsp` (67 tests since bugs 19 to 21) | [x] |
 | Native manager, Dart ↔ Rust | `unit_test/noise_suppression/native_dsp_test.dart` | [x] |
 | Room microphone decisions | `unit_test/noise_suppression/microphone_noise_suppression_test.dart` | [x] |
 | LiveKit track processor | `unit_test/noise_suppression/livekit_processor_restart_test.dart` | [x] |
@@ -60,6 +60,9 @@ Status legend: `[ ]` open, `[x]` done.
 | 16 | The web app does not compile since #127 | 64-bit int literals in `hashProfileKey` | fixed 1458c0c7 |
 | 17 | Desktop mic test and legacy calls record from device 0, not the picked mic | `deviceId: {exact}`; flutter-webrtc reads `optional.sourceId` only | fixed 8a7a0794 |
 | 18 | Desktop mic test with "Hear myself" off: DSP gets nothing, meter dead | disabling the received track disabled the mic (same id) | fixed ba163c76 |
+| 19 | Knocking on the table ("toc toc toc") reaches the room, reported after the audit | RNNoise removes 6 to 12 dB of a knock, and its speech probability opens the gate on real knocks (3 to 10 % of knocking blocks); under speech a knock went through at up to +36 dB | fixed: DeepFilterNet3 suppresses, RNNoise judges speech on its output; the web DSP moved to a worker (docs/voice-audio-processing.md, "Impulsive noise") |
+| 20 | Rumble through the desk, brown noise and handling noise came through under speech at full level with DeepFilterNet (-0.5 dB SI-SDR at 0 dB SNR) | DeepFilterNet leaves the band below 60 Hz alone | fixed: a 70 Hz high-pass after it (in front, it made mains hum read as a voice) |
+| 21 | With DeepFilterNet the gate opened on nearby chatter (65 % of the time) and on a loud fan (29 %) | RNNoise took what the model left of them for speech | fixed: opening takes RNNoise on the raw microphone too and the model's SNR estimate over 0 dB (docs/voice-audio-processing.md, "Background noise") |
 
 Hypotheses dropped on the way, for the next person: "the native hook's
 output never reaches the encoder" and "the hook only runs while WebRTC plays
