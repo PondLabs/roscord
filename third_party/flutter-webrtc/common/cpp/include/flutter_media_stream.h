@@ -48,7 +48,14 @@ class FlutterMediaStream {
 
   void OnDeviceChange();
 
+  // COMMET: points the audio device module at the microphone selected last,
+  // found again by id. Called before a local audio track is enabled.
+  void ReselectRecordingDevice();
+
  private:
+  // COMMET: SetRecordingDevice, remembering which device it was.
+  void SelectRecordingDevice(uint16_t index, const std::string& device_id);
+
   FlutterWebRTCBase* base_;
 };
 

@@ -360,26 +360,165 @@ void main() {
       expect(result.effectiveCapabilities.supportsSeeking, isTrue);
     });
 
+    // A carousel's embed page carries the post as JSON, like a reel's.
+    final carouselEmbedPage = embedPage({
+      'context': {'type': 'GraphSidecar', 'shortcode': 'DW1xjVPCXJ0'},
+      'gql_data': {
+        'shortcode_media': {
+          '__typename': 'GraphSidecar',
+          'shortcode': 'DW1xjVPCXJ0',
+          'is_video': false,
+          'display_url': 'https://scontent.cdninstagram.com/1.jpg',
+          'dimensions': {'width': 1080, 'height': 1350},
+          'owner': {'username': 'nasa'},
+          'edge_media_to_caption': {
+            'edges': [
+              {
+                'node': {'text': 'First photographs from Artemis II'}
+              },
+            ],
+          },
+          'edge_sidecar_to_children': {
+            'edges': [
+              {
+                'node': {
+                  'is_video': false,
+                  'display_url': 'https://scontent.cdninstagram.com/1.jpg',
+                  'dimensions': {'width': 1080, 'height': 1350},
+                },
+              },
+              {
+                'node': {
+                  'is_video': false,
+                  'display_url': 'https://scontent.cdninstagram.com/2.jpg',
+                  'dimensions': {'width': 1440, 'height': 960},
+                },
+              },
+              {
+                'node': {
+                  'is_video': true,
+                  'display_url': 'https://scontent.cdninstagram.com/3.jpg',
+                  'dimensions': {'width': 1080, 'height': 1080},
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    // A single photo's embed page has no JSON (`"contextJSON":null`); the
+    // post is only in the markup.
+    final photoEmbedPage = File('unit_test/fixtures/instagram_photo_embed.html')
+        .readAsStringSync();
+
     test('a photo post is not a video', () async {
       final provider = InstagramProvider(canFetchEmbedData: true);
-      final result = await provider.resolve(
-        Uri.parse('https://www.instagram.com/p/DW1xjVPCXJ0/'),
-        fetchPlayback: true,
-        client: serving(embedPage({
-          'context': {'type': 'GraphSidecar', 'shortcode': 'DW1xjVPCXJ0'},
-          'gql_data': {
-            'shortcode_media': {
-              '__typename': 'GraphSidecar',
-              'shortcode': 'DW1xjVPCXJ0',
-              'is_video': false,
-              'display_url': 'https://scontent.cdninstagram.com/photo.jpg',
-              'dimensions': {'width': 1080, 'height': 1350},
-            },
-          },
-        })),
+      for (final page in [carouselEmbedPage, photoEmbedPage]) {
+        final result = await provider.resolve(
+          Uri.parse('https://www.instagram.com/p/BsOGulcndj-/'),
+          fetchPlayback: true,
+          client: serving(page),
+        );
+
+        expect(result, isNull);
+      }
+    });
+
+    test('a photo post shows its photo, author and caption', () async {
+      final provider = InstagramProvider(canFetchEmbedData: true);
+      final post = await provider.resolvePost(
+        Uri.parse('https://www.instagram.com/p/BsOGulcndj-/?igsh=abc=='),
+        client: serving(photoEmbedPage),
       );
 
-      expect(result, isNull);
+      expect(requests.single.url.toString(),
+          'https://www.instagram.com/p/BsOGulcndj-/embed/captioned/');
+      expect(requests.single.headers['Sec-Fetch-Mode'], 'navigate');
+
+      expect(post, isNotNull);
+      expect(post!.title, '@world_record_egg');
+      expect(
+          post.text,
+          'Let’s set a world record together and get the most liked post on '
+          'Instagram. Beating the current world record held by Kylie Jenner '
+          '(18 million)! We got this 🙌\n\n'
+          '#LikeTheEgg #EggSoldiers #EggGang');
+      expect(post.photos, hasLength(1));
+      expect(
+          post.photos.single.url.toString(),
+          'https://scontent-gru1-1.cdninstagram.com/v/t51.82787-15/'
+          '625727639_18338153224242257_3827527793310630488_n.jpg'
+          '?stp=dst-jpg_e35_tt6&_nc_cat=104&ccb=7-5&_nc_sid=58cdad'
+          '&oh=00_AQJZoxWtBcfoXms5sHpXGYkG0kQ-G-_0wqAA9j-CTx3Gxg&oe=6ABDE740');
+      expect(post.photos.single.aspectRatio, isNull,
+          reason: 'this embed frame gives no size');
+    });
+
+    test('reads a photo\'s shape from its embed frame', () async {
+      final provider = InstagramProvider(canFetchEmbedData: true);
+      final post = await provider.resolvePost(
+        Uri.parse('https://www.instagram.com/p/DcFclB6R3Wo/'),
+        client: serving(photoEmbedPage.replaceFirst(
+            'class="Content EmbedFrame" style=""',
+            'class="Content EmbedFrame" style="padding-bottom: 125%;"')),
+      );
+
+      expect(post!.photos.single.aspectRatio, 0.8);
+    });
+
+    test('takes a 1080-wide copy of a larger photo', () async {
+      // As Instagram lists them: the original, the copies that keep its
+      // shape, then square crops.
+      const base = 'https://scontent.cdninstagram.com/v/774595177_n.jpg';
+      final page = photoEmbedPage.replaceFirst(
+          RegExp(r'<img class="EmbeddedMediaImage"[^>]*>'),
+          '<img class="EmbeddedMediaImage" alt="" src="$base?stp=orig" '
+          'srcset="$base?stp=orig 3274w,$base?stp=p1080x1080 1080w,'
+          '$base?stp=p720x720 720w,$base?stp=c0.411_s1080x1080 1080w" />');
+      final provider = InstagramProvider(canFetchEmbedData: true);
+      final post = await provider.resolvePost(
+        Uri.parse('https://www.instagram.com/p/DcFclB6R3Wo/'),
+        client: serving(page),
+      );
+
+      expect(post!.photos.single.url.toString(), '$base?stp=p1080x1080');
+    });
+
+    test('a carousel shows every photo in order', () async {
+      final provider = InstagramProvider(canFetchEmbedData: true);
+      final post = await provider.resolvePost(
+        Uri.parse('https://www.instagram.com/nasa/p/DW1xjVPCXJ0/'),
+        client: serving(carouselEmbedPage),
+      );
+
+      expect(post, isNotNull);
+      expect(post!.title, '@nasa');
+      expect(post.text, 'First photographs from Artemis II');
+      expect([for (final photo in post.photos) photo.url.path],
+          ['/1.jpg', '/2.jpg', '/3.jpg']);
+      expect([for (final photo in post.photos) photo.aspectRatio],
+          [1080 / 1350, 1440 / 960, 1.0]);
+    });
+
+    test('a video post has no photos to show', () async {
+      final provider = InstagramProvider(canFetchEmbedData: true);
+      final post = await provider.resolvePost(
+        Uri.parse('https://www.instagram.com/reel/C2X_BmsPg5d/'),
+        client: serving(reelEmbedPage),
+      );
+
+      expect(post, isNull);
+    });
+
+    test('a post whose page holds no post has no photos to show', () async {
+      final provider = InstagramProvider(canFetchEmbedData: true);
+      final post = await provider.resolvePost(
+        Uri.parse('https://www.instagram.com/p/C3bV8Uyrk8q/'),
+        client: serving('<html><div class="EmbedBrokenMedia"></div></html>'),
+      );
+
+      expect(post, isNull);
     });
 
     test('falls back to the official embed when the page has no post data',
@@ -417,6 +556,23 @@ void main() {
 
       expect(requests, isEmpty);
       expect(result?.playbackSource, isA<OfficialVideoEmbedSource>());
+
+      final post = await provider.resolvePost(
+        Uri.parse('https://www.instagram.com/p/BsOGulcndj-/'),
+        client: serving(photoEmbedPage),
+      );
+      expect(requests, isEmpty);
+      expect(post, isNull);
+    });
+
+    test('an unread post is a post, not a video: it may hold photos', () async {
+      final provider = InstagramProvider(canFetchEmbedData: false);
+      final result = await provider.resolve(
+        Uri.parse('https://www.instagram.com/p/BsOGulcndj-/'),
+      );
+
+      expect(result?.title, 'Instagram Post');
+      expect(result?.platformName, 'Instagram');
     });
   });
 

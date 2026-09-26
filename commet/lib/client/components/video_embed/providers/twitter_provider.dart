@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/widgets.dart';
 import 'package:http/http.dart' as http;
 
+import '../photo_post.dart';
 import '../video_capabilities.dart';
 import '../video_embed_info.dart';
 import '../video_playback_source.dart';
@@ -15,46 +16,7 @@ class TwitterStatusInfo {
   const TwitterStatusInfo({required this.username, required this.statusId});
 }
 
-class TwitterPhoto {
-  final Uri url;
-  final int? width;
-  final int? height;
-
-  const TwitterPhoto({required this.url, this.width, this.height});
-
-  double? get aspectRatio {
-    final w = width;
-    final h = height;
-    if (w == null || h == null || h <= 0) return null;
-    return w / h;
-  }
-}
-
-/// A status as its own client shows it: author line, text and photos. Used to
-/// build preview cards that don't fall back to the scraped og: card.
-class TwitterPost {
-  final String text;
-  final String? authorName;
-  final String? authorHandle;
-  final List<TwitterPhoto> photos;
-
-  const TwitterPost({
-    required this.text,
-    this.authorName,
-    this.authorHandle,
-    this.photos = const [],
-  });
-
-  /// "Censored Men (@CensoredMen)", or whichever half the status carried.
-  String? get title {
-    final handle = authorHandle;
-    final name = authorName;
-    if (name == null) return handle != null ? '@$handle' : null;
-    return handle != null ? '$name (@$handle)' : name;
-  }
-}
-
-class TwitterProvider implements VideoProvider {
+class TwitterProvider implements VideoProvider, PhotoPostProvider {
   TwitterProvider({http.Client? httpClient}) : _defaultHttpClient = httpClient;
 
   final http.Client? _defaultHttpClient;
@@ -163,7 +125,8 @@ class TwitterProvider implements VideoProvider {
 
   /// The status as posted (author, text, every photo), for previewing image
   /// posts, which [resolve] rejects. Null when the status cannot be fetched.
-  Future<TwitterPost?> resolvePost(Uri uri, {http.Client? client}) async {
+  @override
+  Future<PhotoPost?> resolvePost(Uri uri, {http.Client? client}) async {
     final info = extractStatusInfo(uri);
     if (info == null) return null;
 
@@ -174,21 +137,31 @@ class TwitterProvider implements VideoProvider {
     final media = tweet['media'] as Map<String, dynamic>?;
     final photos = media?['photos'] as List<dynamic>? ?? const [];
 
-    return TwitterPost(
+    return PhotoPost(
+      title: _authorLine(
+          author?['name'] as String?, author?['screen_name'] as String?),
       text: tweet['text'] as String? ?? '',
-      authorName: author?['name'] as String?,
-      authorHandle: author?['screen_name'] as String?,
       photos: [
         for (final photo in photos)
           if (photo is Map<String, dynamic>)
             if (Uri.tryParse(photo['url'] as String? ?? '') case final url?)
-              TwitterPhoto(
-                url: url,
-                width: (photo['width'] as num?)?.toInt(),
-                height: (photo['height'] as num?)?.toInt(),
+              PostPhoto(
+                url,
+                aspectRatio: _aspectRatio(photo['width'], photo['height']),
               ),
       ],
     );
+  }
+
+  /// "Censored Men (@CensoredMen)", or whichever half the status carried.
+  static String? _authorLine(String? name, String? handle) {
+    if (name == null) return handle != null ? '@$handle' : null;
+    return handle != null ? '$name (@$handle)' : name;
+  }
+
+  static double? _aspectRatio(Object? width, Object? height) {
+    if (width is! num || height is! num || height <= 0) return null;
+    return width / height;
   }
 
   Future<Map<String, dynamic>?> _fetchTweet(

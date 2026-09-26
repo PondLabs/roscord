@@ -3,7 +3,7 @@ import 'package:commet/client/attachment.dart';
 import 'package:commet/client/components/url_preview/direct_image_link.dart';
 import 'package:commet/client/components/url_preview/url_preview_component.dart';
 import 'package:commet/client/components/video_embed/composite_video_provider.dart';
-import 'package:commet/client/components/video_embed/providers/twitter_provider.dart';
+import 'package:commet/client/components/video_embed/photo_post.dart';
 import 'package:commet/client/components/video_embed/video_embed_info.dart';
 import 'package:commet/client/matrix/matrix_client.dart';
 import 'package:commet/client/matrix/matrix_mxc_image_provider.dart';
@@ -237,10 +237,11 @@ class MatrixUrlPreviewComponent implements UrlPreviewComponent<MatrixClient> {
     if (CompositeVideoProvider.instance.canHandle(url)) {
       try {
         videoEmbedInfo = await CompositeVideoProvider.instance.resolve(url);
-        // A provider knowing the link doesn't make it a video: an X post may
-        // be text or photos only, and then it previews as a page. Prefer the
-        // status' own author/text over the scraped og: card, which appends a
-        // pic.twitter.com link and loses the author handle.
+        // A provider knowing the link doesn't make it a video: an X or
+        // Instagram post may be text or photos only, and then it previews as
+        // a page. Prefer the post's own author/text over the scraped og:
+        // card, which for X appends a pic.twitter.com link and loses the
+        // author handle.
         if (videoEmbedInfo == null) {
           final post = await _resolvePost(url);
           if (post != null) {
@@ -354,13 +355,15 @@ class MatrixUrlPreviewComponent implements UrlPreviewComponent<MatrixClient> {
     return null;
   }
 
-  Future<TwitterPost?> _resolvePost(Uri uri) async {
+  Future<PhotoPost?> _resolvePost(Uri uri) async {
     final provider = CompositeVideoProvider.instance.findProvider(uri);
-    if (provider is! TwitterProvider) return null;
-    return provider.resolvePost(uri);
+    if (provider case final PhotoPostProvider posts) {
+      return posts.resolvePost(uri);
+    }
+    return null;
   }
 
-  List<UrlPreviewImage> _toPreviewImages(List<TwitterPhoto> photos) {
+  List<UrlPreviewImage> _toPreviewImages(List<PostPhoto> photos) {
     return [
       for (final photo in photos)
         UrlPreviewImage(

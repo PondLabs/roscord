@@ -582,10 +582,12 @@ class _UrlPreviewWidgetState extends State<UrlPreviewWidget> {
 
   /// X's layout: 2 photos side by side, 3 as one large photo next to two
   /// stacked ones, 4 as a 2x2. Cells are cropped squares; each opens in the
-  /// lightbox on tap, like multi-image room messages.
+  /// lightbox on tap, like multi-image room messages. The lightbox pages
+  /// through every photo, including those an Instagram carousel has past
+  /// the fourth.
   Widget _buildPhotoGrid() {
     final photos = widget.data!.images.take(4).toList();
-    final gallery = [for (final photo in photos) photo.image];
+    final gallery = [for (final photo in widget.data!.images) photo.image];
 
     return LayoutBuilder(builder: (context, constraints) {
       const gap = _photoGridGap;

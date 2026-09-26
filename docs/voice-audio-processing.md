@@ -164,7 +164,7 @@ application except ours on Linux) and hands every packet to
 feeder's 160 ms pre-buffer (`commet_system_audio_reference.h`,
 `LoopbackCapturer::SetRawTap`).
 
-Two properties of that WebRTC matter here, both found by the native loop:
+Three properties of that WebRTC matter here, all found by the native loop:
 
 - The hook runs inside the APM's capture processing, which WebRTC skips
   while every sender of a peer connection is muted (`capture_output_used`,
@@ -174,6 +174,21 @@ Two properties of that WebRTC matter here, both found by the native loop:
   `optional: [{sourceId}]` and records from its device 0 for anything else,
   and resolves track ids among local tracks first (a received track that
   shares a local track's id is looked up as the local one).
+- WebRTC stops recording altogether while every sender is muted and starts
+  again on the unmute (`MuteStream` in stop-on-mute mode, the default of
+  the audio device module libwebrtc creates). The audio device module keeps
+  the microphone as a position in the device list and looks that position
+  up again each time it starts, so a device that appeared or went away
+  during a mute (a webcam, a headset, a virtual device) moved it onto
+  another microphone, usually a silent one. The call went on sending
+  silence: no speaking indicator, no noise suppression warning (the DSP
+  still got frames), nothing a mute and unmute fixed, until the user left
+  the call. On Windows the app's own device-change handler did not catch
+  it: WebRTC only reports a device changing state, not one added or
+  removed, and the handler only acts on a picked device. The vendored
+  flutter-webrtc now remembers the selected microphone by id and selects it
+  again, by id, before a local audio track is enabled
+  (`ReselectRecordingDevice`, a `// COMMET` change).
 
 Web: `getUserMedia` (browser AEC on, NS off, AGC on) →
 `MediaStreamAudioSourceNode` → **`commet-dsp` AudioWorklet ⇄
@@ -493,6 +508,7 @@ tools/voice_dsp/native_noise_loop.sh
 | Inside the real WebRTC (Linux): the microphone test on the picked device, "Hear myself" off, noise ≥ 20 dB down in what is encoded, DeepFilterNet suppressing by the end (measured 2026-09-25: 61 dB) | `native_noise_loop.sh` | integration-test |
 | Screen audio and DJ music do not leave the microphone without WebRTC's processing: restored after negotiation, not for the mic itself, not while muted, desktop only | `shared_audio_processing_test.dart` | ci `test` |
 | ... and inside the real WebRTC, with the DJ's music track: restored to within 3 dB of before (the libwebrtc internal it relies on still holds) | `native_noise_loop.sh` | integration-test |
+| After a mute during which a device listed before the microphone went away, the microphone is heard again, within 3 dB of before (`ReselectRecordingDevice`) | `native_noise_loop.sh` | integration-test |
 
 `publish` in ci.yml waits for `voice-dsp`: a release does not go out with
 browser suppression broken. The Rust and Dart tests run in `test`, which
