@@ -1,5 +1,6 @@
 import 'package:commet/cache/file_provider.dart';
 import 'package:commet/client/attachment.dart';
+import 'package:commet/client/components/url_preview/direct_image_link.dart';
 import 'package:commet/client/components/url_preview/url_preview_component.dart';
 import 'package:commet/client/components/video_embed/composite_video_provider.dart';
 import 'package:commet/client/components/video_embed/providers/twitter_provider.dart';
@@ -37,14 +38,6 @@ class MatrixUrlPreviewComponent implements UrlPreviewComponent<MatrixClient> {
 
     final room = timeline.room;
 
-    if (room.isE2EE && preferences.urlPreviewInE2EEChat.value == false) {
-      Log.i(
-          "Not getting url preview because chat is encrypted and its not enabled");
-      return null;
-    }
-
-    var mxClient = (room as MatrixRoom).matrixRoom.client;
-
     var uri = event.getLinks(timeline: timeline)!.first;
 
     if (cache.containsKey(uri.toString())) {
@@ -53,12 +46,17 @@ class MatrixUrlPreviewComponent implements UrlPreviewComponent<MatrixClient> {
 
     UrlPreviewData? data;
 
-    if (serverSupportsUrlPreview != false) {
+    if (DirectImageLink.matches(uri)) {
+      data = DirectImageLink.preview(uri);
+    } else if (shouldGetPreviewsInRoom(room)) {
       try {
-        data = await fetchPreviewData(mxClient, uri);
+        data =
+            await fetchPreviewData((room as MatrixRoom).matrixRoom.client, uri);
       } catch (_) {
         data = null;
       }
+    } else {
+      Log.i("Not asking the homeserver for a url preview in this chat");
     }
 
     data ??= await _fallbackVideoEmbed(uri);
@@ -117,8 +115,11 @@ class MatrixUrlPreviewComponent implements UrlPreviewComponent<MatrixClient> {
     if (links?.isNotEmpty != true) return false;
 
     if (!shouldGetPreviewsInRoom(room)) {
-      // Allow fallback if client can directly handle the video link
-      return links!.any(CompositeVideoProvider.instance.canHandle);
+      // Allow fallback if client can directly handle the link. getPreview
+      // only previews the first one.
+      final link = links!.first;
+      return DirectImageLink.matches(link) ||
+          CompositeVideoProvider.instance.canHandle(link);
     }
 
     return true;
