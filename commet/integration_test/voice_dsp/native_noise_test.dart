@@ -38,6 +38,8 @@ const _captureOverrides = String.fromEnvironment('NS_LOOP_CAPTURE');
 const _out = String.fromEnvironment('NS_LOOP_OUT');
 const _roomNoise = String.fromEnvironment('NS_LOOP_ROOM_NOISE');
 const _monitor = bool.fromEnvironment('NS_LOOP_MONITOR');
+// The PulseAudio module of a capture device listed before the microphone.
+const _deviceBefore = String.fromEnvironment('NS_LOOP_DEVICE_BEFORE');
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -260,6 +262,107 @@ void main() {
               'restoreMicrophoneProcessing: $summary. libwebrtc no longer '
               'reapplies a sender\'s options when its track is re-enabled; '
               'see shared_audio_processing.dart');
+    });
+  });
+
+  // Desktop WebRTC stops recording while every sender is muted, and starts
+  // again on the unmute. Its audio device module keeps the microphone as a
+  // position in the device list and looks that position up again when it
+  // starts, so a device that went away during the mute (a webcam, a headset,
+  // a virtual device) left it recording the next device on the list:
+  // silence, for as long as the call lasted. The loop lists a device before
+  // the microphone and a silent one after it, and removes the first one
+  // while muted.
+  testWidgets(
+      'a microphone is heard again after the device list changed '
+      'while it was muted', (tester) async {
+    expect(_deviceBefore, isNotEmpty,
+        reason: 'run tools/voice_dsp/native_noise_loop.sh');
+
+    await tester.runAsync(() async {
+      await preferences.init();
+      await preferences.voipNoiseSuppression.set(true);
+      await preferences.voipInputSensitivityAuto.set(true);
+      await preferences.voipFarEndDucking.set(false);
+      await preferences.voipSpeakerBleed.set(false);
+      await preferences.voipDefaultAudioInput.set(_mic);
+      await preferences.voipDefaultAudioOutput.set(_out);
+
+      final dsp =
+          AudioProcessingManager.instance as NativeAudioProcessingManager;
+      await WebrtcDefaultDevices.selectOutputDevice();
+      expect(await dsp.startMicTest(), isTrue);
+      await dsp.setMicTestMonitor(false);
+      // ignore: invalid_use_of_visible_for_testing_member
+      final mic = dsp.debugMicTestMicrophone!;
+
+      final started = DateTime.now();
+      double now() => DateTime.now().difference(started).inMilliseconds / 1000;
+      final samples = <({double t, double energy, double duration})>[];
+      var sampling = true;
+      final sampler = () async {
+        double? lastE, lastD;
+        while (sampling) {
+          // ignore: invalid_use_of_visible_for_testing_member
+          for (final r in await dsp.debugMicTestStats()) {
+            final v = r.values;
+            if (r.type != 'media-source' || v['trackIdentifier'] != mic.id) {
+              continue;
+            }
+            final e = (v['totalAudioEnergy'] as num?)?.toDouble();
+            final d = (v['totalSamplesDuration'] as num?)?.toDouble();
+            if (e != null && d != null && lastE != null && d > lastD!) {
+              samples.add((t: now(), energy: e - lastE, duration: d - lastD));
+            }
+            lastE = e;
+            lastD = d;
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        }
+      }();
+
+      Future<double> speak() async {
+        final from = now();
+        final play =
+            await Process.run('paplay', ['--device=$_micSink', _fixture]);
+        expect(play.exitCode, 0, reason: '${play.stderr}');
+        // A real PulseAudio hands the fixture over up to 1.5 s late.
+        await Future<void>.delayed(const Duration(milliseconds: 1500));
+        var e = 0.0, d = 0.0;
+        for (final s in samples.where((s) => s.t >= from)) {
+          e += s.energy;
+          d += s.duration;
+        }
+        return d > 0
+            ? 10 * math.log(e / d) / math.ln10
+            : double.negativeInfinity;
+      }
+
+      await Future<void>.delayed(const Duration(seconds: 1));
+      final before = await speak();
+
+      mic.enabled = false;
+      await Future<void>.delayed(const Duration(seconds: 1));
+      final removed =
+          await Process.run('pactl', ['unload-module', _deviceBefore]);
+      expect(removed.exitCode, 0, reason: '${removed.stderr}');
+      await Future<void>.delayed(const Duration(seconds: 1));
+      mic.enabled = true;
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+
+      final after = await speak();
+      sampling = false;
+      await sampler;
+      await dsp.stopMicTest();
+
+      final summary = 'sent ${before.toStringAsFixed(1)} dB before the mute, '
+          '${after.toStringAsFixed(1)} dB after it';
+      // ignore: avoid_print
+      print('device list changed while muted: $summary');
+      expect(after, closeTo(before, 3),
+          reason: 'the microphone was not heard after the mute: $summary. '
+              'WebRTC started recording from another device; see '
+              'ReselectRecordingDevice in the vendored flutter-webrtc');
     });
   });
 }

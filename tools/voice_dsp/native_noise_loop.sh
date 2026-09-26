@@ -35,6 +35,13 @@ trap cleanup EXIT
 
 (cd "$repo" && cargo run -q -p audio_dsp --release --example noisy_speech -- "$fixtures")
 
+# A capture device listed before the microphone, which the last test removes
+# while the microphone is muted (and a silent one after it, below).
+modules+=("$(pactl load-module module-null-sink sink_name="${tag}_before_feed" \
+  sink_properties=device.description="${tag}BeforeFeed")")
+device_before=$(pactl load-module module-remap-source source_name="${tag}_before" \
+  master="${tag}_before_feed.monitor" source_properties=device.description="${tag}Before")
+modules+=("$device_before")
 modules+=("$(pactl load-module module-null-sink sink_name="${tag}_feed" \
   sink_properties=device.description="${tag}Feed")")
 modules+=("$(pactl load-module module-remap-source source_name="${tag}_mic" \
@@ -42,6 +49,8 @@ modules+=("$(pactl load-module module-remap-source source_name="${tag}_mic" \
 # Where the app plays, so nothing comes out of the user's speakers.
 modules+=("$(pactl load-module module-null-sink sink_name="${tag}_out" \
   sink_properties=device.description="${tag}Out")")
+modules+=("$(pactl load-module module-remap-source source_name="${tag}_after" \
+  master="${tag}_out.monitor" source_properties=device.description="${tag}After")")
 
 mkdir -p "$work/data" "$work/config" "$work/cache" "$work/results"
 volume() { pactl get-source-volume "${tag}_mic" | head -n1 | sed 's/^Volume: //'; }
@@ -58,7 +67,8 @@ status=0
     --dart-define=NS_LOOP_RESULTS="$work/results" \
     --dart-define=NS_LOOP_CAPTURE="${NS_LOOP_CAPTURE:-}" \
     --dart-define=NS_LOOP_OUT="${tag}Out" \
-    --dart-define=NS_LOOP_MONITOR="${NS_LOOP_MONITOR:-false}"
+    --dart-define=NS_LOOP_MONITOR="${NS_LOOP_MONITOR:-false}" \
+    --dart-define=NS_LOOP_DEVICE_BEFORE="$device_before"
 ) || status=$?
 
 echo "microphone volume after: $(volume)"
