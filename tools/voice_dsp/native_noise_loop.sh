@@ -12,11 +12,12 @@
 #
 #   tools/voice_dsp/native_noise_loop.sh
 #
-# Needs a PulseAudio server (PipeWire's does), pactl and paplay, a
-# display for the app window, and what `flutter test -d linux` needs. The
-# app runs with its data directories in a temporary directory, so the
-# user's own preferences are not touched. FLUTTER overrides the flutter
-# binary.
+# Needs a PulseAudio server (PipeWire's does; a real PulseAudio, like CI's,
+# delivers the fixture about a second late, which the measure lines up),
+# pactl and paplay, a display for the app window, and what
+# `flutter test -d linux` needs. The app runs with its data directories in
+# a temporary directory, so the user's own preferences are not touched.
+# FLUTTER overrides the flutter binary.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)

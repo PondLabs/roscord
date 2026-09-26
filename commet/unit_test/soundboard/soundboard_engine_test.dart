@@ -80,17 +80,72 @@ void main() {
       engine.localTrigger(soundId: 'risada', senderId: '@a:x', eventId: 'e2');
       expect(engine.active.values.map((a) => a.soundId), ['airhorn', 'risada']);
       expect(player.started, ['airhorn', 'risada']);
+      expect(player.stopped, isEmpty);
     });
 
-    test('same sound clicked twice plays two overlapping instances', () {
+    test('same sound clicked twice by one user restarts it', () {
       final player = FakePlayer();
       final engine = SoundboardEngine(player: player);
       engine.localTrigger(soundId: 'airhorn', senderId: '@a:x', eventId: 'e1');
       engine.localTrigger(soundId: 'airhorn', senderId: '@a:x', eventId: 'e2');
-      expect(player.stopped, isEmpty);
+      expect(player.stopped, ['e1']);
       expect(player.started, ['airhorn', 'airhorn']);
-      expect(player.playing, {'e1', 'e2'});
-      expect(engine.active.keys, ['e1', 'e2']);
+      expect(player.playing, {'e2'});
+      expect(engine.active.keys, ['e2']);
+    });
+
+    test('re-clicking restarts only your own copy, not another user\'s',
+        () async {
+      var now = 1000;
+      final player = FakePlayer();
+      final engine = SoundboardEngine(player: player, nowMs: () => now);
+      engine.localTrigger(soundId: 'airhorn', senderId: '@me:x', eventId: 'e1');
+      now += 300;
+      await engine.onRemoteEvent(
+        SoundboardEvent(
+            soundId: 'airhorn',
+            senderId: '@bob:x',
+            eventId: 'e2',
+            timestampMs: now),
+        authenticatedSenderId: '@bob:x',
+      );
+      now += 300;
+      engine.localTrigger(soundId: 'airhorn', senderId: '@me:x', eventId: 'e3');
+      expect(player.stopped, ['e1']);
+      expect(player.playing, {'e2', 'e3'});
+      expect(engine.active.keys, ['e2', 'e3']);
+      expect(engine.active['e2']!.senderId, '@bob:x');
+      expect(engine.active['e3']!.startedAtMs, now);
+    });
+
+    test('a remote user re-triggering their sound restarts it for listeners',
+        () async {
+      var now = 1000;
+      final player = FakePlayer();
+      final engine = SoundboardEngine(player: player, nowMs: () => now);
+      SoundboardEvent play(String eventId) => SoundboardEvent(
+          soundId: 'airhorn',
+          senderId: '@mallory:x', // spoofed hint
+          eventId: eventId,
+          timestampMs: now);
+      await engine.onRemoteEvent(play('e1'), authenticatedSenderId: '@bob:x');
+      await engine.onRemoteEvent(play('e2'), authenticatedSenderId: '@carol:x');
+      now += 300;
+      await engine.onRemoteEvent(play('e3'), authenticatedSenderId: '@bob:x');
+      expect(player.stopped, ['e1']);
+      expect(player.playing, {'e2', 'e3'});
+      expect(engine.active['e2']!.senderId, '@carol:x');
+      expect(engine.active['e3']!.senderId, '@bob:x');
+    });
+
+    test('clicking a sound again after it ended just plays it', () {
+      final player = FakePlayer();
+      final engine = SoundboardEngine(player: player);
+      engine.localTrigger(soundId: 'airhorn', senderId: '@a:x', eventId: 'e1');
+      engine.onAudioCompleted('e1');
+      engine.localTrigger(soundId: 'airhorn', senderId: '@a:x', eventId: 'e2');
+      expect(player.stopped, isEmpty);
+      expect(engine.active.keys, ['e2']);
     });
 
     test('same sound from Bob overlaps Alice\'s instead of cutting it off',
@@ -143,8 +198,7 @@ void main() {
       final player = FakePlayer();
       final engine = SoundboardEngine(player: player);
       for (var i = 1; i <= 9; i++) {
-        engine.localTrigger(
-            soundId: 'airhorn', senderId: '@a:x', eventId: 'e$i');
+        engine.localTrigger(soundId: 's$i', senderId: '@a:x', eventId: 'e$i');
       }
       expect(player.stopped, ['e1']);
       expect(engine.active.length, 8);
@@ -184,7 +238,7 @@ void main() {
       final engine = SoundboardEngine(player: player);
       engine.setVolume(0.0);
       engine.localTrigger(soundId: 'airhorn', senderId: '@a:x', eventId: 'e1');
-      engine.localTrigger(soundId: 'airhorn', senderId: '@a:x', eventId: 'e2');
+      engine.localTrigger(soundId: 'risada', senderId: '@a:x', eventId: 'e2');
       expect(player.volumes, {'e1': 0.0, 'e2': 0.0});
       engine.setVolume(0.5);
       expect(player.volumes, {'e1': 0.5, 'e2': 0.5});

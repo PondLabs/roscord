@@ -92,6 +92,16 @@ jobs:
           cargo build -p audio_dsp
           cargo run -q -p audio_dsp --example noisy_speech -- target/voice-fixtures
 
+      # The soundboard playback-end test plays through media_kit's real
+      # player on mpv's null audio output
+      # (commet/unit_test/soundboard/mediakit_playback_end_test.dart); without
+      # libmpv it fails rather than skips in CI.
+      - name: Install libmpv
+        if: steps.find.outputs.dart == 'true'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y libmpv2
+
       - name: Dart unit tests
         if: steps.find.outputs.dart == 'true'
         working-directory: commet
