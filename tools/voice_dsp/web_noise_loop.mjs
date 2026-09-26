@@ -4,20 +4,21 @@
 //
 // Chrome plays a fixture (speech over room noise, from
 // `cargo run -p audio_dsp --example noisy_speech`) as its fake microphone.
-// A test page runs the web root's own audio_dsp.js, audio_dsp.worklet.js and
-// audio_dsp.wasm through `commetAudioDsp.create()`, the way the app's
+// A test page runs the web root's own audio_dsp.js, audio_dsp.worklet.js,
+// audio_dsp.worker.js and audio_dsp.wasm through `commetAudioDsp.create()`,
+// the way the app's
 // CommetWebTrackProcessor does, and records the level of the raw microphone
 // and of the processed track (what LiveKit publishes) every 10 ms. The
 // levels are lined up against the fixture's labels and compared.
 //
 //   node tools/voice_dsp/web_noise_loop.mjs [--web-root commet/web]
 //        [--fixture-dir target/voice-fixtures] [--chrome google-chrome-stable]
-//        [--scenario dsp,off,toggle,nowasm,badwasm,noworklet]
+//        [--scenario dsp,off,toggle,nowasm,badwasm,noworklet,noworker]
 //   node tools/voice_dsp/web_noise_loop.mjs --app commet/build/web_noise_loop
 //        [--scenario app,app-nowasm]
 //
-// --web-root is where audio_dsp.js, audio_dsp.worklet.js and audio_dsp.wasm
-// are served from: commet/web after scripts/prepare-web.sh, or
+// --web-root is where audio_dsp.js, audio_dsp.worklet.js, audio_dsp.worker.js
+// and audio_dsp.wasm are served from: commet/web after scripts/prepare-web.sh, or
 // commet/build/web to check what a web build ships. Exits non-zero when a
 // scenario does not come out as expected, and says why.
 //
@@ -33,6 +34,7 @@
 //           hand back a graph that passes audio through
 //   badwasm audio_dsp.wasm is not WebAssembly: the same
 //   noworklet audio_dsp.worklet.js answers 404: the same
+//   noworker audio_dsp.worker.js answers 404: the same
 //
 // --app serves a web build of commet/integration_test/voice_dsp/
 // web_noise_main.dart instead: the app's own Dart makes the microphone the
@@ -72,7 +74,7 @@ const appRoot = arg("app", null) && resolve(repo, arg("app", null));
 const webRoot = appRoot ?? resolve(repo, arg("web-root", "commet/web"));
 const fixtureDir = resolve(repo, arg("fixture-dir", "target/voice-fixtures"));
 const chrome = arg("chrome", process.env.CHROME || "google-chrome-stable");
-const scenarios = arg("scenario", appRoot ? "app,app-nowasm" : "dsp,off,toggle,nowasm,badwasm,noworklet").split(",");
+const scenarios = arg("scenario", appRoot ? "app,app-nowasm" : "dsp,off,toggle,nowasm,badwasm,noworklet,noworker").split(",");
 
 const MIME = {
   ".js": "text/javascript",
@@ -95,12 +97,13 @@ function serve({ broken }) {
     let file;
     if (path.startsWith("/__harness/")) file = join(here, "harness", path.slice("/__harness/".length));
     else if (!appRoot && path === "/index.html") file = join(here, "harness/index.html");
-    else if (appRoot || ["/audio_dsp.js", "/audio_dsp.worklet.js", "/audio_dsp.wasm"].includes(path)) {
+    else if (appRoot || ["/audio_dsp.js", "/audio_dsp.worklet.js", "/audio_dsp.worker.js", "/audio_dsp.wasm"].includes(path)) {
       file = join(webRoot, path.slice(1));
       if (!file.startsWith(webRoot)) file = null;
     }
     if (path === "/audio_dsp.wasm" && broken === "nowasm") file = null;
     if (path === "/audio_dsp.worklet.js" && broken === "noworklet") file = null;
+    if (path === "/audio_dsp.worker.js" && broken === "noworker") file = null;
     if (path === "/audio_dsp.wasm" && broken === "badwasm") {
       res.writeHead(200, { "content-type": "application/wasm" });
       res.end(Buffer.from("this is not WebAssembly"));
@@ -202,7 +205,7 @@ async function runInChrome(url, wav, drive) {
 
 async function scenario(name, fixture) {
   const seconds = (fixture.blocks.length * BLOCK) / RATE + 1;
-  const broken = ["nowasm", "badwasm", "noworklet"].includes(name);
+  const broken = ["nowasm", "badwasm", "noworklet", "noworker"].includes(name);
   const server = await serve({ broken: broken ? name : null });
   try {
     const url = `http://127.0.0.1:${server.address().port}/?scenario=${broken ? "dsp" : name}&seconds=${seconds}`;
@@ -227,11 +230,17 @@ async function scenario(name, fixture) {
           const lastReport = r.reports[r.reports.length - 1];
           summary.frames = lastReport?.frames;
           summary.nsActive = lastReport ? (lastReport.flags & 2) !== 0 : undefined;
+          // RNNoise instead is fine when the worker found DeepFilterNet too
+          // slow on this machine (it says so on the console), and a failure
+          // otherwise: the model did not load.
+          summary.deepFilter = lastReport ? (lastReport.flags & 64) !== 0 : undefined;
+          const tooSlow = r.logs.some((l) => l.includes("DeepFilterNet took"));
           if (name === "off") {
             if (summary.noiseDropDb > OFF_MAX_NOISE_DROP_DB) problems.push(`noise dropped ${summary.noiseDropDb} dB with everything off`);
           } else {
             problems.push(...suppressionProblems(summary));
             if (!summary.nsActive) problems.push("the DSP does not report noise suppression active");
+            if (!summary.deepFilter && !tooSlow) problems.push("RNNoise suppressed alone: DeepFilterNet did not load in the worker");
           }
         }
       }
@@ -321,7 +330,7 @@ async function appScenario(name, fixture) {
   }
 }
 
-for (const f of ["audio_dsp.js", "audio_dsp.worklet.js", "audio_dsp.wasm", ...(appRoot ? ["index.html", "main.dart.js"] : [])]) {
+for (const f of ["audio_dsp.js", "audio_dsp.worklet.js", "audio_dsp.worker.js", "audio_dsp.wasm", ...(appRoot ? ["index.html", "main.dart.js"] : [])]) {
   if (!existsSync(join(webRoot, f))) {
     console.error(`${join(webRoot, f)} is missing${f.endsWith(".wasm") ? " (commet/scripts/prepare-web.sh builds it)" : ""}`);
     process.exit(1);
@@ -334,8 +343,8 @@ let failed = false;
 for (const r of results) {
   console.log(`${r.ok ? "PASS" : "FAIL"} ${r.name} ${JSON.stringify(r.summary)}`);
   for (const p of r.problems) console.log(`     ${p}`);
-  if (!r.ok) {
-    failed = true;
+  if (!r.ok || process.env.VOICE_LOOP_LOGS) {
+    failed ||= !r.ok;
     for (const l of r.logs) console.log(`     console ${l}`);
   }
 }

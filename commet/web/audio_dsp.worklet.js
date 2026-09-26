@@ -1,165 +1,156 @@
 // Commet voice DSP AudioWorklet.
 //
-// Runs rust/audio_dsp (compiled to audio_dsp.wasm) on the audio rendering
-// thread. Input 0 is the local microphone, input 1 is the mix of remote
-// participants (used only to measure far-end level for ducking). Output 0 is
-// the processed microphone, mono.
+// Input 0 is the local microphone, input 1 is the mix of remote
+// participants (the DSP only takes its level, for ducking and loudspeaker
+// bleed). Output 0 is the processed microphone, mono.
 //
-// The wasm module is handed over as bytes in processorOptions because
-// worklets cannot fetch. Until it is instantiated the node passes audio
-// through untouched.
+// The DSP itself runs in audio_dsp.worker.js: DeepFilterNet is too heavy
+// for the audio rendering thread (see the worker). This node gathers the
+// microphone into 10 ms blocks, sends each one to the worker as soon as its
+// last sample is in, and plays the blocks that come back DELAY samples
+// behind the input. A block that is late is played late: the gap is
+// silence and the delay grows by it, up to MAX_QUEUED blocks.
+//
+// The page hands over the worker's port ({type: "worker", port}). Until the
+// worker says the DSP runs, the node passes the microphone through
+// untouched, and then tells the page {type: "ready"}.
 
-// Mirrors rust/audio_dsp/src/ffi.rs, like audio_dsp.js does.
-const ABI_VERSION = 2;
-const PARAMS_SIZE = 24;
-const REPORT_SIZE = 28;
-const REPORT_EVERY_QUANTA = 38; // 38 * 128 / 48000 = ~100 ms
-const I16_SCALE = 32768;
+const BLOCK = 480;
+// One block to gather it, one for the round trip through the worker.
+const DELAY = 2 * BLOCK;
+// A worker that stalled and then caught up leaves blocks queued; beyond
+// this many the oldest are dropped, so the delay does not stay long.
+const MAX_QUEUED = 4;
+// Buffers going back and forth; more are made if the worker holds on to
+// these.
+const POOL = 8;
 
 class CommetDspProcessor extends AudioWorkletProcessor {
-  constructor(options) {
+  constructor() {
     super();
-    const opts = (options && options.processorOptions) || {};
-    this.params = opts.params || {};
-    this.ready = false;
+    this.worker = null;
+    this.running = false;
     this.destroyed = false;
-    this.quanta = 0;
-    this.exports = null;
+    this.pool = [];
+    for (let i = 0; i < POOL; i++) this.pool.push(new ArrayBuffer(2 * BLOCK * 4));
+    // The block being gathered: microphone in [0, BLOCK), far end after.
+    this.gather = null;
+    this.gathered = 0;
+    this.far = false;
+    // Processed blocks waiting to be played, and how far into the first.
+    this.queue = [];
+    this.head = 0;
+    // Silence still to play before the first block.
+    this.silence = 0;
 
     this.port.onmessage = (e) => {
       const msg = e.data || {};
-      if (msg.type === "params") {
-        this.params = msg.params || {};
-        this.applyParams();
+      if (msg.type === "worker" && msg.port) {
+        this.worker = msg.port;
+        this.worker.onmessage = (m) => this.fromWorker(m.data || {});
       } else if (msg.type === "destroy") {
-        this.teardown();
+        this.destroyed = true;
+        this.running = false;
       }
     };
-
-    if (!opts.wasm) {
-      this.port.postMessage({ type: "error", message: "no wasm bytes" });
-      return;
-    }
-
-    WebAssembly.instantiate(opts.wasm, {})
-      .then(({ instance }) => {
-        if (this.destroyed) return;
-        const ex = instance.exports;
-        const abi = ex.commet_dsp_abi_version();
-        if (abi !== ABI_VERSION) {
-          this.port.postMessage({ type: "error", message: "audio_dsp ABI " + abi + " unsupported" });
-          return;
-        }
-        if (ex.commet_dsp_params_size() !== PARAMS_SIZE || ex.commet_dsp_report_size() !== REPORT_SIZE) {
-          this.port.postMessage({ type: "error", message: "audio_dsp struct size mismatch" });
-          return;
-        }
-        this.exports = ex;
-        this.handle = ex.commet_dsp_create(0);
-        this.micBuf = ex.commet_dsp_alloc_f32(4096);
-        this.farBuf = ex.commet_dsp_alloc_f32(4096);
-        this.paramsPtr = ex.commet_dsp_params_alloc();
-        this.reportPtr = ex.commet_dsp_report_alloc();
-        this.applyParams();
-        this.ready = true;
-        this.port.postMessage({ type: "ready", sampleRate: sampleRate });
-      })
-      .catch((err) => {
-        this.port.postMessage({ type: "error", message: String(err) });
-      });
   }
 
-  applyParams() {
-    if (!this.exports) return;
-    const p = this.params;
-    const view = new DataView(this.exports.memory.buffer, this.paramsPtr, PARAMS_SIZE);
-    view.setUint8(0, p.noiseSuppression ? 1 : 0);
-    view.setUint8(1, p.gateMode | 0);
-    view.setUint8(2, p.farEndDucking ? 1 : 0);
-    // Only WebRTC playout is visible to a browser, so this acts on the
-    // remote participants coming back out of the speakers, not on anything
-    // else playing on the machine.
-    view.setUint8(3, p.speakerBleed ? 1 : 0);
-    view.setFloat32(4, I16_SCALE, true);
-    view.setFloat32(8, num(p.gateThresholdDb, -50), true);
-    view.setFloat32(12, num(p.gateFloorDb, -40), true);
-    view.setFloat32(16, num(p.duckDepthDb, -20), true);
-    view.setFloat32(20, num(p.duckFarThresholdDb, -45), true);
-    this.exports.commet_dsp_set_params(this.handle, this.paramsPtr);
-  }
-
-  teardown() {
-    this.destroyed = true;
-    this.ready = false;
-    const ex = this.exports;
-    if (!ex) return;
-    this.exports = null;
-    try {
-      ex.commet_dsp_destroy(this.handle);
-      ex.commet_dsp_free_f32(this.micBuf, 4096);
-      ex.commet_dsp_free_f32(this.farBuf, 4096);
-      ex.commet_dsp_params_free(this.paramsPtr);
-      ex.commet_dsp_report_free(this.reportPtr);
-    } catch (e) {
-      // nothing useful to do on the audio thread
+  fromWorker(msg) {
+    if (msg.buf instanceof ArrayBuffer) {
+      if (!this.running) {
+        this.pool.push(msg.buf);
+        return;
+      }
+      this.queue.push(new Float32Array(msg.buf, 0, BLOCK));
+      while (this.queue.length > MAX_QUEUED) {
+        this.pool.push(this.queue.shift().buffer);
+        this.head = 0;
+      }
+    } else if (msg.type === "ready" && !this.running && !this.destroyed) {
+      this.running = true;
+      this.silence = DELAY;
+      this.port.postMessage({ type: "ready", sampleRate: sampleRate });
     }
   }
 
-  postReport() {
-    const ex = this.exports;
-    ex.commet_dsp_get_report(this.handle, this.reportPtr);
-    const v = new DataView(ex.memory.buffer, this.reportPtr, REPORT_SIZE);
-    this.port.postMessage({
-      type: "report",
-      report: {
-        levelDb: v.getFloat32(0, true),
-        vad: v.getFloat32(4, true),
-        farLevelDb: v.getFloat32(8, true),
-        gainDb: v.getFloat32(12, true),
-        sampleRate: v.getInt32(16, true),
-        frames: v.getUint32(20, true),
-        flags: v.getUint32(24, true),
-      },
-    });
+  // Adds a quantum of [n] samples to the blocks going to the worker; a
+  // missing input counts as silence.
+  send(mic, far, n) {
+    let i = 0;
+    while (i < n) {
+      if (!this.gather) {
+        this.gather = new Float32Array(this.pool.pop() || new ArrayBuffer(2 * BLOCK * 4));
+        this.gathered = 0;
+        this.far = false;
+      }
+      const take = Math.min(BLOCK - this.gathered, n - i);
+      const at = this.gathered;
+      if (mic) this.gather.set(mic.subarray(i, i + take), at);
+      else this.gather.fill(0, at, at + take);
+      if (far) {
+        this.gather.set(far.subarray(i, i + take), BLOCK + at);
+        this.far = true;
+      } else {
+        this.gather.fill(0, BLOCK + at, BLOCK + at + take);
+      }
+      this.gathered += take;
+      i += take;
+      if (this.gathered === BLOCK) {
+        const buf = this.gather.buffer;
+        this.gather = null;
+        this.worker.postMessage({ buf: buf, far: this.far }, [buf]);
+      }
+    }
+  }
+
+  // Fills [out] from the processed blocks.
+  play(out) {
+    const n = out.length;
+    let k = 0;
+    while (k < n) {
+      if (this.silence > 0) {
+        const t = Math.min(this.silence, n - k);
+        out.fill(0, k, k + t);
+        this.silence -= t;
+        k += t;
+        continue;
+      }
+      const front = this.queue[0];
+      if (!front) {
+        // The worker is late: this is silence, and the delay grows by it.
+        out.fill(0, k, n);
+        return;
+      }
+      const t = Math.min(BLOCK - this.head, n - k);
+      out.set(front.subarray(this.head, this.head + t), k);
+      this.head += t;
+      k += t;
+      if (this.head === BLOCK) {
+        this.pool.push(this.queue.shift().buffer);
+        this.head = 0;
+      }
+    }
   }
 
   process(inputs, outputs) {
     if (this.destroyed) return false;
-    const mic = inputs[0] && inputs[0][0];
     const out = outputs[0];
-    if (!mic || !out || out.length === 0) return true;
-    const n = mic.length;
+    if (!out || out.length === 0) return true;
+    const mic = inputs[0] && inputs[0][0];
 
-    if (!this.ready) {
-      for (let c = 0; c < out.length; c++) out[c].set(mic);
+    if (!this.running) {
+      for (let c = 0; c < out.length; c++) {
+        if (mic) out[c].set(mic);
+        else out[c].fill(0);
+      }
       return true;
     }
 
-    const ex = this.exports;
-
-    const far = inputs[1] && inputs[1][0];
-    if (far && far.length > 0) {
-      const farView = new Float32Array(ex.memory.buffer, this.farBuf, far.length);
-      farView.set(far);
-      ex.commet_dsp_feed_render(this.handle, this.farBuf, far.length);
-    }
-
-    let micView = new Float32Array(ex.memory.buffer, this.micBuf, n);
-    micView.set(mic);
-    ex.commet_dsp_process_stream(this.handle, this.micBuf, n);
-    // memory.buffer may have been replaced if the module grew memory.
-    micView = new Float32Array(ex.memory.buffer, this.micBuf, n);
-    for (let c = 0; c < out.length; c++) out[c].set(micView);
-
-    if (++this.quanta % REPORT_EVERY_QUANTA === 0) {
-      this.postReport();
-    }
+    this.send(mic, inputs[1] && inputs[1][0], out[0].length);
+    this.play(out[0]);
+    for (let c = 1; c < out.length; c++) out[c].set(out[0]);
     return true;
   }
-}
-
-function num(v, fallback) {
-  return typeof v === "number" && isFinite(v) ? v : fallback;
 }
 
 registerProcessor("commet-dsp", CommetDspProcessor);

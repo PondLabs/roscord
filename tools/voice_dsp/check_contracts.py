@@ -23,10 +23,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 LK = "third_party/livekit-client-sdk-flutter"
 FW = "third_party/flutter-webrtc"
+DF = "third_party/deep_filter"
 
 # `// COMMET` markers must never go down: a merge that loses one loses a
 # change. Raise these when you add markers.
-MARKER_FLOOR = {LK: 60, FW: 23}
+MARKER_FLOOR = {LK: 60, FW: 23, DF: 13}
 
 # Local changes noise suppression depends on, each as (file, pattern, why).
 MUST_CONTAIN = [
@@ -76,8 +77,18 @@ MUST_CONTAIN = [
      r"microphone\.enabled = false;\s*microphone\.enabled = true;",
      "restoreMicrophoneProcessing re-enables the microphone so its sender "
      "writes its options back"),
+    ("rust/audio_dsp/Cargo.toml", r'^deep_filter = \{ path = "\.\./\.\./third_party/deep_filter" \}',
+     "the DSP suppresses noise with DeepFilterNet, which takes knocks and typing out"),
+    ("rust/audio_dsp/src/ffi.rs", r"Dsp::with_model\(p, ModelLoad::Background\)",
+     "the app's DSP builds DeepFilterNet's model off the UI thread"),
+    (f"{DF}/src/lib.rs", r"getrandom::register_custom_getrandom!",
+     "audio_dsp.wasm builds without wasm-bindgen imports, which the worker cannot give it"),
+    ("Cargo.toml", r'^\[profile\.dev\.package\."\*"\]\nopt-level = 3',
+     "DeepFilterNet keeps up in real time in debug builds of the app"),
     ("commet/web/index.html", r'<script src="audio_dsp\.js"></script>',
      "the web app loads the DSP glue"),
+    ("commet/web/audio_dsp.js", r"new Worker\(WORKER_URL\)",
+     "the web DSP runs in audio_dsp.worker.js, off the audio thread"),
     ("commet/scripts/prepare-web.sh", r"^\./scripts/build-audio-dsp-wasm\.sh$",
      "prepare-web.sh builds audio_dsp.wasm"),
     ("commet/scripts/build-audio-dsp-wasm.sh", r"cargo build -p audio_dsp --release --target wasm32-unknown-unknown",
@@ -98,7 +109,7 @@ def check_markers(problems):
     for package, floor in MARKER_FLOOR.items():
         count = 0
         for path in (REPO / package).rglob("*"):
-            if path.is_file() and path.suffix in {".dart", ".cc", ".cpp", ".h", ".txt", ".podspec", ".kt", ".java", ".m", ".mm", ".yaml"}:
+            if path.is_file() and path.suffix in {".dart", ".cc", ".cpp", ".h", ".txt", ".podspec", ".kt", ".java", ".m", ".mm", ".yaml", ".rs", ".toml"}:
                 count += path.read_text(encoding="utf-8", errors="replace").count("COMMET")
         if count < floor:
             problems.append(
@@ -134,22 +145,26 @@ def rust_exports():
 
 def check_symbols(problems):
     exports = rust_exports()
-    users = {
-        "commet/lib/client/components/voip/audio_processing/audio_processing_manager_native.dart": r"'(commet_dsp_\w+)'",
-        "commet/web/audio_dsp.worklet.js": r"\.(commet_dsp_\w+)\(",
-        "commet/web/audio_dsp.js": r'"(commet_dsp_\w+)"',
-    }
-    for rel, pattern in users.items():
+    worker = "commet/web/audio_dsp.worker.js"
+    users = [
+        ("commet/lib/client/components/voip/audio_processing/audio_processing_manager_native.dart", r"'(commet_dsp_\w+)'"),
+        (worker, r"\.(commet_dsp_\w+)\("),
+        (worker, r'"(commet_dsp_\w+)"'),
+    ]
+    for rel, pattern in users:
         names = set(re.findall(pattern, read(rel) or ""))
         if not names:
             problems.append(f"{rel}: found no commet_dsp_* symbols to check")
         for name in sorted(names - exports):
             problems.append(f"{rel} uses {name}, which rust/audio_dsp/src/ffi.rs does not export")
-    # The glue's probe has to vouch for every export the worklet calls.
-    worklet = set(re.findall(r"\.(commet_dsp_\w+)\(", read("commet/web/audio_dsp.worklet.js") or ""))
-    probed = set(re.findall(r'"(commet_dsp_\w+)"', read("commet/web/audio_dsp.js") or ""))
-    for name in sorted(worklet - probed):
-        problems.append(f"commet/web/audio_dsp.js: probe() does not check {name}, which the worklet calls")
+    # The probe has to vouch for every export the worker calls.
+    called = set(re.findall(r"\.(commet_dsp_\w+)\(", read(worker) or ""))
+    probed = set(re.findall(r'"(commet_dsp_\w+)"', read(worker) or ""))
+    for name in sorted(called - probed):
+        problems.append(f"{worker}: EXPORTS, which probe() checks, does not list {name}, which it calls")
+    for rel in ["commet/web/audio_dsp.worklet.js", "commet/web/audio_dsp.js"]:
+        for name in sorted(set(re.findall(r"(commet_dsp_\w+)", read(rel) or ""))):
+            problems.append(f"{rel} calls {name}: the wasm runs in {worker}, nowhere else")
 
 
 def check_abi(problems):
@@ -164,12 +179,7 @@ def check_abi(problems):
         "commet/lib/client/components/voip/audio_processing/audio_processing_manager_native.dart": [
             (r"static const expectedAbi = (\d+);", abi, "ABI"),
         ],
-        "commet/web/audio_dsp.js": [
-            (r"const ABI_VERSION = (\d+);", abi, "ABI"),
-            (r"const PARAMS_SIZE = (\d+);", params, "Params size"),
-            (r"const REPORT_SIZE = (\d+);", report, "Report size"),
-        ],
-        "commet/web/audio_dsp.worklet.js": [
+        "commet/web/audio_dsp.worker.js": [
             (r"const ABI_VERSION = (\d+);", abi, "ABI"),
             (r"const PARAMS_SIZE = (\d+);", params, "Params size"),
             (r"const REPORT_SIZE = (\d+);", report, "Report size"),
@@ -221,15 +231,41 @@ def check_overrides(problems):
                             f"{path}, so the vendored changes are not in the app")
 
 
+def wasm_import_count(data):
+    """Entries in a WebAssembly module's import section."""
+    def leb(pos):
+        value = shift = 0
+        while True:
+            byte = data[pos]
+            pos += 1
+            value |= (byte & 0x7F) << shift
+            shift += 7
+            if byte < 0x80:
+                return value, pos
+    pos = 8
+    while pos < len(data):
+        section = data[pos]
+        size, body = leb(pos + 1)
+        if section == 2:
+            return leb(body)[0]
+        pos = body + size
+    return 0
+
+
 def check_web_build(problems, build):
-    for name in ["audio_dsp.js", "audio_dsp.worklet.js", "audio_dsp.wasm", "index.html"]:
+    for name in ["audio_dsp.js", "audio_dsp.worklet.js", "audio_dsp.worker.js", "audio_dsp.wasm", "index.html"]:
         path = build / name
         if not path.is_file() or path.stat().st_size == 0:
             problems.append(f"{path}: missing from the web build (audio_dsp.wasm comes from "
                             "commet/scripts/prepare-web.sh)")
     wasm = build / "audio_dsp.wasm"
-    if wasm.is_file() and wasm.read_bytes()[:4] != b"\0asm":
-        problems.append(f"{wasm} is not WebAssembly")
+    if wasm.is_file():
+        data = wasm.read_bytes()
+        if data[:4] != b"\0asm":
+            problems.append(f"{wasm} is not WebAssembly")
+        elif wasm_import_count(data):
+            problems.append(f"{wasm} imports {wasm_import_count(data)} function(s): audio_dsp.worker.js "
+                            "instantiates it with none (a dependency pulled in wasm-bindgen?)")
     index = build / "index.html"
     if index.is_file() and 'src="audio_dsp.js"' not in index.read_text(encoding="utf-8", errors="replace"):
         problems.append(f"{index} does not load audio_dsp.js")

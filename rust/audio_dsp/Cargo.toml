@@ -11,6 +11,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 nnnoiseless = { version = "0.5", default-features = false }
+# DeepFilterNet3, vendored and trimmed (see third_party/README.md).
+deep_filter = { path = "../../third_party/deep_filter" }
 
 [profile.release]
 opt-level = 3

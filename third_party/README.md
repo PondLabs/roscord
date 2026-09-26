@@ -10,6 +10,7 @@ back to their origin; we change them here.
 | `tray_manager` | https://pub.dev/packages/tray_manager | `0.5.3` (2026-09) |
 | `flutter_web_auth_2` | https://github.com/ThexXTURBOXx/flutter_web_auth_2 (tag `v4.1.0`) | `4.1.0` (2026) + cutover: `desktop_webview_window` dependency and `lib/src/webview.dart` deleted, `linows.dart` always uses the external-browser loopback server |
 | `flutter_inappwebview_windows_stub` | purpose-built cutover stub (no upstream) | `0.0.0-cutover.1`: keeps the `flutter_inappwebview_windows` plugin name with a no-op native registration; links no WebView2 |
+| `deep_filter` | https://github.com/Rikorose/DeepFilterNet (`libDF/`, `models/DeepFilterNet3_onnx.tar.gz`, MIT or Apache-2.0) | `d375b2d8309e0935d165700c91da9de862a99c31` (2024-10-17), trimmed to the real-time inference |
 
 `example/`, `test/`, `testfiles/`, `.github/` and git metadata were dropped
 from the copies. Local changes are marked with `// COMMET:` comments in Dart
@@ -51,8 +52,20 @@ microphone was restarted to change one option. `LocalTrack.restartTrack`
 which drops it (upstream reads it after, so every restart lost it), and
 puts it on before touching the sender, so the raw capture never goes out.
 
+`deep_filter` is libDF, DeepFilterNet's Rust library, which the voice DSP
+(`rust/audio_dsp/src/dfn.rs`) suppresses noise with; crates.io only has an
+old version without the inference. Only `src/lib.rs`, `src/tract.rs`, the
+DeepFilterNet3 model and the licences were copied, and the manifest keeps
+just what the inference needs. `// COMMET` changes: the dataset, transforms,
+C API, wasm-bindgen and CLI modules dropped; tract 0.21.13 instead of
+0.21.4, for its wasm SIMD kernels (a symbol table rename in three places)
+and its own ndarray, re-exported as `df::tract::ndarray`; `DEFAULT_MODEL`,
+the model's bytes, so a load error is not a panic; the model's path; and on
+wasm a getrandom backend that refuses, since tract-onnx's random operators
+pull getrandom in and the worker instantiates the wasm without imports.
+
 `tools/voice_dsp/check_contracts.py` fails CI when the `// COMMET` count of
-either package goes down or a change noise suppression needs goes missing:
+any of these packages goes down or a change noise suppression needs goes missing:
 raise its floor when you add markers.
 
 Two upstream flutter-webrtc behaviours on desktop that bit us (see

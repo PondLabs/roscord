@@ -1,4 +1,4 @@
-//! Rebuilds the speech fixtures in `testdata/` from the recordings that
+//! Rebuilds the fixtures in `testdata/` from the recordings that
 //! `testdata/fetch_sources.sh` downloads. The fixtures are committed, so this
 //! only has to run when they change.
 //!
@@ -23,6 +23,29 @@ const TARGET_DBFS: f32 = -20.0;
 /// Below this, relative to the utterance peak, the head and tail of a
 /// recording is treated as silence and cut.
 const TRIM_BELOW_DB: f32 = -45.0;
+/// The part of the knuckles recording that is knocking and nothing else,
+/// with the pauses between phrases in it.
+const KNUCKLES_FROM_S: f32 = 22.0;
+const KNUCKLES_TO_S: f32 = 28.0;
+/// Knocks are all peak: their loudest sample goes here, 1 dB under full
+/// scale, and the tests scale from it.
+const KNUCKLES_PEAK: f32 = 29_000.0;
+/// The background noises (tests/background_noise.rs): which seconds of each
+/// source. Three seconds of the kind of noise and nothing else; the tests
+/// repeat them.
+const BACKGROUNDS: [(&str, f32, f32); 11] = [
+    ("applause", 0.2, 3.2),
+    ("hand_claps", 10.0, 13.0),
+    ("keyboard_mechanical", 1.0, 4.0),
+    ("keyboard_desktop", 2.0, 5.0),
+    ("mouse_click", 0.0, 0.76),
+    ("pen_on_paper", 2.0, 5.0),
+    ("crowd_talking", 30.0, 33.0),
+    ("restaurant", 20.0, 23.0),
+    ("piano", 0.0, 3.0),
+    ("electronic_beat", 0.0, 3.0),
+    ("pop_song", 40.0, 43.0),
+];
 
 fn main() {
     let testdata = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata");
@@ -55,6 +78,47 @@ fn main() {
             path.display(),
             joined.len() as f32 / RATE as f32,
             rms_dbfs(&joined)
+        );
+    }
+
+    let path = sources.join("knuckles_on_table_16k.wav");
+    let (rate, samples) = read_wav_pcm16(&std::fs::read(&path).unwrap_or_else(|e| {
+        panic!("{}: {e}", path.display());
+    }));
+    assert_eq!(rate, RATE, "{}", path.display());
+    let from = (KNUCKLES_FROM_S * RATE as f32) as usize;
+    let to = (KNUCKLES_TO_S * RATE as f32) as usize;
+    let mut knuckles = samples[from..to].to_vec();
+    let peak = knuckles.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    for s in knuckles.iter_mut() {
+        *s *= KNUCKLES_PEAK / peak;
+    }
+    let path = testdata.join("knuckles_on_table_16k.wav");
+    std::fs::write(&path, write_wav_pcm16(RATE, &knuckles)).unwrap();
+    println!(
+        "{}: {:.1} s, {:.1} dBFS RMS",
+        path.display(),
+        knuckles.len() as f32 / RATE as f32,
+        rms_dbfs(&knuckles)
+    );
+
+    for (name, from_s, to_s) in BACKGROUNDS {
+        let path = sources.join(format!("{name}_16k.wav"));
+        let (rate, samples) = read_wav_pcm16(&std::fs::read(&path).unwrap_or_else(|e| {
+            panic!("{}: {e}", path.display());
+        }));
+        assert_eq!(rate, RATE, "{}", path.display());
+        let from = (from_s * RATE as f32) as usize;
+        let to = ((to_s * RATE as f32) as usize).min(samples.len());
+        let mut cut = samples[from..to].to_vec();
+        normalise(&mut cut, TARGET_DBFS);
+        let path = testdata.join(format!("background_{name}_16k.wav"));
+        std::fs::write(&path, write_wav_pcm16(RATE, &cut)).unwrap();
+        println!(
+            "{}: {:.1} s, {:.1} dBFS RMS",
+            path.display(),
+            cut.len() as f32 / RATE as f32,
+            rms_dbfs(&cut)
         );
     }
 }

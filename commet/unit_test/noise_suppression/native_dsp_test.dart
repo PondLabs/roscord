@@ -96,6 +96,30 @@ void main() {
         reason: '$m');
   }, skip: voiceDspSkip);
 
+  // The app creates the DSP on the UI thread, so DeepFilterNet's model is
+  // built on a thread of its own and RNNoise suppresses meanwhile. The
+  // model has to arrive, take over, and take the noise out itself.
+  test('DeepFilterNet takes over from RNNoise and suppresses', () async {
+    await manager.onSessionStarted(_Session('call'));
+    plugin.initialize(48000);
+    final block = Float32List.sublistView(fixture.samples, 0, 480);
+
+    send(block);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    expect(manager.lastReport?.noiseSuppressionActive, isTrue);
+    for (var i = 0; manager.lastReport?.deepFilterActive != true; i++) {
+      if (i == 500) fail('DeepFilterNet did not take over in 5 s');
+      send(block);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+
+    final m = measure(fixture.samples, send(fixture.samples), fixture.labels);
+    expect(manager.lastReport?.deepFilterActive, isTrue);
+    expect(m.noiseDropDb, greaterThanOrEqualTo(minNoiseDropDb), reason: '$m');
+    expect(m.speechChangeDb, greaterThanOrEqualTo(-maxSpeechLossDb),
+        reason: '$m');
+  }, skip: voiceDspSkip);
+
   // The loop can tell: with suppression and the automatic gate off, the
   // noise has to come through. The preference change also has to reach the
   // DSP that is already running, in both directions.
