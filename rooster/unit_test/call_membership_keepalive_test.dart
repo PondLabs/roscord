@@ -354,7 +354,8 @@ void main() {
     };
   }
 
-  /// Joins, then waits for the heartbeat the join starts.
+  /// Joins, then lets the initial heartbeat and state debounce settle before
+  /// tests advance the simulated membership clocks by minutes or hours.
   Future<MatrixLivekitVoipSession> join() async {
     final joinedSession = MatrixLivekitVoipSession(room, livekit,
         // ignore: invalid_use_of_visible_for_testing_member
@@ -364,6 +365,7 @@ void main() {
     session = joinedSession;
     // ignore: invalid_use_of_visible_for_testing_member
     await joinedSession.debugHeartbeat();
+    await Future<void>.delayed(const Duration(seconds: 1));
     return joinedSession;
   }
 
@@ -380,6 +382,20 @@ void main() {
       MatrixCallMembership.expiresAt(written, serverTime);
 
   group('on a homeserver without delayed events', () {
+    test('joining without a microphone publishes the initial mute', () async {
+      joined(serverTime);
+      (livekit.localParticipant! as _LocalParticipant).publications.clear();
+      final call = await join();
+
+      expect(call.isMicrophoneMuted, isTrue);
+      // No track event or user toggle follows a denied microphone.
+      expect(homeserver.membershipWrites, isNotEmpty,
+          reason: 'people outside the call must see the initial mute');
+      final write = homeserver.membershipWrites.single;
+      expect(MatrixCallMembership.voiceStateOf(write), {VoiceState.muted});
+      expect(write[MatrixCallMembership.unguardedKey], isTrue);
+    });
+
     test('our membership is pushed out an hour after it was written', () async {
       final joinedAt = serverTime;
       joined(joinedAt);

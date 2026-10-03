@@ -3,7 +3,10 @@ import 'dart:async';
 import 'package:collection/collection.dart';
 import 'package:rooster/client/client.dart';
 import 'package:rooster/client/components/profile/profile_component.dart';
+import 'package:rooster/client/components/voip/audio_processing/audio_processing_manager.dart';
+import 'package:rooster/client/components/voip/audio_processing/audio_processing_manager_stub.dart';
 import 'package:rooster/client/components/voip/voip_session.dart';
+import 'package:rooster/client/matrix/components/voip_room/matrix_call_membership.dart';
 import 'package:rooster/client/matrix/components/voip_room/matrix_livekit_voip_session.dart';
 import 'package:rooster/client/matrix/matrix_room.dart';
 import 'package:livekit_client/livekit_client.dart' as lk;
@@ -160,6 +163,12 @@ class _LocalParticipant implements lk.LocalParticipant {
   @override
   final Map<String, lk.LocalTrackPublication> trackPublications = {};
 
+  @override
+  Future<void> publishData(List<int> data,
+      {bool? reliable,
+      List<String>? destinationIdentities,
+      String? topic}) async {}
+
   /// Where removals are announced, so they reach the session the same way they
   /// do in production.
   _Listener? listener;
@@ -284,6 +293,9 @@ class _Room implements lk.Room {
   _Room(this.localParticipant);
 
   @override
+  lk.ConnectionState get connectionState => lk.ConnectionState.connected;
+
+  @override
   final lk.LocalParticipant? localParticipant;
 
   @override
@@ -325,6 +337,8 @@ class _MatrixSdkRoom implements matrix.Room {
 }
 
 class _MatrixSdkClient implements matrix.Client {
+  void Function(Map<String, Object?>)? onMembershipWrite;
+
   @override
   final String? deviceID = 'DEVICE';
 
@@ -346,8 +360,10 @@ class _MatrixSdkClient implements matrix.Client {
     String eventType,
     String stateKey,
     Map<String, Object?> body,
-  ) async =>
-      '';
+  ) async {
+    onMembershipWrite?.call(body);
+    return '';
+  }
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -457,6 +473,11 @@ void main() {
   /// does not stop the capture.
   void simulateFullReconnect() => participant.trackPublications.clear();
 
+  setUpAll(() {
+    // ignore: invalid_use_of_visible_for_testing_member
+    AudioProcessingManager.debugInstance = UnsupportedAudioProcessingManager();
+  });
+
   setUp(() {
     capture = _Capture();
     audioCapture = _Capture();
@@ -478,6 +499,58 @@ void main() {
     await session.stopScreenshare();
 
     expect(capture.running, isFalse);
+  });
+
+  test('stopping during reconnect clears LIVE for people outside the call',
+      () async {
+    final sdkRoom = session.room.matrixRoom;
+    final homeserver = sdkRoom.client as _MatrixSdkClient;
+    const stateKey = '_@me:example.org_DEVICE_m.call';
+    sdkRoom.states['org.matrix.msc3401.call.member'] = <String, matrix.Event>{
+      stateKey: matrix.Event(
+        type: 'org.matrix.msc3401.call.member',
+        content: {
+          'application': 'm.call',
+          'call_id': '',
+          'device_id': 'DEVICE',
+          'expires': MatrixCallMembership.lifetime.inMilliseconds,
+          'scope': 'm.room',
+          MatrixCallMembership.liveMediaKey: <String>[],
+        },
+        senderId: '@me:example.org',
+        stateKey: stateKey,
+        eventId: r'$join',
+        originServerTs: DateTime.now(),
+        room: sdkRoom,
+      ),
+    };
+    final live = Completer<void>();
+    final stopped = Completer<Map<String, Object?>>();
+    homeserver.onMembershipWrite = (content) {
+      final media = content[MatrixCallMembership.liveMediaKey];
+      if (media is! List) return;
+      if (media.contains('screen') && !live.isCompleted) {
+        live.complete();
+      } else if (media.isEmpty && live.isCompleted && !stopped.isCompleted) {
+        stopped.complete(content);
+      }
+    };
+
+    try {
+      await shareScreen();
+      await live.future.timeout(const Duration(seconds: 3));
+
+      // LiveKit has no publication left to remove or announce as unpublished.
+      simulateFullReconnect();
+      await session.stopScreenshare();
+
+      expect(capture.running, isFalse);
+      expect(session.isSharingScreen, isFalse);
+      final write = await stopped.future.timeout(const Duration(seconds: 3));
+      expect(write[MatrixCallMembership.liveMediaKey], isEmpty);
+    } finally {
+      await session.hangUpCall();
+    }
   });
 
   test(

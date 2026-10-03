@@ -71,6 +71,8 @@ window ends; the list shows a person once either way.
 | 9 | The sidebar asked for the member (name, avatar) of the people listed when the row was built only. Anyone who turned up later showed as their user id. | Everyone listed is asked for once, whenever they turn up (`RoomTextButton.fetchNewMembers`). |
 | 10 | A heartbeat waited for its restart of the delayed leave for as long as the HTTP client did, 35 s, and the heartbeats after it waited for that one. A restart lost to a dropped connection (a network blip, a Wi-Fi roam) therefore outlived the delayed leave's 30 s: it fired, and the member dropped out of the list of everyone outside the call while still talking, until a later heartbeat put the membership back, a minute or more on. | A restart is given up on after 8 s (`MatrixLivekitVoipSession.restartTimeout`), before the next heartbeat is due, and that one restarts it in time. |
 | 11 | Streams, voice state and the DJ were only written with the delayed leave armed. On a homeserver without delayed events nobody outside the call saw who was live, on camera, muted or deafened in it: the badges only showed once inside, from LiveKit. | Written either way, marked `chat.commet.unguarded` without a delayed leave, and dropped by readers 90 minutes after the last write (`_publishMembershipState`, `MatrixCallMembership.publishedStateIsStale`). |
+| 12 | A denied or unavailable microphone produces no publication or mute event. Without delayed events, nothing published its initial muted state, so people outside the call saw it as unmuted. | Publish the session's initial state after registering its listeners and DJ booth, even if no track event follows. |
+| 13 | A full reconnect clears LiveKit's publication map while screen capture continues. Stopping then emits no unpublish event, leaving LIVE advertised after the capture stops. | Publish the state after `stopScreenshare` verifies that the capture and its publications have stopped. |
 
 ## What the tests guard
 
@@ -84,6 +86,7 @@ window ends; the list shows a person once either way.
 | A rewrite waits its turn, is covered by a write going out anyway, is retried when it fails, and does nothing once stopped | `unit_test/call_membership_publisher_test.dart` |
 | A mute is published without delayed events, marked unguarded, and guarded with them; unguarded badges show while they are kept written, go 90 minutes after the last write with no event, and their owner stays listed | `unit_test/call_membership_keepalive_test.dart`, `unit_test/voice_channel_member_list_test.dart` ("Badges of a member without a delayed leave"), `unit_test/matrix_call_membership_test.dart` |
 | Badges show in the sidebar row and on the channel's page before joining; a full channel lists seven and opens the rest from "and N more", whoever is live among the seven | `unit_test/voice_channel_sidebar_row_test.dart`, `unit_test/voice_channel_page_badges_test.dart` |
+| Joining without a microphone advertises muted even without delayed events or a track event; stopping a screen share during a full reconnect clears LIVE from the membership people outside the call read | `unit_test/call_membership_keepalive_test.dart`, `unit_test/screen_share_stop_test.dart` |
 
 Reverting any one of these fixes turns at least one of these tests red
 (checked by hand on 2026-09-30, twenty-two mutations).

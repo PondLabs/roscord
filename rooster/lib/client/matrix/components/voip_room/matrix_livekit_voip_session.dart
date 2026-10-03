@@ -200,6 +200,10 @@ class MatrixLivekitVoipSession
     _dj = DjBooths.open(this, livekitRoom)
       ..addListener(_publishMembershipState);
 
+    // A denied microphone never publishes a track or emits a mute event.
+    // People outside the call must still see its initial muted state.
+    _publishMembershipState();
+
     startHeartbeat().catchError((Object e, StackTrace s) {
       Log.onError(e, s, content: "Could not start the membership heartbeat");
     });
@@ -1573,6 +1577,9 @@ class MatrixLivekitVoipSession
     _stateChanged.add(());
 
     _verifyScreenshareStopped();
+    // A full reconnect can leave no publication to emit an unpublish event.
+    // Publish the verified stop so people outside the call lose the LIVE badge.
+    _publishMembershipState();
   }
 
   /// Removes every screen-share publication whose capture this session has
